@@ -1,0 +1,40 @@
+:root {
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  background: #f8fafc;
+  color: #1a1f2e;
+}
+
+* { box-sizing: border-box; }
+
+/* Inputs inherit font and don't zoom on iOS */
+input, select, textarea, button {
+  font-family: inherit;
+  font-size: 16px;
+}
+
+/* Tap-friendly buttons on touch devices */
+@media (hover: none) and (pointer: coarse) {
+  button { min-height: 44px; }
+}
+
+/* Tables scroll horizontally on small screens instead of breaking the layout */
+@media (max-width: 768px) {
+  table { display: block; overflow-x: auto; white-space: nowrap; }
+}
+
+/* Print: hide app chrome */
+@media print {
+  body { background: white; }
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pulse { 50% { opacity: 0.4; } }

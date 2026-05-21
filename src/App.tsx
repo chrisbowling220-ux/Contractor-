@@ -58,13 +58,14 @@ const TILES: Tile[] = [
   { key: 'customers',     label: 'Customers',     icon: '👥', blurb: 'Client directory' },
 ]
 
-const NAV_ITEMS = TILES // sidebar shows the same set as the dashboard tiles
+const NAV_EXTRAS: Tile[] = [
+  { key: 'materials', label: 'Materials',  icon: '🏗️', blurb: 'Regional pricing catalog' },
+  { key: 'rentals',   label: 'Rentals',    icon: '🚜', blurb: 'Equipment rental rates' },
+]
 
 const TITLE_MAP: Record<string, string> = {
   dashboard: 'Dashboard',
-  ...Object.fromEntries(TILES.map(t => [t.key, t.label])),
-  materials: 'Materials Pricing',
-  rentals: 'Rental Equipment',
+  ...Object.fromEntries([...TILES, ...NAV_EXTRAS].map(t => [t.key, t.label])),
 }
 
 function DashboardHome({ counts, onPick }: { counts: ReturnType<typeof useDashboardCounts>; onPick: (key: string) => void }) {
@@ -181,7 +182,9 @@ function Dashboard() {
         {isMobile && <button onClick={() => setMenuOpen(false)} style={{ background: 'none', border: 'none', color: 'white', fontSize: '24px', cursor: 'pointer', lineHeight: 1 }}>×</button>}
       </div>
       {navItem('Dashboard', '🏠', 'dashboard')}
-      {NAV_ITEMS.map(t => navItem(t.label, t.icon, t.key))}
+      {TILES.map(t => navItem(t.label, t.icon, t.key))}
+      <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', margin: '8px 0' }} />
+      {NAV_EXTRAS.map(t => navItem(t.label, t.icon, t.key))}
     </div>
   )
 

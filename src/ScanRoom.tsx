@@ -5,6 +5,7 @@ import { useAuth, useUser } from '@clerk/clerk-react'
 import { db, functions } from './firebase'
 import { regionFromZip, DEFAULT_ZIP } from './data/materials'
 import { buildFallbackQuote } from './lib/fallbackQuote'
+import { toCustomerView } from './lib/customerView'
 import type { AIQuote } from './data/types'
 
 const callable = httpsCallable<
@@ -284,6 +285,9 @@ export default function ScanRoom() {
     try {
       const clerkToken = await getToken()
       if (!clerkToken) throw new Error('Not signed in')
+      // Strip markup from the customer-facing view — markup is baked into prices,
+      // no separate "markup" line is shown to the customer.
+      const customerQuote = toCustomerView(result)
       await sendEmailCallable({
         clerkToken,
         input: {
@@ -292,8 +296,8 @@ export default function ScanRoom() {
             customerName,
             jobTypeName: 'Scan Room (AI)',
             jobLocationZip: zip,
-            total: result.final_customer_quote,
-            aiQuote: result,
+            total: customerQuote.final_customer_quote,
+            aiQuote: customerQuote,
           },
         },
       })

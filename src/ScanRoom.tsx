@@ -108,11 +108,24 @@ export default function ScanRoom() {
   const [emailSent, setEmailSent] = useState(false)
   const [emailError, setEmailError] = useState('')
 
+  const [videoRecording, setVideoRecording] = useState(false)
+  const [videoProcessing, setVideoProcessing] = useState(false)
+  const [videoElapsed, setVideoElapsed] = useState(0)
+
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
   const audioStreamRef = useRef<MediaStream | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const cameraInputRef = useRef<HTMLInputElement>(null)
+  const videoRecRef = useRef<MediaRecorder | null>(null)
+  const videoAudioRecRef = useRef<MediaRecorder | null>(null)
+  const videoStreamRef = useRef<MediaStream | null>(null)
+  const videoChunksRef = useRef<Blob[]>([])
+  const videoAudioChunksRef = useRef<Blob[]>([])
+  const videoTimerRef = useRef<number | null>(null)
+  const videoElapsedRef = useRef(0)
+  const videoPreviewRef = useRef<HTMLVideoElement>(null)
+  const frameCaptureIntervalRef = useRef<number | null>(null)
 
   const { region, multiplier } = regionFromZip(zip)
   const validZip = /^[0-9]{5}$/.test(zip)
@@ -121,6 +134,11 @@ export default function ScanRoom() {
   useEffect(() => () => {
     mediaRecorderRef.current?.stop()
     audioStreamRef.current?.getTracks().forEach(t => t.stop())
+    if (videoTimerRef.current) window.clearInterval(videoTimerRef.current)
+    if (frameCaptureIntervalRef.current) window.clearInterval(frameCaptureIntervalRef.current)
+    videoRecRef.current?.stop()
+    videoAudioRecRef.current?.stop()
+    videoStreamRef.current?.getTracks().forEach(t => t.stop())
   }, [])
 
   useEffect(() => {
@@ -211,6 +229,107 @@ export default function ScanRoom() {
   }
 
   const removeImage = (i: number) => setImages(images.filter((_, idx) => idx !== i))
+
+  const stopVideoRecordingInternal = () => {
+    if (videoTimerRef.current) { window.clearInterval(videoTimerRef.current); videoTimerRef.current = null }
+    if (frameCaptureIntervalRef.current) { window.clearInterval(frameCaptureIntervalRef.current); frameCaptureIntervalRef.current = null }
+    if (videoPreviewRef.current) videoPreviewRef.current.srcObject = null
+    videoAudioRecRef.current?.stop()
+    videoRecRef.current?.stop()
+    setVideoRecording(false)
+  }
+
+  const stopVideoRecording = () => stopVideoRecordingInternal()
+
+  // Only transcribes audio — frames are already captured in real-time via the interval
+  const processVideoAudio = async (audioMime: string) => {
+    setVideoProcessing(true)
+    try {
+      if (videoAudioChunksRef.current.length > 0) {
+        const audioBlob = new Blob(videoAudioChunksRef.current, { type: audioMime })
+        if (audioBlob.size > 100) {
+          await sendAudioForTranscription(audioBlob, audioMime)
+        }
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Audio transcription failed — frames were captured successfully.')
+    } finally {
+      videoStreamRef.current?.getTracks().forEach(t => t.stop())
+      videoStreamRef.current = null
+      setVideoProcessing(false)
+    }
+  }
+
+  const startVideoRecording = async () => {
+    setError('')
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: true,
+      })
+      videoStreamRef.current = stream
+
+      // Show live preview
+      if (videoPreviewRef.current) {
+        videoPreviewRef.current.srcObject = stream
+        videoPreviewRef.current.play().catch(() => {})
+      }
+
+      // Audio-only recorder → transcription
+      const audioMime = pickRecorderMimeType()
+      const audioOnlyStream = new MediaStream(stream.getAudioTracks())
+      const audioRec = audioMime
+        ? new MediaRecorder(audioOnlyStream, { mimeType: audioMime })
+        : new MediaRecorder(audioOnlyStream)
+      videoAudioChunksRef.current = []
+      audioRec.ondataavailable = e => { if (e.data?.size > 0) videoAudioChunksRef.current.push(e.data) }
+      videoAudioRecRef.current = audioRec
+
+      // Video recorder (used only to get an onstop hook; frames come from the live canvas interval)
+      const videoMime = ['video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4']
+        .find(m => MediaRecorder.isTypeSupported(m)) || ''
+      const videoRec = videoMime ? new MediaRecorder(stream, { mimeType: videoMime }) : new MediaRecorder(stream)
+      videoChunksRef.current = []
+      videoRec.onstop = async () => {
+        await processVideoAudio(videoAudioRecRef.current?.mimeType || audioMime)
+      }
+      videoRecRef.current = videoRec
+
+      // Capture a frame from the live preview every 3 seconds (capped at 8)
+      frameCaptureIntervalRef.current = window.setInterval(() => {
+        const vid = videoPreviewRef.current
+        if (!vid || vid.readyState < 2) return
+        setImages(prev => {
+          if (prev.length >= 8) return prev
+          const c = document.createElement('canvas')
+          const cx = c.getContext('2d')
+          if (!cx) return prev
+          c.width = vid.videoWidth || 1280
+          c.height = vid.videoHeight || 720
+          cx.drawImage(vid, 0, 0, c.width, c.height)
+          const preview = c.toDataURL('image/jpeg', 0.82)
+          return [...prev, { preview, data: preview.split(',')[1] || '' }]
+        })
+      }, 3000)
+
+      audioRec.start()
+      videoRec.start()
+      setVideoRecording(true)
+      videoElapsedRef.current = 0
+      setVideoElapsed(0)
+
+      videoTimerRef.current = window.setInterval(() => {
+        videoElapsedRef.current += 1
+        setVideoElapsed(videoElapsedRef.current)
+        if (videoElapsedRef.current >= 60) {
+          stopVideoRecordingInternal()
+        }
+      }, 1000)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Camera access denied'
+      setError(`Couldn't start video: ${msg}. Make sure you've granted camera and microphone permission.`)
+    }
+  }
 
   const runAnalysis = async (transcriptOverride?: string) => {
     if (!customerName) { setError('Customer name required'); return }
@@ -404,17 +523,68 @@ export default function ScanRoom() {
       </div>
 
       <div style={card}>
-        <h3 style={{ marginBottom: '12px' }}>📸 Photos ({images.length}/8)</h3>
-        <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
-          <button onClick={() => cameraInputRef.current?.click()} disabled={images.length >= 8} style={{ background: '#0ea5e9', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
-            📷 Take Photo
-          </button>
-          <button onClick={() => fileInputRef.current?.click()} disabled={images.length >= 8} style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '10px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
-            Upload Photos
-          </button>
-          <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={e => handleFiles(e.target.files)} />
-          <input ref={fileInputRef} type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={e => handleFiles(e.target.files)} />
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '12px' }}>
+          <h3 style={{ margin: 0 }}>📸 Photos &amp; Video ({images.length}/8)</h3>
+          {images.length > 0 && !videoRecording && !videoProcessing && (
+            <button onClick={() => setImages([])} style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: '12px', cursor: 'pointer', textDecoration: 'underline' }}>Clear all</button>
+          )}
         </div>
+
+        {/* Capture buttons — hidden while video is recording */}
+        {!videoRecording && !videoProcessing && (
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
+            <button onClick={() => cameraInputRef.current?.click()} disabled={images.length >= 8} style={{ background: '#0ea5e9', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '6px', cursor: images.length >= 8 ? 'not-allowed' : 'pointer', fontWeight: 600, opacity: images.length >= 8 ? 0.5 : 1 }}>
+              📷 Take Photo
+            </button>
+            <button onClick={() => fileInputRef.current?.click()} disabled={images.length >= 8} style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '10px 16px', borderRadius: '6px', cursor: images.length >= 8 ? 'not-allowed' : 'pointer', fontWeight: 600, opacity: images.length >= 8 ? 0.5 : 1 }}>
+              Upload Photos
+            </button>
+            <button
+              onClick={startVideoRecording}
+              disabled={images.length >= 8}
+              title={images.length >= 8 ? 'Remove some photos first (max 8 total)' : 'Record a video walkthrough — a photo is captured every 3 seconds automatically'}
+              style={{ background: '#dc2626', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '6px', cursor: images.length >= 8 ? 'not-allowed' : 'pointer', fontWeight: 600, opacity: images.length >= 8 ? 0.5 : 1 }}
+            >
+              🎬 Record Video Walkthrough
+            </button>
+            <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={e => handleFiles(e.target.files)} />
+            <input ref={fileInputRef} type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={e => handleFiles(e.target.files)} />
+          </div>
+        )}
+
+        {/* Live video preview while recording */}
+        {videoRecording && (
+          <div style={{ marginBottom: '12px' }}>
+            <video
+              ref={videoPreviewRef}
+              muted
+              playsInline
+              style={{ width: '100%', maxHeight: '240px', objectFit: 'cover', borderRadius: '8px', background: '#000', display: 'block' }}
+            />
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '10px', flexWrap: 'wrap', gap: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', background: '#fef2f2', color: '#dc2626', padding: '8px 12px', borderRadius: '6px', fontWeight: 700, fontSize: '14px' }}>
+                  <span style={{ display: 'inline-block', width: '10px', height: '10px', background: '#dc2626', borderRadius: '50%', animation: 'pulse 1s ease-in-out infinite' }} />
+                  REC {Math.floor(videoElapsed / 60)}:{String(videoElapsed % 60).padStart(2, '0')} / 1:00
+                </span>
+                <span style={{ fontSize: '12px', color: '#64748b' }}>📸 {images.length} frame{images.length !== 1 ? 's' : ''} captured (every 3s, max 8)</span>
+              </div>
+              <button onClick={stopVideoRecording} style={{ background: '#1a1f2e', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
+                ■ Stop Recording
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Transcribing audio from video */}
+        {videoProcessing && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#7c3aed', fontSize: '14px', fontWeight: 600, marginBottom: '12px', padding: '12px', background: '#faf5ff', borderRadius: '8px' }}>
+            <span style={{ display: 'inline-block', width: '14px', height: '14px', border: '2px solid #c4b5fd', borderTopColor: '#7c3aed', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
+            Transcribing your narration from the video…
+          </div>
+        )}
+
+        {/* Captured frames grid */}
         {images.length > 0 && (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: '8px' }}>
             {images.map((img, i) => (
@@ -424,6 +594,9 @@ export default function ScanRoom() {
               </div>
             ))}
           </div>
+        )}
+        {!videoRecording && images.length === 0 && (
+          <p style={{ fontSize: '13px', color: '#94a3b8', textAlign: 'center', padding: '16px 0' }}>No images yet — take a photo or record a video walkthrough above.</p>
         )}
       </div>
 

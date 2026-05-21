@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { db } from './firebase'
-import { collection, addDoc, getDocs, query, orderBy, updateDoc, doc, where } from 'firebase/firestore'
+import { collection, addDoc, getDocs, query, updateDoc, doc, where } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
 import { functions } from './firebase'
 import { useUser, useAuth } from '@clerk/clerk-react'

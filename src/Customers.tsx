@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { db } from './firebase'
-import { collection, addDoc, getDocs, query, orderBy, where, updateDoc, deleteDoc, doc } from 'firebase/firestore'
+import { collection, addDoc, getDocs, query, where, updateDoc, deleteDoc, doc } from 'firebase/firestore'
 import { useUser } from '@clerk/clerk-react'
 import type { Estimate, Project } from './data/types'
 import { PROJECT_STATUS_LABEL } from './data/types'

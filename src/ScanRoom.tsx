@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { httpsCallable } from 'firebase/functions'
-import { collection, addDoc, getDocs, query, orderBy, where } from 'firebase/firestore'
+import { collection, addDoc, getDocs, query, where } from 'firebase/firestore'
 import { useAuth, useUser } from '@clerk/clerk-react'
 import { db, functions } from './firebase'
 import { regionFromZip, DEFAULT_ZIP } from './data/materials'
@@ -100,6 +100,8 @@ export default function ScanRoom() {
   const [markupBasis, setMarkupBasis] = useState<'entire_job' | 'materials_only'>('entire_job')
   const [loadingMessage, setLoadingMessage] = useState('')
   const [usedFallback, setUsedFallback] = useState(false)
+  const [refinement, setRefinement] = useState('')
+  const [showRefine, setShowRefine] = useState(false)
 
   const [customerEmail, setCustomerEmail] = useState('')
   const [emailSending, setEmailSending] = useState(false)
@@ -210,10 +212,12 @@ export default function ScanRoom() {
 
   const removeImage = (i: number) => setImages(images.filter((_, idx) => idx !== i))
 
-  const runAnalysis = async () => {
+  const runAnalysis = async (transcriptOverride?: string) => {
     if (!customerName) { setError('Customer name required'); return }
-    if (images.length === 0 && !transcript.trim()) { setError('Add at least one photo or some narration'); return }
+    const activeTranscript = transcriptOverride ?? transcript
+    if (images.length === 0 && !activeTranscript.trim()) { setError('Add at least one photo or some narration'); return }
     setAnalyzing(true); setError(''); setResult(null); setSavedId(null); setUsedFallback(false)
+    setShowRefine(false)
     setLoadingMessage('Generating your estimate…')
     const timers: number[] = []
     timers.push(window.setTimeout(() => setLoadingMessage('Still working — Claude is analyzing your photos and narration…'), 10000))
@@ -226,7 +230,7 @@ export default function ScanRoom() {
       const markupInstruction = markupBasis === 'materials_only'
         ? `CONTRACTOR OVERRIDE — Apply the markup percentage to MATERIALS ONLY (not labor). Labor is billed at cost with no markup. In price_breakdown.raw_cost include labor at cost, then markup applies only to the materials_subtotal.`
         : ''
-      const fullTranscript = [transcript.trim(), markupInstruction].filter(Boolean).join('\n\n')
+      const fullTranscript = [activeTranscript.trim(), markupInstruction].filter(Boolean).join('\n\n')
 
       const res = await callable({
         clerkToken,
@@ -252,7 +256,7 @@ export default function ScanRoom() {
         const fallback = buildFallbackQuote({
           customerName,
           jobTypeName: 'Scan Room (offline)',
-          description: transcript.trim().slice(0, 1000) || 'No narration captured',
+          description: activeTranscript.trim().slice(0, 1000) || 'No narration captured',
           jobLocationZip: zip,
           materials: [],
           rentals: [],
@@ -272,6 +276,17 @@ export default function ScanRoom() {
       setAnalyzing(false)
       setLoadingMessage('')
     }
+  }
+
+  const refineAndRegenerate = () => {
+    if (!refinement.trim()) {
+      runAnalysis()
+      return
+    }
+    const combined = [transcript.trim(), `ADDITIONAL DETAILS:\n${refinement.trim()}`].filter(Boolean).join('\n\n')
+    setTranscript(combined)
+    setRefinement('')
+    runAnalysis(combined)
   }
 
   const sendEmail = async () => {
@@ -491,7 +506,7 @@ export default function ScanRoom() {
       </div>
 
       <div style={{ display: 'flex', gap: '12px', marginBottom: '16px' }}>
-        <button onClick={runAnalysis} disabled={analyzing} style={{ background: '#7c3aed', color: 'white', border: 'none', padding: '12px 24px', borderRadius: '8px', cursor: analyzing ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '15px' }}>
+        <button onClick={() => runAnalysis()} disabled={analyzing} style={{ background: '#7c3aed', color: 'white', border: 'none', padding: '12px 24px', borderRadius: '8px', cursor: analyzing ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '15px' }}>
           {analyzing ? '🤖 Analyzing scan…' : '🤖 Generate AI Estimate'}
         </button>
       </div>
@@ -508,6 +523,60 @@ export default function ScanRoom() {
         </div>
       )}
       {error && !usedFallback && <div style={{ ...card, background: '#fef2f2', color: '#dc2626' }}>⚠ {error}</div>}
+
+      {result && !analyzing && (
+        <div style={{ ...card, background: showRefine ? '#faf5ff' : '#f8fafc', border: showRefine ? '2px solid #7c3aed' : '1px solid #e2e8f0' }}>
+          {!showRefine ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
+              <div>
+                <p style={{ fontWeight: 600, margin: 0, fontSize: '14px' }}>Need a more accurate quote?</p>
+                <p style={{ color: '#64748b', fontSize: '13px', margin: '2px 0 0' }}>Add more detail about the job — room size, specific materials, access constraints, anything the AI might have guessed.</p>
+              </div>
+              <button
+                onClick={() => setShowRefine(true)}
+                style={{ background: '#7c3aed', color: 'white', border: 'none', padding: '10px 18px', borderRadius: '8px', cursor: 'pointer', fontWeight: 600, fontSize: '13px', whiteSpace: 'nowrap' }}
+              >
+                ✏ Refine / Add Details
+              </button>
+            </div>
+          ) : (
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 700, color: '#6d28d9' }}>✏ Refine This Estimate</h3>
+                <button onClick={() => setShowRefine(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px', color: '#94a3b8', lineHeight: 1 }}>×</button>
+              </div>
+              <p style={{ fontSize: '13px', color: '#64748b', marginBottom: '10px' }}>
+                Tell the AI what it missed or got wrong. Be specific — the more detail you add, the more accurate the re-generated quote will be.
+              </p>
+              <p style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '8px' }}>
+                Examples: "bathroom is 8×10 ft with a 5 ft tub alcove" · "use 12×24 porcelain, not ceramic" · "second floor, no elevator, tight hallway" · "existing shutoffs are corroded and need replacing" · "customer wants to keep the vanity, only replace the top"
+              </p>
+              <textarea
+                value={refinement}
+                onChange={e => setRefinement(e.target.value)}
+                rows={5}
+                placeholder="Add missing details, correct anything the AI guessed wrong, or specify materials and constraints you didn't mention in the original narration…"
+                style={{ ...input, fontFamily: 'inherit', resize: 'vertical', marginBottom: '12px' }}
+                autoFocus
+              />
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <button
+                  onClick={refineAndRegenerate}
+                  style={{ background: '#7c3aed', color: 'white', border: 'none', padding: '10px 20px', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, fontSize: '14px' }}
+                >
+                  🤖 Re-generate with These Details
+                </button>
+                <button
+                  onClick={() => { setShowRefine(false); setRefinement('') }}
+                  style={{ background: 'white', border: '1px solid #e2e8f0', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', color: '#64748b' }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {result && (
         <div style={{ ...card, border: '2px dashed #7c3aed' }}>

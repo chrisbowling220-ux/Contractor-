@@ -104,3 +104,34 @@ export interface Project {
   createdAt: string
   createdBy?: string
 }
+
+export interface ChangeOrder {
+  id: string
+  projectId: string
+  customerName: string
+  jobTypeName: string
+  description: string
+  additionalAmount: number
+  newTotal: number
+  status: 'pending' | 'approved' | 'declined'
+  notes?: string
+  createdAt: string
+  createdBy?: string
+}
+
+export interface Invoice {
+  id: string
+  projectId: string
+  estimateId?: string
+  customerName: string
+  jobTypeName: string
+  invoiceType: 'deposit' | 'milestone' | 'final'
+  amount: number
+  description: string
+  dueDate?: string
+  notes?: string
+  status: 'draft' | 'sent' | 'paid' | 'overdue'
+  createdAt: string
+  createdBy?: string
+  paidAt?: string
+}

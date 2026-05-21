@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
-import { db } from './firebase'
+import { db, functions } from './firebase'
+import { httpsCallable } from 'firebase/functions'
 import { collection, addDoc, getDocs, query, orderBy, doc, updateDoc, where } from 'firebase/firestore'
 import { useAuth, useUser } from '@clerk/clerk-react'
 import { JOB_CATALOG, JOB_CATEGORIES } from './data/jobCatalog'
@@ -10,7 +11,17 @@ import { aiQuoteToScopeOfWork, generateAIQuote } from './lib/aiQuote'
 import { buildFallbackQuote } from './lib/fallbackQuote'
 import { toCustomerView } from './lib/customerView'
 
-export default function Estimates() {
+const sendEstimateEmailFn = httpsCallable<
+  { clerkToken: string; input: { to: string; fromName?: string; estimate: { customerName: string; jobTypeName: string; jobLocationZip?: string; total: number; rateType?: string; scopeOfWork?: string; aiQuote?: AIQuote } } },
+  { ok: boolean }
+>(functions, 'sendEstimateEmail')
+
+const sendEstimateSmsFn = httpsCallable<
+  { clerkToken: string; input: { to: string; estimate: { customerName: string; jobTypeName: string; jobLocationZip?: string; total: number } } },
+  { ok: boolean }
+>(functions, 'sendEstimateSms')
+
+export default function Estimates({ onNavigate }: { onNavigate?: (page: string) => void }) {
   const { user } = useUser()
   const { getToken } = useAuth()
   const [estimates, setEstimates] = useState<Estimate[]>([])
@@ -20,7 +31,19 @@ export default function Estimates() {
 
   const [customerName, setCustomerName] = useState('')
   const [customerId, setCustomerId] = useState('')
-  const [customers, setCustomers] = useState<{ id: string; name: string }[]>([])
+  const [customers, setCustomers] = useState<{ id: string; name: string; email?: string; phone?: string }[]>([])
+
+  // Notification (email / SMS) panel
+  const [notifEstimateId, setNotifEstimateId] = useState<string | null>(null)
+  const [notifChannel, setNotifChannel] = useState<'email' | 'sms'>('email')
+  const [notifAddress, setNotifAddress] = useState('')
+  const [notifSending, setNotifSending] = useState(false)
+  const [notifSent, setNotifSent] = useState<Set<string>>(new Set())
+  const [notifError, setNotifError] = useState('')
+
+  // Convert estimate → project
+  const [convertingId, setConvertingId] = useState<string | null>(null)
+  const [convertedIds, setConvertedIds] = useState<Set<string>>(new Set())
   const [jobTypeId, setJobTypeId] = useState(JOB_CATALOG[0].id)
   const [description, setDescription] = useState('')
   const [jobLocationZip, setJobLocationZip] = useState(DEFAULT_ZIP)
@@ -77,7 +100,7 @@ export default function Estimates() {
           where('createdBy', '==', user.id),
           orderBy('createdAt', 'desc'),
         ))
-        setCustomers(snap.docs.map(d => ({ id: d.id, name: (d.data().name as string) || '' })))
+        setCustomers(snap.docs.map(d => ({ id: d.id, name: (d.data().name as string) || '', email: (d.data().email as string) || '', phone: (d.data().phone as string) || '' })))
       } catch {}
     })()
   }, [user?.id])
@@ -249,6 +272,58 @@ export default function Estimates() {
   const setStatus = async (id: string, status: Estimate['status']) => {
     await updateDoc(doc(db, 'estimates', id), { status })
     setEstimates(estimates.map(e => e.id === id ? { ...e, status } : e))
+  }
+
+  const openNotif = (e: Estimate, channel: 'email' | 'sms') => {
+    const cust = customers.find(c => c.name === e.customerName)
+    setNotifChannel(channel)
+    setNotifAddress(channel === 'email' ? (cust?.email || '') : (cust?.phone || ''))
+    setNotifError('')
+    setNotifEstimateId(e.id)
+  }
+
+  const sendNotification = async (e: Estimate) => {
+    if (!notifAddress) return
+    setNotifSending(true); setNotifError('')
+    try {
+      const clerkToken = await getToken()
+      if (!clerkToken) throw new Error('Not signed in')
+      if (notifChannel === 'email') {
+        const customerQuote = e.aiQuote ? toCustomerView(e.aiQuote) : undefined
+        await sendEstimateEmailFn({ clerkToken, input: { to: notifAddress, estimate: { customerName: e.customerName, jobTypeName: e.jobTypeName, jobLocationZip: e.jobLocationZip, total: e.total, rateType: e.rateType, scopeOfWork: e.scopeOfWork, aiQuote: customerQuote } } })
+      } else {
+        await sendEstimateSmsFn({ clerkToken, input: { to: notifAddress, estimate: { customerName: e.customerName, jobTypeName: e.jobTypeName, jobLocationZip: e.jobLocationZip, total: e.total } } })
+      }
+      setNotifSent(prev => new Set([...prev, `${e.id}-${notifChannel}`]))
+      setNotifEstimateId(null); setNotifAddress('')
+    } catch (err) {
+      setNotifError(err instanceof Error ? err.message : 'Send failed — please try again.')
+    } finally {
+      setNotifSending(false)
+    }
+  }
+
+  const convertToProject = async (e: Estimate) => {
+    setConvertingId(e.id)
+    try {
+      await addDoc(collection(db, 'projects'), {
+        customerName: e.customerName,
+        ...(e.customerId ? { customerId: e.customerId } : {}),
+        jobTypeName: e.jobTypeName,
+        jobLocationZip: e.jobLocationZip || '',
+        description: e.description || '',
+        status: 'estimated',
+        notes: '',
+        createdAt: new Date().toISOString(),
+        createdBy: user?.id,
+      })
+      setConvertedIds(prev => new Set([...prev, e.id]))
+      if (e.status === 'pending') {
+        await updateDoc(doc(db, 'estimates', e.id), { status: 'approved' })
+        setEstimates(prev => prev.map(est => est.id === e.id ? { ...est, status: 'approved' } : est))
+      }
+    } catch {}
+    setConvertingId(null)
   }
 
   const printEstimate = (e: Estimate) => {
@@ -695,17 +770,72 @@ export default function Estimates() {
         {estimates.length === 0 && !showForm && <p style={{ color: '#94a3b8', textAlign: 'center', marginTop: '48px' }}>No estimates yet. Create your first one!</p>}
         {estimates.map(e => {
           const sc = statusColor(e.status)
+          const notifOpen = notifEstimateId === e.id
+          const emailSent = notifSent.has(`${e.id}-email`)
+          const smsSent = notifSent.has(`${e.id}-sms`)
+          const converted = convertedIds.has(e.id)
           return (
-            <div key={e.id} onClick={() => setSelectedId(e.id === selectedId ? null : e.id)} style={{ background: 'white', padding: '20px', borderRadius: '12px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', cursor: 'pointer', border: e.id === selectedId ? '2px solid #f97316' : '2px solid transparent' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
-                <div>
-                  <h3 style={{ fontWeight: 600, marginBottom: '4px' }}>{e.customerName}</h3>
-                  <p style={{ color: '#64748b', fontSize: '14px' }}>{e.jobTypeName} {e.jobLocationZip && `· ${e.jobLocationZip} (${e.jobLocationRegion})`}</p>
-                  <p style={{ color: '#f97316', fontWeight: 700, fontSize: '20px', marginTop: '4px' }}>${(e.total || 0).toFixed(2)}</p>
-                  <p style={{ color: '#94a3b8', fontSize: '12px', marginTop: '4px' }}>{e.rateType === 'flat' ? `Flat: $${e.flatAmount}` : `${e.estimatedHours}h × $${e.hourlyRate}/hr`}{e.materials?.length ? ` · ${e.materials.length} materials` : ''}{e.rentals?.length ? ` · ${e.rentals.length} rentals` : ''}</p>
+            <div key={e.id} style={{ background: 'white', borderRadius: '12px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', border: e.id === selectedId ? '2px solid #f97316' : '2px solid transparent', overflow: 'hidden' }}>
+              <div onClick={() => setSelectedId(e.id === selectedId ? null : e.id)} style={{ padding: '20px', cursor: 'pointer' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
+                  <div>
+                    <h3 style={{ fontWeight: 600, marginBottom: '4px' }}>{e.customerName}</h3>
+                    <p style={{ color: '#64748b', fontSize: '14px' }}>{e.jobTypeName} {e.jobLocationZip && `· ${e.jobLocationZip} (${e.jobLocationRegion})`}</p>
+                    <p style={{ color: '#f97316', fontWeight: 700, fontSize: '20px', marginTop: '4px' }}>${(e.total || 0).toFixed(2)}</p>
+                    <p style={{ color: '#94a3b8', fontSize: '12px', marginTop: '4px' }}>{e.rateType === 'flat' ? `Flat: $${e.flatAmount}` : `${e.estimatedHours}h × $${e.hourlyRate}/hr`}{e.materials?.length ? ` · ${e.materials.length} materials` : ''}{e.rentals?.length ? ` · ${e.rentals.length} rentals` : ''}</p>
+                  </div>
+                  <span style={{ background: sc.bg, color: sc.color, padding: '4px 12px', borderRadius: '999px', fontSize: '12px', fontWeight: 600, textTransform: 'capitalize' }}>{e.status}</span>
                 </div>
-                <span style={{ background: sc.bg, color: sc.color, padding: '4px 12px', borderRadius: '999px', fontSize: '12px', fontWeight: 600, textTransform: 'capitalize' }}>{e.status}</span>
               </div>
+
+              {/* Action bar */}
+              <div onClick={ev => ev.stopPropagation()} style={{ borderTop: '1px solid #f1f5f9', padding: '10px 20px', display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                {emailSent ? (
+                  <span style={{ fontSize: '12px', color: '#16a34a', fontWeight: 600 }}>✓ Email sent</span>
+                ) : (
+                  <button onClick={() => { if (notifOpen && notifChannel === 'email') { setNotifEstimateId(null) } else { openNotif(e, 'email') } }} style={{ background: notifOpen && notifChannel === 'email' ? '#0ea5e9' : '#e0f2fe', color: notifOpen && notifChannel === 'email' ? 'white' : '#0369a1', border: 'none', padding: '6px 12px', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: 600 }}>
+                    ✉ Email
+                  </button>
+                )}
+                {smsSent ? (
+                  <span style={{ fontSize: '12px', color: '#16a34a', fontWeight: 600 }}>✓ Text sent</span>
+                ) : (
+                  <button onClick={() => { if (notifOpen && notifChannel === 'sms') { setNotifEstimateId(null) } else { openNotif(e, 'sms') } }} style={{ background: notifOpen && notifChannel === 'sms' ? '#16a34a' : '#f0fdf4', color: notifOpen && notifChannel === 'sms' ? 'white' : '#15803d', border: 'none', padding: '6px 12px', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: 600 }}>
+                    💬 Text
+                  </button>
+                )}
+                {e.status !== 'declined' && (
+                  converted ? (
+                    <button onClick={() => onNavigate?.('projects')} style={{ background: '#f0fdf4', color: '#16a34a', border: 'none', padding: '6px 12px', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: 600 }}>
+                      ✓ Project created → View
+                    </button>
+                  ) : (
+                    <button onClick={() => convertToProject(e)} disabled={convertingId === e.id} style={{ background: '#fff7ed', color: '#ea580c', border: 'none', padding: '6px 12px', borderRadius: '6px', cursor: convertingId === e.id ? 'not-allowed' : 'pointer', fontSize: '12px', fontWeight: 600, marginLeft: 'auto' }}>
+                      {convertingId === e.id ? 'Creating…' : '🗂 Convert to Project'}
+                    </button>
+                  )
+                )}
+              </div>
+
+              {/* Inline notification panel */}
+              {notifOpen && (
+                <div onClick={ev => ev.stopPropagation()} style={{ borderTop: '1px solid #e2e8f0', padding: '12px 20px', background: '#f8fafc', display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: '12px', fontWeight: 600, color: '#64748b' }}>{notifChannel === 'email' ? 'Email address:' : 'Phone number:'}</span>
+                  <input
+                    type={notifChannel === 'email' ? 'email' : 'tel'}
+                    value={notifAddress}
+                    onChange={ev => setNotifAddress(ev.target.value)}
+                    placeholder={notifChannel === 'email' ? 'customer@email.com' : '555-555-5555'}
+                    style={{ padding: '6px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', width: '200px' }}
+                    autoFocus
+                  />
+                  <button onClick={() => sendNotification(e)} disabled={notifSending || !notifAddress} style={{ background: notifChannel === 'email' ? '#0ea5e9' : '#16a34a', color: 'white', border: 'none', padding: '6px 14px', borderRadius: '6px', cursor: notifSending || !notifAddress ? 'not-allowed' : 'pointer', fontSize: '12px', fontWeight: 600, opacity: !notifAddress ? 0.6 : 1 }}>
+                    {notifSending ? 'Sending…' : `Send ${notifChannel === 'email' ? 'Email' : 'Text'}`}
+                  </button>
+                  <button onClick={() => { setNotifEstimateId(null); setNotifError('') }} style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: '12px' }}>Cancel</button>
+                  {notifError && <p style={{ color: '#dc2626', fontSize: '12px', margin: 0, width: '100%' }}>{notifError}</p>}
+                </div>
+              )}
             </div>
           )
         })}

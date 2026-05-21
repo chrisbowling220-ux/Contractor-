@@ -8,6 +8,9 @@ import { aiQuoteSchema, ARITHMETIC_RULES } from './aiQuoteSchema'
 const ANTHROPIC_API_KEY = defineSecret('ANTHROPIC_API_KEY')
 const CLERK_SECRET_KEY = defineSecret('CLERK_SECRET_KEY')
 const RESEND_API_KEY = defineSecret('RESEND_API_KEY')
+const TWILIO_ACCOUNT_SID = defineSecret('TWILIO_ACCOUNT_SID')
+const TWILIO_AUTH_TOKEN = defineSecret('TWILIO_AUTH_TOKEN')
+const TWILIO_FROM_NUMBER = defineSecret('TWILIO_FROM_NUMBER')
 
 interface MaterialInput { name: string; quantity: number; unit: string; unitPrice: number }
 interface RentalInput { name: string; days: number; dailyRate: number }
@@ -734,6 +737,30 @@ function escapeHtml(s: string): string {
     .replace(/'/g, '&#39;')
 }
 
+function normalizePhone(phone: string): string {
+  const digits = phone.replace(/\D/g, '')
+  if (digits.length === 10) return `+1${digits}`
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`
+  return phone.startsWith('+') ? phone : `+${digits}`
+}
+
+async function sendTwilioSms(to: string, body: string, accountSid: string, authToken: string, fromNumber: string): Promise<void> {
+  const encoded = btoa(`${accountSid}:${authToken}`)
+  const params = new URLSearchParams({ From: fromNumber, To: normalizePhone(to), Body: body })
+  const res = await fetch(
+    `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Basic ${encoded}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    },
+  )
+  if (!res.ok) {
+    const errText = await res.text()
+    throw new Error(`SMS send failed: ${res.status} ${errText}`)
+  }
+}
+
 export const sendEstimateEmail = onCall<SendEstimateCallPayload>(
   {
     secrets: [CLERK_SECRET_KEY, RESEND_API_KEY],
@@ -782,6 +809,400 @@ export const sendEstimateEmail = onCall<SendEstimateCallPayload>(
       console.error('sendEstimateEmail error', err)
       const msg = err instanceof Error ? err.message : String(err)
       throw new HttpsError('internal', `Email send failed: ${msg}`)
+    }
+  },
+)
+
+// ──────────────────────────────────────────────────────────────────────────
+// Send an estimate via SMS using Twilio.
+// ──────────────────────────────────────────────────────────────────────────
+
+interface SendEstimateSmsPayload {
+  clerkToken: string;
+  input: {
+    to: string;
+    fromName?: string;
+    estimate: {
+      customerName: string;
+      jobTypeName: string;
+      jobLocationZip?: string;
+      total: number;
+    };
+  };
+}
+
+export const sendEstimateSms = onCall<SendEstimateSmsPayload>(
+  {
+    secrets: [CLERK_SECRET_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER],
+    timeoutSeconds: 30,
+    memory: '256MiB',
+    cors: true,
+  },
+  async (request) => {
+    const { clerkToken, input } = request.data ?? ({} as SendEstimateSmsPayload)
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    if (!input?.to) throw new HttpsError('invalid-argument', 'Missing phone number')
+    if (!input?.estimate) throw new HttpsError('invalid-argument', 'Missing estimate data')
+    if (!input.estimate.customerName) throw new HttpsError('invalid-argument', 'Missing customerName')
+    if (!input.estimate.jobTypeName) throw new HttpsError('invalid-argument', 'Missing jobTypeName')
+    const phoneDigits = input.to.replace(/\D/g, '')
+    if (phoneDigits.length < 10) throw new HttpsError('invalid-argument', 'Invalid phone number')
+
+    const userId = await verifyClerk(clerkToken)
+    console.log(`sendEstimateSms user=${userId} to=${input.to} job=${input.estimate.jobTypeName}`)
+
+    const { customerName, jobTypeName, jobLocationZip, total } = input.estimate
+    const fromName = input.fromName || 'Your Contractor'
+    const zipPart = jobLocationZip ? ` at ZIP ${jobLocationZip}` : ''
+    const body = `Hi ${customerName}! ${fromName} sent you an estimate for ${jobTypeName}${zipPart}.\n\nTotal: $${total.toFixed(2)}\n\nReply to this number to discuss. Thank you!`
+
+    try {
+      await sendTwilioSms(
+        input.to,
+        body,
+        TWILIO_ACCOUNT_SID.value(),
+        TWILIO_AUTH_TOKEN.value(),
+        TWILIO_FROM_NUMBER.value(),
+      )
+      return { ok: true }
+    } catch (err) {
+      console.error('sendEstimateSms error', err)
+      const msg = err instanceof Error ? err.message : String(err)
+      throw new HttpsError('internal', `SMS send failed: ${msg}`)
+    }
+  },
+)
+
+// ──────────────────────────────────────────────────────────────────────────
+// Send an invoice via email using Resend.
+// ──────────────────────────────────────────────────────────────────────────
+
+interface SendInvoiceEmailPayload {
+  clerkToken: string;
+  input: {
+    to: string;
+    fromName?: string;
+    replyTo?: string;
+    invoice: {
+      customerName: string;
+      jobTypeName: string;
+      invoiceType: 'deposit' | 'milestone' | 'final';
+      amount: number;
+      description: string;
+      dueDate?: string;
+      notes?: string;
+    };
+  };
+}
+
+function renderInvoiceEmailHtml(input: SendInvoiceEmailPayload['input']): string {
+  const { invoice, fromName: rawFromName } = input
+  const fromName = rawFromName || 'Your Contractor'
+  const invoiceTypeLabel = invoice.invoiceType.charAt(0).toUpperCase() + invoice.invoiceType.slice(1)
+
+  return `<!doctype html>
+<html><head><meta charset="utf-8"/><title>Invoice from ${escapeHtml(fromName)}</title></head>
+<body style="margin:0;padding:24px;background:#f8fafc;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#1a1f2e;">
+  <div style="max-width:640px;margin:0 auto;background:white;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+    <div style="background:#1a1f2e;color:white;padding:24px;">
+      <h1 style="margin:0 0 4px;color:#f97316;font-size:24px;">Invoice — ${escapeHtml(invoiceTypeLabel)}</h1>
+      <p style="margin:0;color:#94a3b8;font-size:14px;">From ${escapeHtml(fromName)}</p>
+    </div>
+    <div style="padding:24px;">
+      <p style="font-size:15px;margin:0 0 16px;">Hi ${escapeHtml(invoice.customerName)},</p>
+      <p style="font-size:15px;line-height:1.5;margin:0 0 20px;">Please find your <strong>${escapeHtml(invoiceTypeLabel.toLowerCase())} invoice</strong> for <strong>${escapeHtml(invoice.jobTypeName)}</strong> below.</p>
+
+      <h3 style="margin:0 0 8px;font-size:14px;text-transform:uppercase;color:#64748b;letter-spacing:1px;">Description</h3>
+      <p style="font-size:14px;line-height:1.5;margin:0 0 20px;">${escapeHtml(invoice.description)}</p>
+
+      <div style="background:#1a1f2e;color:white;padding:20px;border-radius:8px;margin-bottom:20px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:12px;border-bottom:2px solid #f97316;">
+          <span style="color:#fb923c;font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:1px;">Amount Due</span>
+          <span style="color:#f97316;font-size:28px;font-weight:700;">$${invoice.amount.toFixed(2)}</span>
+        </div>
+        ${invoice.dueDate ? `<div style="padding-top:12px;font-size:14px;color:#94a3b8;">Due Date: <span style="color:white;font-weight:600;">${escapeHtml(invoice.dueDate)}</span></div>` : ''}
+      </div>
+
+      ${invoice.notes ? `
+      <h3 style="margin:0 0 8px;font-size:14px;text-transform:uppercase;color:#64748b;letter-spacing:1px;">Notes</h3>
+      <p style="font-size:14px;line-height:1.5;margin:0 0 20px;">${escapeHtml(invoice.notes)}</p>` : ''}
+
+      <p style="font-size:14px;line-height:1.5;color:#64748b;margin:0 0 8px;">Reply to this email with any questions or to arrange payment.</p>
+      <p style="font-size:14px;line-height:1.5;color:#64748b;margin:0;">Thank you,<br/><strong style="color:#1a1f2e;">${escapeHtml(fromName)}</strong></p>
+    </div>
+  </div>
+</body></html>`
+}
+
+export const sendInvoiceEmail = onCall<SendInvoiceEmailPayload>(
+  {
+    secrets: [CLERK_SECRET_KEY, RESEND_API_KEY],
+    timeoutSeconds: 60,
+    memory: '256MiB',
+    cors: true,
+  },
+  async (request) => {
+    const { clerkToken, input } = request.data ?? ({} as SendInvoiceEmailPayload)
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    if (!input?.to) throw new HttpsError('invalid-argument', 'Missing email address')
+    if (!input?.invoice) throw new HttpsError('invalid-argument', 'Missing invoice data')
+    if (!input.invoice.customerName) throw new HttpsError('invalid-argument', 'Missing customerName')
+    if (!input.invoice.jobTypeName) throw new HttpsError('invalid-argument', 'Missing jobTypeName')
+    if (!input.invoice.description) throw new HttpsError('invalid-argument', 'Missing description')
+    if (input.invoice.amount == null) throw new HttpsError('invalid-argument', 'Missing amount')
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.to)) {
+      throw new HttpsError('invalid-argument', 'Invalid email address')
+    }
+
+    const userId = await verifyClerk(clerkToken)
+    console.log(`sendInvoiceEmail user=${userId} to=${input.to} type=${input.invoice.invoiceType} job=${input.invoice.jobTypeName}`)
+
+    const fromName = input.fromName || 'Contractors Office'
+    const { invoiceType, jobTypeName } = input.invoice
+    const subject = `Invoice from ${fromName} — ${invoiceType.charAt(0).toUpperCase() + invoiceType.slice(1)} for ${jobTypeName}`
+    const html = renderInvoiceEmailHtml(input)
+
+    try {
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${RESEND_API_KEY.value()}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: `${fromName} <onboarding@resend.dev>`,
+          to: [input.to],
+          subject,
+          html,
+          reply_to: input.replyTo || undefined,
+        }),
+      })
+      if (!res.ok) {
+        const errText = await res.text()
+        console.error('Resend invoice send failed', res.status, errText)
+        throw new HttpsError('internal', `Email send failed: ${res.status}`)
+      }
+      const data = await res.json() as { id?: string }
+      return { ok: true, emailId: data.id }
+    } catch (err) {
+      if (err instanceof HttpsError) throw err
+      console.error('sendInvoiceEmail error', err)
+      const msg = err instanceof Error ? err.message : String(err)
+      throw new HttpsError('internal', `Email send failed: ${msg}`)
+    }
+  },
+)
+
+// ──────────────────────────────────────────────────────────────────────────
+// Send an invoice via SMS using Twilio.
+// ──────────────────────────────────────────────────────────────────────────
+
+export const sendInvoiceSms = onCall<SendInvoiceEmailPayload>(
+  {
+    secrets: [CLERK_SECRET_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER],
+    timeoutSeconds: 30,
+    memory: '256MiB',
+    cors: true,
+  },
+  async (request) => {
+    const { clerkToken, input } = request.data ?? ({} as SendInvoiceEmailPayload)
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    if (!input?.to) throw new HttpsError('invalid-argument', 'Missing phone number')
+    if (!input?.invoice) throw new HttpsError('invalid-argument', 'Missing invoice data')
+    if (!input.invoice.customerName) throw new HttpsError('invalid-argument', 'Missing customerName')
+    if (!input.invoice.jobTypeName) throw new HttpsError('invalid-argument', 'Missing jobTypeName')
+    if (!input.invoice.description) throw new HttpsError('invalid-argument', 'Missing description')
+    if (input.invoice.amount == null) throw new HttpsError('invalid-argument', 'Missing amount')
+    const phoneDigits = input.to.replace(/\D/g, '')
+    if (phoneDigits.length < 10) throw new HttpsError('invalid-argument', 'Invalid phone number')
+
+    const userId = await verifyClerk(clerkToken)
+    console.log(`sendInvoiceSms user=${userId} to=${input.to} type=${input.invoice.invoiceType} job=${input.invoice.jobTypeName}`)
+
+    const { customerName, jobTypeName, invoiceType, amount, description, dueDate } = input.invoice
+    const fromName = input.fromName || 'Your Contractor'
+    const invoiceTypeLabel = invoiceType.charAt(0).toUpperCase() + invoiceType.slice(1)
+    const duePart = dueDate ? `Due: ${dueDate}\n` : ''
+    const body = `Hi ${customerName}! ${fromName} sent you a ${invoiceTypeLabel.toLowerCase()} invoice for ${jobTypeName}.\n\nAmount Due: $${amount.toFixed(2)}\n${description}\n${duePart}\nThank you!`
+
+    try {
+      await sendTwilioSms(
+        input.to,
+        body,
+        TWILIO_ACCOUNT_SID.value(),
+        TWILIO_AUTH_TOKEN.value(),
+        TWILIO_FROM_NUMBER.value(),
+      )
+      return { ok: true }
+    } catch (err) {
+      console.error('sendInvoiceSms error', err)
+      const msg = err instanceof Error ? err.message : String(err)
+      throw new HttpsError('internal', `SMS send failed: ${msg}`)
+    }
+  },
+)
+
+// ──────────────────────────────────────────────────────────────────────────
+// Send a change order via email using Resend.
+// ──────────────────────────────────────────────────────────────────────────
+
+interface SendChangeOrderEmailPayload {
+  clerkToken: string;
+  input: {
+    to: string;
+    fromName?: string;
+    replyTo?: string;
+    changeOrder: {
+      customerName: string;
+      jobTypeName: string;
+      description: string;
+      additionalAmount: number;
+      newTotal: number;
+    };
+  };
+}
+
+function renderChangeOrderEmailHtml(input: SendChangeOrderEmailPayload['input']): string {
+  const { changeOrder, fromName: rawFromName } = input
+  const fromName = rawFromName || 'Your Contractor'
+
+  return `<!doctype html>
+<html><head><meta charset="utf-8"/><title>Change Order — ${escapeHtml(changeOrder.jobTypeName)}</title></head>
+<body style="margin:0;padding:24px;background:#f8fafc;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#1a1f2e;">
+  <div style="max-width:640px;margin:0 auto;background:white;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+    <div style="background:#1a1f2e;color:white;padding:24px;">
+      <h1 style="margin:0 0 4px;color:#f97316;font-size:24px;">Change Order</h1>
+      <p style="margin:0;color:#94a3b8;font-size:14px;">From ${escapeHtml(fromName)}</p>
+    </div>
+    <div style="padding:24px;">
+      <p style="font-size:15px;margin:0 0 16px;">Hi ${escapeHtml(changeOrder.customerName)},</p>
+      <p style="font-size:15px;line-height:1.5;margin:0 0 20px;">There is a change order for your <strong>${escapeHtml(changeOrder.jobTypeName)}</strong> project that requires your review.</p>
+
+      <h3 style="margin:0 0 8px;font-size:14px;text-transform:uppercase;color:#64748b;letter-spacing:1px;">Change Description</h3>
+      <p style="font-size:14px;line-height:1.5;margin:0 0 20px;">${escapeHtml(changeOrder.description)}</p>
+
+      <div style="background:#1a1f2e;color:white;padding:20px;border-radius:8px;margin-bottom:20px;">
+        <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:14px;">
+          <span style="color:#cbd5e1;">Additional Amount</span>
+          <span style="font-weight:600;">+$${changeOrder.additionalAmount.toFixed(2)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 0 0;border-top:2px solid #f97316;margin-top:8px;">
+          <span style="color:#fb923c;font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:1px;">New Total</span>
+          <span style="color:#f97316;font-size:28px;font-weight:700;">$${changeOrder.newTotal.toFixed(2)}</span>
+        </div>
+      </div>
+
+      <p style="font-size:14px;line-height:1.5;color:#64748b;margin:0 0 8px;">Reply to this email to approve or discuss this change order.</p>
+      <p style="font-size:14px;line-height:1.5;color:#64748b;margin:0;">Thank you,<br/><strong style="color:#1a1f2e;">${escapeHtml(fromName)}</strong></p>
+    </div>
+  </div>
+</body></html>`
+}
+
+export const sendChangeOrderEmail = onCall<SendChangeOrderEmailPayload>(
+  {
+    secrets: [CLERK_SECRET_KEY, RESEND_API_KEY],
+    timeoutSeconds: 60,
+    memory: '256MiB',
+    cors: true,
+  },
+  async (request) => {
+    const { clerkToken, input } = request.data ?? ({} as SendChangeOrderEmailPayload)
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    if (!input?.to) throw new HttpsError('invalid-argument', 'Missing email address')
+    if (!input?.changeOrder) throw new HttpsError('invalid-argument', 'Missing changeOrder data')
+    if (!input.changeOrder.customerName) throw new HttpsError('invalid-argument', 'Missing customerName')
+    if (!input.changeOrder.jobTypeName) throw new HttpsError('invalid-argument', 'Missing jobTypeName')
+    if (!input.changeOrder.description) throw new HttpsError('invalid-argument', 'Missing description')
+    if (input.changeOrder.additionalAmount == null) throw new HttpsError('invalid-argument', 'Missing additionalAmount')
+    if (input.changeOrder.newTotal == null) throw new HttpsError('invalid-argument', 'Missing newTotal')
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.to)) {
+      throw new HttpsError('invalid-argument', 'Invalid email address')
+    }
+
+    const userId = await verifyClerk(clerkToken)
+    console.log(`sendChangeOrderEmail user=${userId} to=${input.to} job=${input.changeOrder.jobTypeName}`)
+
+    const fromName = input.fromName || 'Contractors Office'
+    const { jobTypeName, customerName } = input.changeOrder
+    const subject = `Change Order — ${jobTypeName} for ${customerName}`
+    const html = renderChangeOrderEmailHtml(input)
+
+    try {
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${RESEND_API_KEY.value()}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: `${fromName} <onboarding@resend.dev>`,
+          to: [input.to],
+          subject,
+          html,
+          reply_to: input.replyTo || undefined,
+        }),
+      })
+      if (!res.ok) {
+        const errText = await res.text()
+        console.error('Resend change order send failed', res.status, errText)
+        throw new HttpsError('internal', `Email send failed: ${res.status}`)
+      }
+      const data = await res.json() as { id?: string }
+      return { ok: true, emailId: data.id }
+    } catch (err) {
+      if (err instanceof HttpsError) throw err
+      console.error('sendChangeOrderEmail error', err)
+      const msg = err instanceof Error ? err.message : String(err)
+      throw new HttpsError('internal', `Email send failed: ${msg}`)
+    }
+  },
+)
+
+// ──────────────────────────────────────────────────────────────────────────
+// Send a change order via SMS using Twilio.
+// ──────────────────────────────────────────────────────────────────────────
+
+export const sendChangeOrderSms = onCall<SendChangeOrderEmailPayload>(
+  {
+    secrets: [CLERK_SECRET_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER],
+    timeoutSeconds: 30,
+    memory: '256MiB',
+    cors: true,
+  },
+  async (request) => {
+    const { clerkToken, input } = request.data ?? ({} as SendChangeOrderEmailPayload)
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    if (!input?.to) throw new HttpsError('invalid-argument', 'Missing phone number')
+    if (!input?.changeOrder) throw new HttpsError('invalid-argument', 'Missing changeOrder data')
+    if (!input.changeOrder.customerName) throw new HttpsError('invalid-argument', 'Missing customerName')
+    if (!input.changeOrder.jobTypeName) throw new HttpsError('invalid-argument', 'Missing jobTypeName')
+    if (!input.changeOrder.description) throw new HttpsError('invalid-argument', 'Missing description')
+    if (input.changeOrder.additionalAmount == null) throw new HttpsError('invalid-argument', 'Missing additionalAmount')
+    if (input.changeOrder.newTotal == null) throw new HttpsError('invalid-argument', 'Missing newTotal')
+    const phoneDigits = input.to.replace(/\D/g, '')
+    if (phoneDigits.length < 10) throw new HttpsError('invalid-argument', 'Invalid phone number')
+
+    const userId = await verifyClerk(clerkToken)
+    console.log(`sendChangeOrderSms user=${userId} to=${input.to} job=${input.changeOrder.jobTypeName}`)
+
+    const { customerName, jobTypeName, description, additionalAmount, newTotal } = input.changeOrder
+    const fromName = input.fromName || 'Your Contractor'
+    const body = `Hi ${customerName}! ${fromName} has a change order for your ${jobTypeName} project.\n\nChange: ${description}\nAdditional: +$${additionalAmount.toFixed(2)}\nNew Total: $${newTotal.toFixed(2)}\n\nReply to this number to approve or discuss.`
+
+    try {
+      await sendTwilioSms(
+        input.to,
+        body,
+        TWILIO_ACCOUNT_SID.value(),
+        TWILIO_AUTH_TOKEN.value(),
+        TWILIO_FROM_NUMBER.value(),
+      )
+      return { ok: true }
+    } catch (err) {
+      console.error('sendChangeOrderSms error', err)
+      const msg = err instanceof Error ? err.message : String(err)
+      throw new HttpsError('internal', `SMS send failed: ${msg}`)
     }
   },
 )

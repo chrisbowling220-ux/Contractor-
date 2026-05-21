@@ -223,7 +223,7 @@ function Dashboard() {
         {page === 'projects' && <Projects />}
         {page === 'customers' && <Customers />}
         {page === 'scan-room' && <ScanRoom />}
-        {page === 'estimates' && <Estimates />}
+        {page === 'estimates' && <Estimates onNavigate={go} />}
         {page === 'materials' && <MaterialsPricing />}
         {page === 'rentals' && <Rentals />}
       </div>

@@ -50,6 +50,7 @@ export default function Estimates() {
   const [aiUsedFallback, setAiUsedFallback] = useState(false)
   const [aiHourlyRate, setAiHourlyRate] = useState('65')
   const [aiMarkupPct, setAiMarkupPct] = useState('20')
+  const [markupBasis, setMarkupBasis] = useState<'entire_job' | 'materials_only'>('entire_job')
 
   const fetchEstimates = async () => {
     if (!user?.id) { setEstimates([]); return }
@@ -146,11 +147,14 @@ export default function Estimates() {
     try {
       const clerkToken = await getToken()
       if (!clerkToken) throw new Error('Not signed in')
+      const markupInstruction = markupBasis === 'materials_only'
+        ? `\n\nCONTRACTOR OVERRIDE — Apply the markup percentage to MATERIALS ONLY (not labor). Labor is billed at cost with no markup. In price_breakdown.raw_cost include labor at cost, then markup applies only to the materials_subtotal.`
+        : ''
       const q = await generateAIQuote(
         {
           customerName,
           jobTypeName: selectedJob.name,
-          description,
+          description: description + markupInstruction,
           jobLocationZip,
           jobLocationRegion: region,
           regionMultiplier: multiplier,
@@ -508,6 +512,36 @@ export default function Estimates() {
                 <label style={label}>Markup %</label>
                 <input type="number" value={aiMarkupPct} onChange={e => setAiMarkupPct(e.target.value)} style={input} placeholder="e.g. 20" />
                 <p style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px' }}>Small jobs: 15–20% · Medium: 20–25% · Specialty: 25–35%</p>
+              </div>
+              <div>
+                <label style={label}>Apply Markup To</label>
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  <button
+                    onClick={() => setMarkupBasis('entire_job')}
+                    style={{
+                      flex: 1, padding: '8px 6px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '12px',
+                      border: markupBasis === 'entire_job' ? '2px solid #7c3aed' : '1px solid #e2e8f0',
+                      background: markupBasis === 'entire_job' ? '#f5f3ff' : 'white',
+                      color: markupBasis === 'entire_job' ? '#6d28d9' : '#475569',
+                    }}
+                  >
+                    Entire Job
+                  </button>
+                  <button
+                    onClick={() => setMarkupBasis('materials_only')}
+                    style={{
+                      flex: 1, padding: '8px 6px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '12px',
+                      border: markupBasis === 'materials_only' ? '2px solid #7c3aed' : '1px solid #e2e8f0',
+                      background: markupBasis === 'materials_only' ? '#f5f3ff' : 'white',
+                      color: markupBasis === 'materials_only' ? '#6d28d9' : '#475569',
+                    }}
+                  >
+                    Materials Only
+                  </button>
+                </div>
+                <p style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px' }}>
+                  {markupBasis === 'materials_only' ? 'Labor billed at cost, markup on materials only' : 'Markup on labor + materials + rentals'}
+                </p>
               </div>
             </div>
 

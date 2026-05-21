@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { httpsCallable } from 'firebase/functions'
-import { collection, addDoc } from 'firebase/firestore'
+import { collection, addDoc, getDocs, query, orderBy, where } from 'firebase/firestore'
 import { useAuth, useUser } from '@clerk/clerk-react'
 import { db, functions } from './firebase'
 import { regionFromZip, DEFAULT_ZIP } from './data/materials'
@@ -29,6 +29,25 @@ const transcribeCallable = httpsCallable<
   { clerkToken: string; input: { audioBase64: string; mimeType: string } },
   { transcript: string }
 >(functions, 'transcribeAudio')
+
+const sendEmailCallable = httpsCallable<
+  {
+    clerkToken: string
+    input: {
+      to: string
+      fromName?: string
+      replyTo?: string
+      estimate: {
+        customerName: string
+        jobTypeName: string
+        jobLocationZip: string
+        total: number
+        aiQuote?: AIQuote
+      }
+    }
+  },
+  { ok: boolean; emailId?: string }
+>(functions, 'sendEstimateEmail')
 
 function fileToBase64(file: File | Blob): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -63,6 +82,8 @@ export default function ScanRoom() {
   const { user } = useUser()
   const { getToken } = useAuth()
 
+  const [customers, setCustomers] = useState<{ id: string; name: string; email?: string }[]>([])
+  const [customerId, setCustomerId] = useState('')
   const [customerName, setCustomerName] = useState('')
   const [zip, setZip] = useState(DEFAULT_ZIP)
   const [transcript, setTranscript] = useState('')
@@ -75,8 +96,14 @@ export default function ScanRoom() {
   const [savedId, setSavedId] = useState<string | null>(null)
   const [aiHourlyRate, setAiHourlyRate] = useState('65')
   const [aiMarkupPct, setAiMarkupPct] = useState('20')
+  const [markupBasis, setMarkupBasis] = useState<'entire_job' | 'materials_only'>('entire_job')
   const [loadingMessage, setLoadingMessage] = useState('')
   const [usedFallback, setUsedFallback] = useState(false)
+
+  const [customerEmail, setCustomerEmail] = useState('')
+  const [emailSending, setEmailSending] = useState(false)
+  const [emailSent, setEmailSent] = useState(false)
+  const [emailError, setEmailError] = useState('')
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
@@ -92,6 +119,24 @@ export default function ScanRoom() {
     mediaRecorderRef.current?.stop()
     audioStreamRef.current?.getTracks().forEach(t => t.stop())
   }, [])
+
+  useEffect(() => {
+    if (!user?.id) return
+    ;(async () => {
+      try {
+        const snap = await getDocs(query(
+          collection(db, 'customers'),
+          where('createdBy', '==', user.id),
+          orderBy('createdAt', 'desc'),
+        ))
+        setCustomers(snap.docs.map(d => ({
+          id: d.id,
+          name: (d.data().name as string) || '',
+          email: (d.data().email as string) || '',
+        })))
+      } catch {}
+    })()
+  }, [user?.id])
 
   const startRecording = async () => {
     setError('')
@@ -181,6 +226,11 @@ export default function ScanRoom() {
     try {
       const clerkToken = await getToken()
       if (!clerkToken) throw new Error('Not signed in')
+      const markupInstruction = markupBasis === 'materials_only'
+        ? `CONTRACTOR OVERRIDE — Apply the markup percentage to MATERIALS ONLY (not labor). Labor is billed at cost with no markup. In price_breakdown.raw_cost include labor at cost, then markup applies only to the materials_subtotal.`
+        : ''
+      const fullTranscript = [transcript.trim(), markupInstruction].filter(Boolean).join('\n\n')
+
       const res = await callable({
         clerkToken,
         input: {
@@ -188,7 +238,7 @@ export default function ScanRoom() {
           jobLocationZip: zip,
           jobLocationRegion: region,
           regionMultiplier: multiplier,
-          transcript: transcript.trim(),
+          transcript: fullTranscript,
           images: images.map(i => i.data),
           hourlyRateOverride: Number(aiHourlyRate) || undefined,
           markupPercentOverride: aiMarkupPct === '' ? undefined : Number(aiMarkupPct),
@@ -224,6 +274,34 @@ export default function ScanRoom() {
       timers.forEach(t => window.clearTimeout(t))
       setAnalyzing(false)
       setLoadingMessage('')
+    }
+  }
+
+  const sendEmail = async () => {
+    if (!result || !customerEmail) return
+    setEmailSending(true)
+    setEmailError('')
+    try {
+      const clerkToken = await getToken()
+      if (!clerkToken) throw new Error('Not signed in')
+      await sendEmailCallable({
+        clerkToken,
+        input: {
+          to: customerEmail,
+          estimate: {
+            customerName,
+            jobTypeName: 'Scan Room (AI)',
+            jobLocationZip: zip,
+            total: result.final_customer_quote,
+            aiQuote: result,
+          },
+        },
+      })
+      setEmailSent(true)
+    } catch (err) {
+      setEmailError(err instanceof Error ? err.message : 'Email failed — please try again.')
+    } finally {
+      setEmailSending(false)
     }
   }
 
@@ -271,8 +349,36 @@ export default function ScanRoom() {
       <div style={card}>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px' }}>
           <div>
-            <label style={label}>Customer Name *</label>
-            <input value={customerName} onChange={e => setCustomerName(e.target.value)} style={input} placeholder="e.g. Jane Smith" />
+            <label style={label}>Customer *</label>
+            {customers.length > 0 ? (
+              <select
+                value={customerId || '__new__'}
+                onChange={e => {
+                  if (e.target.value === '__new__') {
+                    setCustomerId('')
+                    setCustomerName('')
+                    setCustomerEmail('')
+                  } else {
+                    const c = customers.find(x => x.id === e.target.value)
+                    setCustomerId(e.target.value)
+                    setCustomerName(c?.name || '')
+                    setCustomerEmail(c?.email || '')
+                  }
+                }}
+                style={input}
+              >
+                <option value="__new__">+ New customer (type below)</option>
+                {customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            ) : null}
+            {!customerId && (
+              <input
+                value={customerName}
+                onChange={e => setCustomerName(e.target.value)}
+                style={{ ...input, marginTop: customers.length > 0 ? '6px' : '0' }}
+                placeholder="e.g. Jane Smith"
+              />
+            )}
           </div>
           <div>
             <label style={label}>Job Location ZIP</label>
@@ -341,7 +447,7 @@ export default function ScanRoom() {
 
       <div style={card}>
         <h3 style={{ marginBottom: '12px' }}>💵 AI Pricing Settings</h3>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px', marginBottom: '16px' }}>
           <div>
             <label style={label}>Hourly Rate ($/hr)</label>
             <input type="number" value={aiHourlyRate} onChange={e => setAiHourlyRate(e.target.value)} style={input} placeholder="65" />
@@ -351,6 +457,35 @@ export default function ScanRoom() {
             <label style={label}>Markup %</label>
             <input type="number" value={aiMarkupPct} onChange={e => setAiMarkupPct(e.target.value)} style={input} placeholder="20" />
             <p style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px' }}>Small: 15–20% · Medium: 20–25% · Specialty: 25–35%</p>
+          </div>
+        </div>
+        <div>
+          <label style={label}>Apply Markup To</label>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button
+              onClick={() => setMarkupBasis('entire_job')}
+              style={{
+                flex: 1, padding: '10px', borderRadius: '8px', cursor: 'pointer', fontWeight: 600, fontSize: '13px',
+                border: markupBasis === 'entire_job' ? '2px solid #f97316' : '1px solid #e2e8f0',
+                background: markupBasis === 'entire_job' ? '#fff7ed' : 'white',
+                color: markupBasis === 'entire_job' ? '#ea580c' : '#475569',
+              }}
+            >
+              Entire Job
+              <div style={{ fontSize: '11px', fontWeight: 400, color: '#94a3b8', marginTop: '2px' }}>markup on labor + materials</div>
+            </button>
+            <button
+              onClick={() => setMarkupBasis('materials_only')}
+              style={{
+                flex: 1, padding: '10px', borderRadius: '8px', cursor: 'pointer', fontWeight: 600, fontSize: '13px',
+                border: markupBasis === 'materials_only' ? '2px solid #f97316' : '1px solid #e2e8f0',
+                background: markupBasis === 'materials_only' ? '#fff7ed' : 'white',
+                color: markupBasis === 'materials_only' ? '#ea580c' : '#475569',
+              }}
+            >
+              Materials Only
+              <div style={{ fontSize: '11px', fontWeight: 400, color: '#94a3b8', marginTop: '2px' }}>labor billed at cost</div>
+            </button>
           </div>
         </div>
       </div>
@@ -381,13 +516,38 @@ export default function ScanRoom() {
               <h3>🎯 AI Estimate</h3>
               <p style={{ color: '#64748b', fontSize: '13px' }}>Based on {images.length} photo(s) and {transcript.trim().split(/\s+/).filter(Boolean).length} words of narration</p>
             </div>
-            {savedId ? (
-              <span style={{ background: '#f0fdf4', color: '#16a34a', padding: '8px 16px', borderRadius: '6px', fontWeight: 600 }}>✓ Saved as Estimate</span>
-            ) : (
-              <button onClick={saveAsEstimate} style={{ background: '#f97316', color: 'white', border: 'none', padding: '10px 20px', borderRadius: '6px', cursor: 'pointer', fontWeight: 700 }}>
-                💾 Save as Estimate
-              </button>
-            )}
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px' }}>
+              {savedId ? (
+                <span style={{ background: '#f0fdf4', color: '#16a34a', padding: '8px 16px', borderRadius: '6px', fontWeight: 600 }}>✓ Saved as Estimate</span>
+              ) : (
+                <button onClick={saveAsEstimate} style={{ background: '#f97316', color: 'white', border: 'none', padding: '10px 20px', borderRadius: '6px', cursor: 'pointer', fontWeight: 700 }}>
+                  💾 Save as Estimate
+                </button>
+              )}
+              {savedId && (
+                emailSent ? (
+                  <span style={{ background: '#f0fdf4', color: '#16a34a', padding: '6px 12px', borderRadius: '6px', fontSize: '13px', fontWeight: 600 }}>✓ Email sent</span>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-end' }}>
+                    <input
+                      type="email"
+                      value={customerEmail}
+                      onChange={e => setCustomerEmail(e.target.value)}
+                      placeholder="customer@email.com"
+                      style={{ padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', width: '200px', boxSizing: 'border-box' }}
+                    />
+                    <button
+                      onClick={sendEmail}
+                      disabled={emailSending || !customerEmail}
+                      style={{ background: '#0ea5e9', color: 'white', border: 'none', padding: '8px 14px', borderRadius: '6px', cursor: (emailSending || !customerEmail) ? 'not-allowed' : 'pointer', fontWeight: 600, fontSize: '13px', opacity: !customerEmail ? 0.6 : 1 }}
+                    >
+                      {emailSending ? 'Sending…' : '✉ Email to Customer'}
+                    </button>
+                    {emailError && <p style={{ color: '#dc2626', fontSize: '12px', margin: 0 }}>{emailError}</p>}
+                  </div>
+                )
+              )}
+            </div>
           </div>
 
           <div style={{ display: 'grid', gap: '14px' }}>

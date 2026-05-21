@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import { db, functions } from './firebase'
 import { httpsCallable } from 'firebase/functions'
-import { collection, addDoc, getDocs, query, orderBy, doc, updateDoc, where } from 'firebase/firestore'
+import { collection, addDoc, getDocs, query, doc, updateDoc, where } from 'firebase/firestore'
 import { useAuth, useUser } from '@clerk/clerk-react'
 import { JOB_CATALOG, JOB_CATEGORIES } from './data/jobCatalog'
 import { estimateMaterials, regionFromZip, ROOM_TYPES, DEFAULT_ZIP } from './data/materials'
@@ -78,14 +78,12 @@ export default function Estimates({ onNavigate }: { onNavigate?: (page: string) 
   const fetchEstimates = async () => {
     if (!user?.id) { setEstimates([]); return }
     try {
-      const q = query(
-        collection(db, 'estimates'),
-        where('createdBy', '==', user.id),
-        orderBy('createdAt', 'desc'),
-      )
-      const snapshot = await getDocs(q)
-      setEstimates(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Estimate)))
-    } catch {
+      const snapshot = await getDocs(query(collection(db, 'estimates'), where('createdBy', '==', user.id)))
+      const list = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Estimate))
+      list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      setEstimates(list)
+    } catch (err) {
+      console.error('fetchEstimates error:', err)
       setEstimates([])
     }
   }
@@ -95,11 +93,7 @@ export default function Estimates({ onNavigate }: { onNavigate?: (page: string) 
     if (!user?.id) return
     (async () => {
       try {
-        const snap = await getDocs(query(
-          collection(db, 'customers'),
-          where('createdBy', '==', user.id),
-          orderBy('createdAt', 'desc'),
-        ))
+        const snap = await getDocs(query(collection(db, 'customers'), where('createdBy', '==', user.id)))
         setCustomers(snap.docs.map(d => ({ id: d.id, name: (d.data().name as string) || '', email: (d.data().email as string) || '', phone: (d.data().phone as string) || '' })))
       } catch {}
     })()

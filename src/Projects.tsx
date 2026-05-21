@@ -90,11 +90,9 @@ export default function Projects() {
       setProjects([]); setCustomers([]); setEstimates([]); setChangeOrders([]); setInvoices([]); setPortfolio([])
       return
     }
-    const own = (name: string) => query(
-      collection(db, name),
-      where('createdBy', '==', user.id),
-      orderBy('createdAt', 'desc'),
-    )
+    const own = (name: string) => query(collection(db, name), where('createdBy', '==', user.id))
+    const byDate = <T extends { createdAt: string }>(docs: T[]) =>
+      docs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     try {
       const [pSnap, cSnap, eSnap, coSnap, invSnap, poSnap] = await Promise.all([
         getDocs(own('projects')),
@@ -104,13 +102,13 @@ export default function Projects() {
         getDocs(own('invoices')),
         getDocs(own('portfolio')),
       ])
-      setProjects(pSnap.docs.map(d => ({ id: d.id, ...d.data() } as Project)))
+      setProjects(byDate(pSnap.docs.map(d => ({ id: d.id, ...d.data() } as Project))))
       setCustomers(cSnap.docs.map(d => ({ id: d.id, ...d.data() } as Customer)))
       setEstimates(eSnap.docs.map(d => ({ id: d.id, ...d.data() } as Estimate)))
-      setChangeOrders(coSnap.docs.map(d => ({ id: d.id, ...d.data() } as ChangeOrder)))
-      setInvoices(invSnap.docs.map(d => ({ id: d.id, ...d.data() } as Invoice)))
+      setChangeOrders(byDate(coSnap.docs.map(d => ({ id: d.id, ...d.data() } as ChangeOrder))))
+      setInvoices(byDate(invSnap.docs.map(d => ({ id: d.id, ...d.data() } as Invoice))))
       setPortfolio(poSnap.docs.map(d => ({ id: d.id, ...d.data() } as PortfolioItem)))
-    } catch {}
+    } catch (err) { console.error('Projects load error:', err) }
   }
   useEffect(() => { load() }, [user?.id])
 

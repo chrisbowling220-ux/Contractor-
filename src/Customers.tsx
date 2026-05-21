@@ -35,13 +35,15 @@ export default function Customers() {
 
   const load = async () => {
     if (!user?.id) { setCustomers([]); setEstimates([]); setProjects([]); return }
-    const own = (col: string) => query(collection(db, col), where('createdBy', '==', user.id), orderBy('createdAt', 'desc'))
+    const own = (col: string) => query(collection(db, col), where('createdBy', '==', user.id))
+    const byDate = <T extends { createdAt: string }>(docs: T[]) =>
+      docs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     try {
       const [cSnap, eSnap, pSnap] = await Promise.all([getDocs(own('customers')), getDocs(own('estimates')), getDocs(own('projects'))])
-      setCustomers(cSnap.docs.map(d => ({ id: d.id, ...d.data() } as Customer)))
+      setCustomers(byDate(cSnap.docs.map(d => ({ id: d.id, ...d.data() } as Customer))))
       setEstimates(eSnap.docs.map(d => ({ id: d.id, ...d.data() } as Estimate)))
       setProjects(pSnap.docs.map(d => ({ id: d.id, ...d.data() } as Project)))
-    } catch {}
+    } catch (err) { console.error('Customers load error:', err) }
   }
   useEffect(() => { load() }, [user?.id])
 

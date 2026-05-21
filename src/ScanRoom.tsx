@@ -125,11 +125,7 @@ export default function ScanRoom() {
     if (!user?.id) return
     ;(async () => {
       try {
-        const snap = await getDocs(query(
-          collection(db, 'customers'),
-          where('createdBy', '==', user.id),
-          orderBy('createdAt', 'desc'),
-        ))
+        const snap = await getDocs(query(collection(db, 'customers'), where('createdBy', '==', user.id)))
         setCustomers(snap.docs.map(d => ({
           id: d.id,
           name: (d.data().name as string) || '',

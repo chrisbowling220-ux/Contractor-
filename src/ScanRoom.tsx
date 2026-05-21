@@ -321,7 +321,7 @@ export default function ScanRoom() {
       videoTimerRef.current = window.setInterval(() => {
         videoElapsedRef.current += 1
         setVideoElapsed(videoElapsedRef.current)
-        if (videoElapsedRef.current >= 60) {
+        if (videoElapsedRef.current >= 25) {
           stopVideoRecordingInternal()
         }
       }, 1000)
@@ -542,7 +542,7 @@ export default function ScanRoom() {
             <button
               onClick={startVideoRecording}
               disabled={images.length >= 8}
-              title={images.length >= 8 ? 'Remove some photos first (max 8 total)' : 'Record a video walkthrough — a photo is captured every 3 seconds automatically'}
+              title={images.length >= 8 ? 'Remove some photos first (max 8 total)' : 'Record a 25-second video walkthrough — a photo is captured every 3 seconds automatically'}
               style={{ background: '#dc2626', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '6px', cursor: images.length >= 8 ? 'not-allowed' : 'pointer', fontWeight: 600, opacity: images.length >= 8 ? 0.5 : 1 }}
             >
               🎬 Record Video Walkthrough
@@ -565,7 +565,7 @@ export default function ScanRoom() {
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', background: '#fef2f2', color: '#dc2626', padding: '8px 12px', borderRadius: '6px', fontWeight: 700, fontSize: '14px' }}>
                   <span style={{ display: 'inline-block', width: '10px', height: '10px', background: '#dc2626', borderRadius: '50%', animation: 'pulse 1s ease-in-out infinite' }} />
-                  REC {Math.floor(videoElapsed / 60)}:{String(videoElapsed % 60).padStart(2, '0')} / 1:00
+                  REC 0:{String(videoElapsed).padStart(2, '0')} / 0:25
                 </span>
                 <span style={{ fontSize: '12px', color: '#64748b' }}>📸 {images.length} frame{images.length !== 1 ? 's' : ''} captured (every 3s, max 8)</span>
               </div>

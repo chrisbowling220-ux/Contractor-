@@ -1260,3 +1260,87 @@ export const sendChangeOrderSms = onCall<SendChangeOrderEmailPayload>(
     }
   },
 )
+
+// ──────────────────────────────────────────────────────────────────────────
+// Send a general-purpose message to a customer via Resend.
+// ──────────────────────────────────────────────────────────────────────────
+
+interface SendCustomerEmailPayload {
+  clerkToken: string;
+  input: {
+    to: string;
+    fromName?: string;
+    replyTo?: string;
+    customerName: string;
+    subject: string;
+    body: string;
+  };
+}
+
+export const sendCustomerEmail = onCall<SendCustomerEmailPayload>(
+  {
+    secrets: [CLERK_SECRET_KEY, RESEND_API_KEY],
+    timeoutSeconds: 60,
+    memory: '256MiB',
+    cors: true,
+  },
+  async (request) => {
+    const { clerkToken, input } = request.data ?? ({} as SendCustomerEmailPayload)
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    if (!input?.to) throw new HttpsError('invalid-argument', 'Missing email address')
+    if (!input?.customerName) throw new HttpsError('invalid-argument', 'Missing customerName')
+    if (!input?.subject) throw new HttpsError('invalid-argument', 'Missing subject')
+    if (!input?.body) throw new HttpsError('invalid-argument', 'Missing body')
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.to)) {
+      throw new HttpsError('invalid-argument', 'Invalid email address')
+    }
+
+    const userId = await verifyClerk(clerkToken)
+    console.log(`sendCustomerEmail user=${userId} to=${input.to}`)
+
+    const fromName = input.fromName || 'Your Contractor'
+    const html = `<!doctype html>
+<html><head><meta charset="utf-8"/><title>${escapeHtml(input.subject)}</title></head>
+<body style="margin:0;padding:24px;background:#f8fafc;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#1a1f2e;">
+  <div style="max-width:600px;margin:0 auto;background:white;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+    <div style="background:#1a1f2e;padding:24px;">
+      <p style="margin:0;color:#f97316;font-size:18px;font-weight:700;">${escapeHtml(fromName)}</p>
+    </div>
+    <div style="padding:28px;">
+      <p style="font-size:15px;margin:0 0 16px;">Hi ${escapeHtml(input.customerName)},</p>
+      <div style="font-size:14px;line-height:1.7;white-space:pre-wrap;margin:0 0 24px;">${escapeHtml(input.body)}</div>
+      <p style="font-size:13px;color:#64748b;margin:0;">Reply to this email with any questions.<br/>Thank you,<br/><strong style="color:#1a1f2e;">${escapeHtml(fromName)}</strong></p>
+    </div>
+  </div>
+</body></html>`
+
+    try {
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${RESEND_API_KEY.value()}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: `${fromName} <onboarding@resend.dev>`,
+          to: [input.to],
+          subject: input.subject,
+          html,
+          reply_to: input.replyTo || undefined,
+        }),
+      })
+      if (!res.ok) {
+        const errText = await res.text()
+        console.error('sendCustomerEmail Resend error', res.status, errText)
+        throw new HttpsError('internal', `Email send failed: ${res.status}`)
+      }
+      const data = await res.json() as { id?: string }
+      return { ok: true, emailId: data.id }
+    } catch (err) {
+      if (err instanceof HttpsError) throw err
+      console.error('sendCustomerEmail error', err)
+      const msg = err instanceof Error ? err.message : String(err)
+      throw new HttpsError('internal', `Email send failed: ${msg}`)
+    }
+  },
+)

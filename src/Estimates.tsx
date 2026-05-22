@@ -27,6 +27,7 @@ export default function Estimates({ onNavigate }: { onNavigate?: (page: string) 
   const [estimates, setEstimates] = useState<Estimate[]>([])
   const [showForm, setShowForm] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [saveError, setSaveError] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
 
   const [customerName, setCustomerName] = useState('')
@@ -254,11 +255,16 @@ export default function Estimates({ onNavigate }: { onNavigate?: (page: string) 
     }
     try {
       await addDoc(collection(db, 'estimates'), payload)
-    } catch {}
-    resetForm()
-    setShowForm(false)
-    setLoading(false)
-    fetchEstimates()
+      resetForm()
+      setShowForm(false)
+      setSaveError('')
+      fetchEstimates()
+    } catch (err) {
+      console.error('Save estimate error:', err)
+      setSaveError(err instanceof Error ? err.message : 'Save failed — please try again.')
+    } finally {
+      setLoading(false)
+    }
   }
 
   const statusColor = (s: string) => s === 'approved' ? { bg: '#f0fdf4', color: '#16a34a' } : s === 'declined' ? { bg: '#fef2f2', color: '#dc2626' } : { bg: '#fff7ed', color: '#ea580c' }
@@ -701,12 +707,13 @@ export default function Estimates({ onNavigate }: { onNavigate?: (page: string) 
             )}
           </div>
 
-          <div style={{ display: 'flex', gap: '12px', marginBottom: '24px' }}>
-            <button onClick={handleSubmit} disabled={loading} style={{ background: '#f97316', color: 'white', border: 'none', padding: '12px 28px', borderRadius: '6px', cursor: 'pointer', fontWeight: 700 }}>
+          <div style={{ display: 'flex', gap: '12px', marginBottom: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+            <button onClick={handleSubmit} disabled={loading} style={{ background: '#f97316', color: 'white', border: 'none', padding: '12px 28px', borderRadius: '6px', cursor: loading ? 'not-allowed' : 'pointer', fontWeight: 700, opacity: loading ? 0.7 : 1 }}>
               {loading ? 'Saving...' : aiQuote ? 'Save Estimate (with AI quote)' : 'Save Estimate'}
             </button>
-            <button onClick={() => { setShowForm(false); resetForm() }} style={{ background: '#f1f5f9', border: 'none', padding: '12px 28px', borderRadius: '6px', cursor: 'pointer' }}>Cancel</button>
+            <button onClick={() => { setShowForm(false); resetForm(); setSaveError('') }} style={{ background: '#f1f5f9', border: 'none', padding: '12px 28px', borderRadius: '6px', cursor: 'pointer' }}>Cancel</button>
           </div>
+          {saveError && <p style={{ color: '#dc2626', fontSize: '13px', marginBottom: '16px' }}>⚠ {saveError}</p>}
         </>
       )}
 

@@ -1,9 +1,15 @@
 import { useState, useEffect } from 'react'
-import { db } from './firebase'
+import { db, functions } from './firebase'
 import { collection, addDoc, getDocs, query, where, updateDoc, deleteDoc, doc } from 'firebase/firestore'
-import { useUser } from '@clerk/clerk-react'
+import { httpsCallable } from 'firebase/functions'
+import { useUser, useAuth } from '@clerk/clerk-react'
 import type { Estimate, Project } from './data/types'
 import { PROJECT_STATUS_LABEL } from './data/types'
+
+const sendCustomerEmailFn = httpsCallable<
+  { clerkToken: string; input: { to: string; fromName?: string; customerName: string; subject: string; body: string } },
+  { ok: boolean }
+>(functions, 'sendCustomerEmail')
 
 interface Customer {
   id: string
@@ -20,15 +26,24 @@ const NAVY = '#1a1f2e'
 
 export default function Customers() {
   const { user } = useUser()
+  const { getToken } = useAuth()
   const [customers, setCustomers] = useState<Customer[]>([])
   const [estimates, setEstimates] = useState<Estimate[]>([])
   const [projects, setProjects] = useState<Project[]>([])
   const [showForm, setShowForm] = useState(false)
+  const [saveError, setSaveError] = useState('')
   const [activeId, setActiveId] = useState<string | null>(null)
   const [editMode, setEditMode] = useState(false)
   const [loading, setLoading] = useState(false)
   const [deleteConfirm, setDeleteConfirm] = useState(false)
   const [search, setSearch] = useState('')
+
+  const [showEmail, setShowEmail] = useState(false)
+  const [emailSubject, setEmailSubject] = useState('')
+  const [emailBody, setEmailBody] = useState('')
+  const [emailSending, setEmailSending] = useState(false)
+  const [emailSent, setEmailSent] = useState(false)
+  const [emailError, setEmailError] = useState('')
 
   const blank = { name: '', phone: '', email: '', address: '', notes: '' }
   const [form, setForm] = useState(blank)
@@ -50,11 +65,18 @@ export default function Customers() {
   const handleCreate = async () => {
     if (!form.name) return
     setLoading(true)
-    await addDoc(collection(db, 'customers'), { ...form, createdBy: user?.id, createdAt: new Date().toISOString() })
-    setForm(blank)
-    setShowForm(false)
-    setLoading(false)
-    load()
+    setSaveError('')
+    try {
+      await addDoc(collection(db, 'customers'), { ...form, createdBy: user?.id, createdAt: new Date().toISOString() })
+      setForm(blank)
+      setShowForm(false)
+      load()
+    } catch (err) {
+      console.error('Save customer error:', err)
+      setSaveError(err instanceof Error ? err.message : 'Save failed — please try again.')
+    } finally {
+      setLoading(false)
+    }
   }
 
   const handleUpdate = async () => {
@@ -74,6 +96,27 @@ export default function Customers() {
     setCustomers(prev => prev.filter(c => c.id !== activeId))
   }
 
+  const sendEmail = async () => {
+    if (!activeCustomer?.email || !emailSubject || !emailBody) return
+    setEmailSending(true)
+    setEmailError('')
+    try {
+      const clerkToken = await getToken()
+      if (!clerkToken) throw new Error('Not signed in')
+      await sendCustomerEmailFn({
+        clerkToken,
+        input: { to: activeCustomer.email, customerName: activeCustomer.name, subject: emailSubject, body: emailBody },
+      })
+      setEmailSent(true)
+      setEmailSubject('')
+      setEmailBody('')
+    } catch (err) {
+      setEmailError(err instanceof Error ? err.message : 'Send failed — please try again.')
+    } finally {
+      setEmailSending(false)
+    }
+  }
+
   const activeCustomer = activeId ? customers.find(c => c.id === activeId) ?? null : null
   const customerEstimates = activeCustomer ? estimates.filter(e => e.customerName.toLowerCase() === activeCustomer.name.toLowerCase()) : []
   const customerProjects = activeCustomer ? projects.filter(p => p.customerName.toLowerCase() === activeCustomer.name.toLowerCase()) : []
@@ -87,7 +130,7 @@ export default function Customers() {
     const totalRevenue = customerEstimates.filter(e => e.status === 'approved').reduce((s, e) => s + e.total, 0)
     return (
       <div style={{ padding: 'clamp(16px, 4vw, 32px)' }}>
-        <button onClick={() => { setActiveId(null); setEditMode(false); setDeleteConfirm(false) }} style={{ background: '#f1f5f9', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', marginBottom: '16px' }}>
+        <button onClick={() => { setActiveId(null); setEditMode(false); setDeleteConfirm(false); setShowEmail(false); setEmailSent(false); setEmailError('') }} style={{ background: '#f1f5f9', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', marginBottom: '16px' }}>
           ← Back to Customers
         </button>
 
@@ -164,12 +207,48 @@ export default function Customers() {
                   </div>
                 ) : <p style={{ color: '#94a3b8', fontSize: '13px' }}>No phone on file</p>}
                 {activeCustomer.email ? (
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div>
-                      <div style={{ fontSize: '11px', color: '#94a3b8', fontWeight: 600, marginBottom: '2px' }}>EMAIL</div>
-                      <div style={{ fontSize: '14px', fontWeight: 500 }}>{activeCustomer.email}</div>
+                  <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div>
+                        <div style={{ fontSize: '11px', color: '#94a3b8', fontWeight: 600, marginBottom: '2px' }}>EMAIL</div>
+                        <div style={{ fontSize: '14px', fontWeight: 500 }}>{activeCustomer.email}</div>
+                      </div>
+                      <button
+                        onClick={() => { setShowEmail(!showEmail); setEmailSent(false); setEmailError('') }}
+                        style={{ background: '#eff6ff', color: '#2563eb', border: 'none', padding: '6px 12px', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: 600 }}
+                      >
+                        ✉ Send Email
+                      </button>
                     </div>
-                    <a href={`mailto:${activeCustomer.email}`} style={{ background: '#eff6ff', color: '#2563eb', padding: '6px 12px', borderRadius: '6px', textDecoration: 'none', fontSize: '12px', fontWeight: 600 }}>✉ Email</a>
+                    {showEmail && (
+                      <div style={{ marginTop: '12px', padding: '14px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                        {emailSent ? (
+                          <p style={{ color: '#16a34a', fontWeight: 600, fontSize: '14px', margin: 0 }}>✓ Email sent to {activeCustomer.name}!</p>
+                        ) : (
+                          <>
+                            <div style={{ marginBottom: '8px' }}>
+                              <label style={lbl}>Subject</label>
+                              <input value={emailSubject} onChange={e => setEmailSubject(e.target.value)} style={inp} placeholder="e.g. Project Update, Schedule Confirmation…" />
+                            </div>
+                            <div style={{ marginBottom: '10px' }}>
+                              <label style={lbl}>Message</label>
+                              <textarea value={emailBody} onChange={e => setEmailBody(e.target.value)} rows={5} style={{ ...inp, fontFamily: 'inherit', resize: 'vertical' }} placeholder="Type your message here…" />
+                            </div>
+                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                              <button
+                                onClick={sendEmail}
+                                disabled={emailSending || !emailSubject || !emailBody}
+                                style={{ background: '#2563eb', color: 'white', border: 'none', padding: '8px 18px', borderRadius: '6px', cursor: (emailSending || !emailSubject || !emailBody) ? 'not-allowed' : 'pointer', fontWeight: 600, fontSize: '13px', opacity: (!emailSubject || !emailBody) ? 0.6 : 1 }}
+                              >
+                                {emailSending ? 'Sending…' : '✉ Send'}
+                              </button>
+                              <button onClick={() => setShowEmail(false)} style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: '13px' }}>Cancel</button>
+                              {emailError && <p style={{ color: '#dc2626', fontSize: '12px', margin: 0 }}>⚠ {emailError}</p>}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )}
                   </div>
                 ) : <p style={{ color: '#94a3b8', fontSize: '13px' }}>No email on file</p>}
                 {activeCustomer.address && (
@@ -265,13 +344,14 @@ export default function Customers() {
             <label style={lbl}>Notes (internal)</label>
             <textarea value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} rows={2} style={{ ...inp, fontFamily: 'inherit', resize: 'vertical' }} placeholder="Anything to remember about this customer..." />
           </div>
-          <div style={{ display: 'flex', gap: '12px' }}>
-            <button onClick={handleCreate} disabled={loading || !form.name} style={{ background: ORANGE, color: 'white', border: 'none', padding: '10px 24px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
+          <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <button onClick={handleCreate} disabled={loading || !form.name} style={{ background: ORANGE, color: 'white', border: 'none', padding: '10px 24px', borderRadius: '6px', cursor: (loading || !form.name) ? 'not-allowed' : 'pointer', fontWeight: 600, opacity: (loading || !form.name) ? 0.7 : 1 }}>
               {loading ? 'Saving…' : 'Save Customer'}
             </button>
-            <button onClick={() => { setShowForm(false); setForm(blank) }} style={{ background: '#f1f5f9', border: 'none', padding: '10px 24px', borderRadius: '6px', cursor: 'pointer' }}>
+            <button onClick={() => { setShowForm(false); setForm(blank); setSaveError('') }} style={{ background: '#f1f5f9', border: 'none', padding: '10px 24px', borderRadius: '6px', cursor: 'pointer' }}>
               Cancel
             </button>
+            {saveError && <p style={{ color: '#dc2626', fontSize: '13px', margin: 0 }}>⚠ {saveError}</p>}
           </div>
         </div>
       )}

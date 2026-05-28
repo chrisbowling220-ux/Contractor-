@@ -64,7 +64,7 @@ export function buildFallbackQuote(input: FallbackInput): AIQuote {
   ].filter(Boolean).join('\n')
 
   return {
-    customer_summary: `Estimate for ${input.customerName}: ${input.jobTypeName}. ${input.description || ''} Final price reflects materials with realistic waste factors, labor at $${input.hourlyRate}/hr, and a ${input.markupPercent}% markup. Generated offline — AI service was unavailable, so this is a calculated estimate without AI-assisted scope writing.`,
+    customer_summary: `Estimate for ${input.customerName}: ${input.jobTypeName}. ${input.description || ''} Final price reflects materials with realistic waste factors, labor at $${input.hourlyRate}/hr, and a ${input.markupPercent}% markup. Calculated from your inputs.`,
     work_scope,
     material_list,
     labor: {
@@ -85,6 +85,6 @@ export function buildFallbackQuote(input: FallbackInput): AIQuote {
       rationale: `Standard ${input.markupPercent}% markup applied (fallback calculation).`,
     },
     final_customer_quote,
-    contractor_notes: 'AI quote service was unavailable — this quote was generated locally using your form inputs and standard waste factors. Review materials and labor estimates before sending to customer.',
+    contractor_notes: 'This quote was calculated locally from your form inputs and standard waste factors. Review materials and labor estimates before sending to customer.',
   }
 }

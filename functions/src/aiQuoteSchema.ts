@@ -70,6 +70,37 @@ export const aiQuoteSchema = {
   ],
 } as const
 
+// JSON schema for the Change Order AI generator. Simpler than the full
+// quote: just a description, reason category, and itemized line items.
+// Frontend computes delta + new total from these line items.
+export const changeOrderSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    description: { type: 'string' },
+    reason: {
+      type: 'string',
+      enum: ['customer_requested', 'site_condition', 'code_requirement', 'other'],
+    },
+    line_items: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          name: { type: 'string' },
+          quantity: { type: 'number' },
+          unit_price: { type: 'number' },
+          line_total: { type: 'number' },
+        },
+        required: ['name', 'quantity', 'unit_price', 'line_total'],
+      },
+    },
+    contractor_notes: { type: 'string' },
+  },
+  required: ['description', 'reason', 'line_items', 'contractor_notes'],
+} as const
+
 export const ARITHMETIC_RULES = `Numbers must add up:
 - quantity_with_waste × unit_price = line_total (per material line)
 - sum of line_totals = materials_subtotal

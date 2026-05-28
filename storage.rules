@@ -1,0 +1,33 @@
+rules_version = '2';
+
+// Security model: the app bridges Clerk → Firebase (exchangeFirebaseToken mints
+// a Firebase custom token with uid == Clerk user id), so request.auth.uid here
+// equals the Clerk user id — which is the {userId} segment in every path. We
+// can therefore enforce true per-user isolation: a contractor can only read or
+// write their own files.
+//
+// Customer-facing images on public share pages keep working because they're
+// loaded via Firebase download URLs (getDownloadURL) that carry their own
+// access token in the query string — those bypass these rules.
+//
+// Paths:
+//   customerPhotos/{userId}/...        — customer gallery photos
+//   projectPhotos/{userId}/{folder}/.. — project album photos
+//   userLogos/{userId}/...             — business logo for letterhead/branding
+service firebase.storage {
+  match /b/{bucket}/o {
+    function owns(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+    match /customerPhotos/{userId}/{allPaths=**} {
+      allow read, write: if owns(userId);
+    }
+    match /projectPhotos/{userId}/{allPaths=**} {
+      allow read, write: if owns(userId);
+    }
+    match /userLogos/{userId}/{allPaths=**} {
+      allow read, write: if owns(userId);
+    }
+    // Everything else is denied by default.
+  }
+}

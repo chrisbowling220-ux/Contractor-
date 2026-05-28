@@ -18,7 +18,8 @@
     "@clerk/backend": "^3.4.0",
     "@google-cloud/speech": "^7.3.1",
     "firebase-admin": "^13.10.0",
-    "firebase-functions": "^7.2.0"
+    "firebase-functions": "^7.2.0",
+    "stripe": "^22.1.1"
   },
   "devDependencies": {
     "typescript": "~5.7.0"

@@ -1,0 +1,16 @@
+{
+  "name": "BuildPro+ — Contractor Suite",
+  "short_name": "BuildPro+",
+  "description": "AI-powered estimates, scan-to-quote, customer e-sign, and project tracking for contractors.",
+  "id": "/?source=pwa",
+  "start_url": "/?source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#1a1f2e",
+  "theme_color": "#1a1f2e",
+  "categories": ["business", "productivity"],
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

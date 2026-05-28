@@ -1,13 +1,120 @@
-import { onCall, HttpsError } from 'firebase-functions/v2/https'
+import { onCall, onRequest, HttpsError } from 'firebase-functions/v2/https'
 import { defineSecret } from 'firebase-functions/params'
 import { verifyToken } from '@clerk/backend'
 import Anthropic from '@anthropic-ai/sdk'
+import StripeLib from 'stripe'
 import { SpeechClient } from '@google-cloud/speech'
-import { aiQuoteSchema, ARITHMETIC_RULES } from './aiQuoteSchema'
+import { initializeApp, getApps } from 'firebase-admin/app'
+import { getFirestore, FieldValue, Firestore } from 'firebase-admin/firestore'
+import { getAuth, Auth } from 'firebase-admin/auth'
+import { aiQuoteSchema, changeOrderSchema, ARITHMETIC_RULES } from './aiQuoteSchema'
+
+// Lazy-init Firebase Admin — do NOT initialize at module load. The Firebase
+// deploy tool parses this file before runtime env vars are available, and
+// initializeApp() at the top level can hang past the 10s deploy-parse limit.
+// We call this on first use inside a handler, where env is ready.
+let _adminDb: Firestore | null = null
+function getAdminDb(): Firestore {
+  if (_adminDb) return _adminDb
+  if (getApps().length === 0) initializeApp()
+  _adminDb = getFirestore()
+  return _adminDb
+}
+
+let _adminAuth: Auth | null = null
+function getAdminAuth(): Auth {
+  if (_adminAuth) return _adminAuth
+  if (getApps().length === 0) initializeApp()
+  _adminAuth = getAuth()
+  return _adminAuth
+}
 
 const ANTHROPIC_API_KEY = defineSecret('ANTHROPIC_API_KEY')
 const CLERK_SECRET_KEY = defineSecret('CLERK_SECRET_KEY')
 const RESEND_API_KEY = defineSecret('RESEND_API_KEY')
+const STRIPE_SECRET_KEY = defineSecret('STRIPE_SECRET_KEY')
+const STRIPE_WEBHOOK_SECRET = defineSecret('STRIPE_WEBHOOK_SECRET')
+
+// Where customers return after Stripe Checkout. The public invoice page lives
+// at /inv/<id>; on return it re-reads the invoice (now marked paid by webhook).
+const PUBLIC_HOST = 'https://contractors-office-96731.web.app'
+
+// The $19.99/mo "BuildPro+ Pro" recurring price. Test-mode price ID for now;
+// swap to the live price_... here when going live.
+const PRO_PRICE_ID = 'price_1TbzCzKz3SO2ZkDQ5M3ZYbyr'
+
+// ──────────────────────────────────────────────────────────────────────────
+// Subscription / usage gate
+// Free tier: 5 AI quotes total. After that, AI features turn off until the
+// user upgrades to the paid subscription (wired up in a later session).
+// users/{userId} doc shape:
+//   tier: 'free' | 'pro'
+//   aiQuotesUsed: number
+//   stripeCustomerId?: string
+//   stripeSubscriptionId?: string
+//   subscriptionStatus?: 'active' | 'past_due' | 'canceled' | ...
+// ──────────────────────────────────────────────────────────────────────────
+
+const FREE_TIER_AI_LIMIT = 5
+
+interface UserDoc {
+  tier?: 'free' | 'pro'
+  aiQuotesUsed?: number
+}
+
+// Ensures the user's gate check passes BEFORE we burn an Anthropic call.
+// Throws HttpsError('resource-exhausted') with a friendly message when the
+// free tier is used up. Increments usage atomically on success.
+async function consumeAiQuoteOrThrow(userId: string, featureName: string): Promise<{ tier: 'free' | 'pro'; used: number; remaining: number | null }> {
+  const db = getAdminDb()
+  const userRef = db.collection('users').doc(userId)
+  const result = await db.runTransaction(async tx => {
+    const snap = await tx.get(userRef)
+    const data = (snap.data() as UserDoc | undefined) ?? {}
+    const tier: 'free' | 'pro' = data.tier === 'pro' ? 'pro' : 'free'
+    const used = data.aiQuotesUsed ?? 0
+
+    if (tier === 'free' && used >= FREE_TIER_AI_LIMIT) {
+      throw new HttpsError(
+        'resource-exhausted',
+        `You've used all ${FREE_TIER_AI_LIMIT} free instant ${featureName}s. Upgrade to BuildPro+ Pro for unlimited generations.`,
+      )
+    }
+
+    // Pro = unlimited. We still count usage for analytics/billing-debug, but
+    // don't enforce a cap.
+    tx.set(userRef, {
+      tier,
+      aiQuotesUsed: FieldValue.increment(1),
+      lastAiAt: new Date().toISOString(),
+    }, { merge: true })
+
+    return {
+      tier,
+      used: used + 1,
+      remaining: tier === 'pro' ? null : Math.max(0, FREE_TIER_AI_LIMIT - (used + 1)),
+    }
+  })
+  console.log(`AI gate: user=${userId} feature=${featureName} tier=${result.tier} used=${result.used} remaining=${result.remaining}`)
+  return result
+}
+
+// Refund one consumed credit when a generation fails AFTER the gate charged it,
+// so a transient outage doesn't cost a free-tier user one of their 5 quotes.
+// Never lets the counter go negative.
+async function refundAiQuote(userId: string): Promise<void> {
+  try {
+    const db = getAdminDb()
+    const userRef = db.collection('users').doc(userId)
+    await db.runTransaction(async tx => {
+      const snap = await tx.get(userRef)
+      const used = (snap.data() as UserDoc | undefined)?.aiQuotesUsed ?? 0
+      if (used > 0) tx.set(userRef, { aiQuotesUsed: used - 1 }, { merge: true })
+    })
+  } catch (err) {
+    console.error('AI credit refund failed for', userId, err)
+  }
+}
 
 interface MaterialInput { name: string; quantity: number; unit: string; unitPrice: number }
 interface RentalInput { name: string; days: number; dailyRate: number }
@@ -398,6 +505,34 @@ async function verifyClerk(token: string): Promise<string> {
   }
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Clerk → Firebase auth bridge.
+// The app authenticates with Clerk, but Firebase Security Rules can only see a
+// Firebase session. This function verifies the Clerk token server-side, then
+// mints a Firebase CUSTOM TOKEN whose uid == the Clerk user id. The frontend
+// calls signInWithCustomToken() with it, so request.auth.uid in Storage/
+// Firestore rules equals the Clerk user id — letting us enforce per-user
+// isolation at the database layer (not just the UI).
+//
+// The Clerk uid (e.g. "user_3DZ...") already matches how all data is keyed
+// (createdBy == user.id, userLogos/{user.id}/...), so no migration is needed.
+// ──────────────────────────────────────────────────────────────────────────
+export const exchangeFirebaseToken = onCall<{ clerkToken: string }>(
+  { secrets: [CLERK_SECRET_KEY], cors: true, timeoutSeconds: 30 },
+  async (request) => {
+    const { clerkToken } = request.data ?? {} as { clerkToken: string }
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    const userId = await verifyClerk(clerkToken)
+    try {
+      const firebaseToken = await getAdminAuth().createCustomToken(userId)
+      return { token: firebaseToken }
+    } catch (err) {
+      console.error('createCustomToken failed', err)
+      throw new HttpsError('internal', 'Could not create Firebase session token.')
+    }
+  },
+)
+
 export const generateAIQuote = onCall<GenerateCallPayload>(
   {
     secrets: [ANTHROPIC_API_KEY, CLERK_SECRET_KEY],
@@ -415,6 +550,12 @@ export const generateAIQuote = onCall<GenerateCallPayload>(
 
     const userId = await verifyClerk(clerkToken)
     console.log(`generateAIQuote user=${userId} job=${input.jobTypeName}`)
+
+    // Subscription gate — burns one of the free-tier AI quotes, or rejects
+    // if the user has used all 5. Atomic increment so concurrent calls
+    // can't sneak past the limit. (Note: we burn the credit BEFORE the
+    // call, so a failed AI call still counts. Could refund on retry later.)
+    await consumeAiQuoteOrThrow(userId, 'quote')
 
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() })
 
@@ -443,6 +584,8 @@ export const generateAIQuote = onCall<GenerateCallPayload>(
         return JSON.parse(textBlock.text)
       })
     } catch (err) {
+      // The gate already charged a credit; refund it so a failure is free.
+      await refundAiQuote(userId)
       if (err instanceof HttpsError) throw err
       console.error('Anthropic call failed after retries', err)
       throw new HttpsError('unavailable', friendlyAnthropicError(err))
@@ -473,6 +616,10 @@ export const analyzeScan = onCall<AnalyzeCallPayload>(
 
     const userId = await verifyClerk(clerkToken)
     console.log(`analyzeScan user=${userId} images=${images.length} transcriptLen=${transcript.length}`)
+
+    // Subscription gate — same as generateAIQuote. Video/photo scan also
+    // counts as one AI quote against the free tier.
+    await consumeAiQuoteOrThrow(userId, 'quote')
 
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() })
 
@@ -525,6 +672,8 @@ Analyze the images and the contractor's narration together. Produce the structur
         return JSON.parse(textBlock.text)
       })
     } catch (err) {
+      // The gate already charged a credit; refund it so a failure is free.
+      await refundAiQuote(userId)
       if (err instanceof HttpsError) throw err
       console.error('Anthropic scan analysis failed after retries', err)
       throw new HttpsError('unavailable', friendlyAnthropicError(err))
@@ -783,5 +932,607 @@ export const sendEstimateEmail = onCall<SendEstimateCallPayload>(
       const msg = err instanceof Error ? err.message : String(err)
       throw new HttpsError('internal', `Email send failed: ${msg}`)
     }
+  },
+)
+
+// ──────────────────────────────────────────────────────────────────────────
+// Change Order AI generator
+// Same Claude brain as the main quote generator, with the same NC pricing
+// + labor rules + shed knowledge. Just produces a simpler output: a
+// description, reason category, and itemized line items.
+// ──────────────────────────────────────────────────────────────────────────
+
+interface GenerateChangeOrderInput {
+  customerName: string
+  jobTypeName: string          // The project this change order is on
+  jobLocationZip?: string
+  originalTotal: number        // For context — AI knows the baseline price
+  description: string          // What the user wants the change order to be about
+  hourlyRateOverride?: number
+}
+
+interface GenerateChangeOrderPayload {
+  clerkToken: string
+  input: GenerateChangeOrderInput
+}
+
+const CHANGE_ORDER_SYSTEM_PROMPT = `You are a senior general contractor in central North Carolina drafting a change order on an existing project.
+
+Your job: given a brief description of what changed, produce a clean, customer-ready change order with itemized line items.
+
+Output requirements:
+- description: A short, professional 1-2 sentence summary of what changed (customer-facing). Use clear plain English.
+- reason: One of 'customer_requested', 'site_condition', 'code_requirement', or 'other' — pick whichever fits best.
+- line_items: An array of itemized changes. Each line:
+    - name: a clear item or labor description
+    - quantity: positive number for additions, NEGATIVE for credits/removals
+    - unit_price: dollar amount per unit
+    - line_total: quantity × unit_price (NEGATIVE for credits)
+- contractor_notes: private notes about risks, install considerations, or things to verify on site. Not shown to the customer.
+
+CHANGE ORDER PRICING RULES:
+- Use NC fair-market pricing (see reference prices below). Do NOT pad.
+- A change order should reflect the actual delta — material upcharges, additional labor hours, or credits for items removed.
+- If the customer is UPGRADING (e.g. ceramic → subway tile), include BOTH the credit for the original material AND the charge for the new one. Use a negative line for the credit.
+- If the customer wants to ADD scope (e.g. "also paint the closet"), itemize materials + labor for just that addition.
+- If they want to REMOVE scope, all line items should be negative (credit back to customer).
+- Labor: use $65/hr NC default unless the contractor specifies otherwise. Be realistic — small change orders should be 1-3 hours of labor, not 10.
+
+${NC_PRICING_GUIDANCE}
+
+${NC_LABOR_GUIDANCE}
+
+ARITHMETIC RULE: quantity × unit_price = line_total. Negative quantity gives negative line_total (a credit).`
+
+function buildChangeOrderUserPrompt(input: GenerateChangeOrderInput): string {
+  const rateLine = input.hourlyRateOverride && input.hourlyRateOverride > 0
+    ? `Contractor's hourly rate: $${input.hourlyRateOverride}/hour (use this for any labor line items).`
+    : `No hourly rate override — use $65/hour NC default for labor.`
+
+  return `Existing project: ${input.jobTypeName} for ${input.customerName}
+Original project total: $${input.originalTotal.toFixed(2)}
+Location: ZIP ${input.jobLocationZip || '(not specified — assume central NC)'}
+${rateLine}
+
+WHAT CHANGED (contractor's description):
+${input.description}
+
+Generate the structured change order. Itemize materials and labor separately. Use negative quantities for credits.`
+}
+
+export const generateChangeOrder = onCall<GenerateChangeOrderPayload>(
+  {
+    secrets: [ANTHROPIC_API_KEY, CLERK_SECRET_KEY],
+    timeoutSeconds: 120,
+    memory: '512MiB',
+    cors: true,
+  },
+  async (request) => {
+    const { clerkToken, input } = request.data ?? ({} as GenerateChangeOrderPayload)
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    if (!input?.customerName || !input?.description) {
+      throw new HttpsError('invalid-argument', 'Missing customer name or change description')
+    }
+
+    const userId = await verifyClerk(clerkToken)
+    console.log(`generateChangeOrder user=${userId} job=${input.jobTypeName}`)
+
+    // Free-tier gate — change orders count against the 5 free generations.
+    await consumeAiQuoteOrThrow(userId, 'generation')
+
+    const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() })
+
+    try {
+      return await withAnthropicRetry('generateChangeOrder', async () => {
+        const stream = client.messages.stream({
+          model: 'claude-opus-4-7',
+          max_tokens: 4000,
+          thinking: { type: 'adaptive' },
+          output_config: {
+            effort: 'medium',
+            format: { type: 'json_schema', schema: changeOrderSchema },
+          },
+          system: CHANGE_ORDER_SYSTEM_PROMPT,
+          messages: [{ role: 'user', content: buildChangeOrderUserPrompt(input) }],
+        })
+        const message = await stream.finalMessage()
+        const textBlock = message.content.find(b => b.type === 'text')
+        if (!textBlock || textBlock.type !== 'text') {
+          throw new HttpsError('internal', 'Claude returned no text content')
+        }
+        return JSON.parse(textBlock.text)
+      })
+    } catch (err) {
+      await refundAiQuote(userId)
+      if (err instanceof HttpsError) throw err
+      console.error('Change order generation failed after retries', err)
+      throw new HttpsError('unavailable', friendlyAnthropicError(err))
+    }
+  },
+)
+
+// ──────────────────────────────────────────────────────────────────────────
+// Thank-You Letter generator for project completion
+// Returns a short, warm, customer-facing letter that gets bound with the
+// project photo slideshow into a single PDF the contractor can print or share.
+// ──────────────────────────────────────────────────────────────────────────
+
+interface ThankYouInput {
+  customerName: string
+  jobTypeName: string
+  jobLocationZip?: string
+  contractorName?: string
+  contractorBusiness?: string
+  highlights?: string  // Optional notes from the contractor about what stood out
+}
+
+interface ThankYouPayload {
+  clerkToken: string
+  input: ThankYouInput
+}
+
+const THANK_YOU_SYSTEM_PROMPT = `You are writing a brief, warm, professional thank-you letter from a contractor to a customer at the completion of a project.
+
+Output a JSON object with these exact fields:
+- greeting: A short greeting line. E.g. "Dear Sarah," or "Hi Mike,". Use the customer's first name if possible.
+- opening: ONE sentence thanking them for the opportunity to work on their project. If a business name is provided in the user prompt, weave it naturally into this opening sentence — e.g. "Thank you for choosing [BusinessName] for your kitchen remodel." When no business name is given, use a personal opening like "Thank you for letting me handle your kitchen remodel."
+- body: TWO short paragraphs (3-5 sentences each):
+    1) A warm reflection on the work — what was satisfying, any standout moments, the customer's role in making it go smoothly.
+    2) A note about quality, the photos enclosed, and a hint that you stand behind the work and welcome follow-up if anything needs attention. If a business name is provided, you may end this paragraph referencing the business once more (e.g. "Everyone at [BusinessName] appreciates the trust you put in us.") — but don't overdo it.
+- closing: A short closing line ("With appreciation," / "Sincerely," / "Thank you again,") on its own line, followed by the contractor's name (use EXACTLY the name given in the user prompt — never invent one) on the next line, then the business name on a third line if provided. If no contractor name is given, use just the closing line and business name. Use real newlines between each. Format example (placeholders — substitute the real values from the user prompt):
+    With appreciation,
+    [Contractor Name]
+    [Business Name]
+
+Tone:
+- Genuine and human, not corporate.
+- Professional but not stiff — like a respected tradesman writing a personal note.
+- 200-250 words total across the body. Customer-facing.
+- No bullet lists, no headings, no markdown. Just clean prose.
+- If a business name is given, treat it as the brand name customers should remember — say it 1-2 times max so it's prominent but not pushy.
+
+CRITICAL — CONTRACTOR NOTES: If the user prompt includes a "MUST INCLUDE — contractor's notes" section, you MUST naturally weave EVERY point from those notes into the body of the letter. These are specific things the contractor explicitly asked you to mention (e.g. a detail about the job, a compliment to the customer, a callback offer). Do not ignore, summarize away, or omit any of them — they are required content. Work them in smoothly so the letter still reads naturally.
+
+The output goes onto a printed PDF alongside a slideshow of project photos.`
+
+interface ThankYouLetter {
+  greeting: string
+  opening: string
+  body: string
+  closing: string
+}
+
+const thankYouSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    greeting: { type: 'string' },
+    opening: { type: 'string' },
+    body: { type: 'string' },
+    closing: { type: 'string' },
+  },
+  required: ['greeting', 'opening', 'body', 'closing'],
+} as const
+
+export const generateThankYouLetter = onCall<ThankYouPayload>(
+  {
+    secrets: [ANTHROPIC_API_KEY, CLERK_SECRET_KEY],
+    timeoutSeconds: 60,
+    memory: '512MiB',
+    cors: true,
+  },
+  async (request) => {
+    const { clerkToken, input } = request.data ?? ({} as ThankYouPayload)
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    if (!input?.customerName || !input?.jobTypeName) {
+      throw new HttpsError('invalid-argument', 'Missing customer name or job type')
+    }
+
+    const userId = await verifyClerk(clerkToken)
+    console.log(`generateThankYouLetter user=${userId} customer=${input.customerName}`)
+
+    // Free-tier gate — thank-you letters count against the 5 free generations.
+    await consumeAiQuoteOrThrow(userId, 'generation')
+
+    const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() })
+
+    const userPrompt = `Customer: ${input.customerName}
+Job: ${input.jobTypeName}
+${input.jobLocationZip ? `Location: ZIP ${input.jobLocationZip}\n` : ''}${input.contractorName ? `Signed by: ${input.contractorName}${input.contractorBusiness ? ` (${input.contractorBusiness})` : ''}\n` : ''}${input.highlights ? `\n=== MUST INCLUDE — contractor's notes (weave ALL of these into the letter, do not omit any) ===\n${input.highlights}\n=== end contractor's notes ===\n` : ''}
+Write the thank-you letter.`
+
+    try {
+      return await withAnthropicRetry('generateThankYouLetter', async () => {
+        const stream = client.messages.stream({
+          model: 'claude-opus-4-7',
+          max_tokens: 2000,
+          thinking: { type: 'adaptive' },
+          output_config: {
+            effort: 'medium',
+            format: { type: 'json_schema', schema: thankYouSchema },
+          },
+          system: THANK_YOU_SYSTEM_PROMPT,
+          messages: [{ role: 'user', content: userPrompt }],
+        })
+        const message = await stream.finalMessage()
+        const textBlock = message.content.find(b => b.type === 'text')
+        if (!textBlock || textBlock.type !== 'text') {
+          throw new HttpsError('internal', 'Claude returned no text content')
+        }
+        return JSON.parse(textBlock.text) as ThankYouLetter
+      })
+    } catch (err) {
+      await refundAiQuote(userId)
+      if (err instanceof HttpsError) throw err
+      console.error('Thank-you letter generation failed', err)
+      throw new HttpsError('unavailable', friendlyAnthropicError(err))
+    }
+  },
+)
+
+// ──────────────────────────────────────────────────────────────────────────
+// Invoice copywriting (intro + payment terms)
+// Line items + totals come from project data on the client side — this just
+// produces the friendly cover text. Cheap + fast Claude call.
+// ──────────────────────────────────────────────────────────────────────────
+
+interface InvoiceCopyInput {
+  customerName: string
+  jobTypeName: string
+  businessName?: string
+  contractorName?: string
+  total: number
+  amountPaid?: number
+  dueInDays?: number
+  paymentMethods?: string  // e.g. "check, Venmo, Zelle, cash"
+}
+
+const invoiceCopySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    intro_note: { type: 'string' },
+    payment_terms: { type: 'string' },
+  },
+  required: ['intro_note', 'payment_terms'],
+} as const
+
+const INVOICE_COPY_SYSTEM_PROMPT = `You are writing the cover text for a contractor invoice. Output:
+- intro_note: ONE warm but professional sentence introducing the invoice. Reference the job type naturally. If a business name is provided, sign on behalf of it.
+- payment_terms: ONE short paragraph (2-3 sentences) covering:
+    - Payment due date (use the dueInDays value, default 14 days)
+    - Accepted payment methods (use paymentMethods if provided, otherwise default to "check, Venmo, Zelle, or cash")
+    - A brief courtesy line about reaching out with questions
+Tone: professional, friendly, brief. Customer-facing. No markdown.`
+
+export const generateInvoiceCopy = onCall<{ clerkToken: string; input: InvoiceCopyInput }>(
+  {
+    secrets: [ANTHROPIC_API_KEY, CLERK_SECRET_KEY],
+    timeoutSeconds: 60,
+    memory: '512MiB',
+    cors: true,
+  },
+  async (request) => {
+    const { clerkToken, input } = request.data ?? {} as { clerkToken: string; input: InvoiceCopyInput }
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    if (!input?.customerName) throw new HttpsError('invalid-argument', 'Missing customer name')
+
+    const userId = await verifyClerk(clerkToken)
+    console.log(`generateInvoiceCopy user=${userId} customer=${input.customerName}`)
+
+    // Free-tier gate — invoice copy counts against the 5 free generations.
+    await consumeAiQuoteOrThrow(userId, 'generation')
+
+    const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() })
+    const prompt = `Customer: ${input.customerName}
+Job: ${input.jobTypeName}
+Total: $${input.total.toFixed(2)}
+${input.amountPaid && input.amountPaid > 0 ? `Already paid (deposit): $${input.amountPaid.toFixed(2)}\nAmount due: $${(input.total - input.amountPaid).toFixed(2)}\n` : ''}Due in: ${input.dueInDays ?? 14} days
+${input.paymentMethods ? `Payment methods: ${input.paymentMethods}\n` : ''}${input.businessName ? `Business: ${input.businessName}\n` : ''}${input.contractorName ? `Contractor: ${input.contractorName}\n` : ''}
+Write the invoice cover text.`
+
+    try {
+      return await withAnthropicRetry('generateInvoiceCopy', async () => {
+        const stream = client.messages.stream({
+          model: 'claude-opus-4-7',
+          max_tokens: 1500,
+          thinking: { type: 'adaptive' },
+          output_config: {
+            effort: 'low',
+            format: { type: 'json_schema', schema: invoiceCopySchema },
+          },
+          system: INVOICE_COPY_SYSTEM_PROMPT,
+          messages: [{ role: 'user', content: prompt }],
+        })
+        const message = await stream.finalMessage()
+        const textBlock = message.content.find(b => b.type === 'text')
+        if (!textBlock || textBlock.type !== 'text') {
+          throw new HttpsError('internal', 'Claude returned no text content')
+        }
+        return JSON.parse(textBlock.text) as { intro_note: string; payment_terms: string }
+      })
+    } catch (err) {
+      await refundAiQuote(userId)
+      if (err instanceof HttpsError) throw err
+      console.error('Invoice copy generation failed', err)
+      throw new HttpsError('unavailable', friendlyAnthropicError(err))
+    }
+  },
+)
+
+// ──────────────────────────────────────────────────────────────────────────
+// Stripe — customer pays an invoice by card.
+// createInvoiceCheckout: public (no Clerk) because the CUSTOMER calls it from
+// the public /inv/<id> page. We trust only the invoiceId and read the amount
+// from Firestore server-side — never from the client — so the amount can't be
+// tampered with. Returns a Stripe-hosted Checkout URL.
+// stripeWebhook: Stripe calls this after payment; we verify the signature and
+// flip the invoice to paid. This is the source of truth, not the redirect.
+// ──────────────────────────────────────────────────────────────────────────
+
+interface InvoiceDoc {
+  customerName?: string
+  customerEmail?: string
+  invoiceNumber?: string
+  jobTypeName?: string
+  amountDue?: number
+  status?: 'draft' | 'sent' | 'paid' | 'overdue'
+}
+
+export const createInvoiceCheckout = onRequest(
+  { secrets: [STRIPE_SECRET_KEY], cors: true, timeoutSeconds: 30 },
+  async (req, res) => {
+    if (req.method !== 'POST') { res.status(405).json({ error: 'Method not allowed' }); return }
+    const invoiceId = (req.body?.invoiceId ?? '') as string
+    if (!invoiceId) { res.status(400).json({ error: 'Missing invoiceId' }); return }
+
+    try {
+      const db = getAdminDb()
+      const snap = await db.collection('invoices').doc(invoiceId).get()
+      if (!snap.exists) { res.status(404).json({ error: 'Invoice not found' }); return }
+      const inv = snap.data() as InvoiceDoc
+
+      if (inv.status === 'paid') { res.status(409).json({ error: 'This invoice is already paid.' }); return }
+      const amountDue = Number(inv.amountDue ?? 0)
+      if (!(amountDue > 0)) { res.status(400).json({ error: 'Nothing is due on this invoice.' }); return }
+
+      const stripe = new StripeLib(STRIPE_SECRET_KEY.value())
+      const returnUrl = `${PUBLIC_HOST}/inv/${invoiceId}`
+      // Amount is read from Firestore server-side (never from the client) and
+      // converted to integer cents — this is the only source for what's charged.
+      const amountCents = Math.round(amountDue * 100)
+      const session = await stripe.checkout.sessions.create({
+        mode: 'payment',
+        // Omit payment_method_types so Stripe shows dynamic payment methods.
+        line_items: [{
+          quantity: 1,
+          price_data: {
+            currency: 'usd',
+            unit_amount: amountCents,
+            product_data: {
+              name: `Invoice ${inv.invoiceNumber ?? ''}`.trim(),
+              description: `${inv.jobTypeName ?? 'Services'} — ${inv.customerName ?? ''}`.trim(),
+            },
+          },
+        }],
+        ...(inv.customerEmail ? { customer_email: inv.customerEmail } : {}),
+        success_url: returnUrl,
+        cancel_url: returnUrl,
+        // Stamped onto the webhook event so we know which invoice to mark paid.
+        metadata: { invoiceId },
+        payment_intent_data: { metadata: { invoiceId } },
+      }, {
+        // Idempotency: keying on invoiceId + current amount means rapid repeat
+        // clicks (or two open tabs) reuse the SAME checkout session instead of
+        // creating duplicates that could each be paid. A legitimate new amount
+        // (after an edit) produces a new key, so re-billing still works.
+        idempotencyKey: `inv_${invoiceId}_${amountCents}`,
+      })
+
+      await snap.ref.set({ stripeSessionId: session.id }, { merge: true })
+      res.json({ url: session.url })
+    } catch (err) {
+      console.error('createInvoiceCheckout failed', err)
+      res.status(500).json({ error: 'Could not start checkout. Please try again.' })
+    }
+  },
+)
+
+// ──────────────────────────────────────────────────────────────────────────
+// Stripe — contractor subscribes to BuildPro+ Pro ($19.99/mo).
+// These are onCall (the CONTRACTOR is signed in via Clerk). We create/reuse a
+// Stripe Customer per user, then either start a subscription Checkout or open
+// the Customer Portal. The webhook (below) flips users/{id}.tier on/off based
+// on subscription lifecycle events — webhook is the source of truth.
+// ──────────────────────────────────────────────────────────────────────────
+
+// Get the user's existing Stripe customer id, or create one and persist it.
+async function getOrCreateStripeCustomer(stripe: InstanceType<typeof StripeLib>, userId: string, email?: string): Promise<string> {
+  const db = getAdminDb()
+  const userRef = db.collection('users').doc(userId)
+  const snap = await userRef.get()
+  const existing = (snap.data() as { stripeCustomerId?: string } | undefined)?.stripeCustomerId
+  if (existing) return existing
+  const customer = await stripe.customers.create({
+    ...(email ? { email } : {}),
+    metadata: { clerkUserId: userId },
+  })
+  await userRef.set({ stripeCustomerId: customer.id }, { merge: true })
+  return customer.id
+}
+
+export const createSubscriptionCheckout = onCall<{ clerkToken: string; email?: string }>(
+  { secrets: [STRIPE_SECRET_KEY, CLERK_SECRET_KEY], cors: true, timeoutSeconds: 30 },
+  async (request) => {
+    const { clerkToken, email } = request.data ?? {} as { clerkToken: string; email?: string }
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    const userId = await verifyClerk(clerkToken)
+
+    try {
+      const stripe = new StripeLib(STRIPE_SECRET_KEY.value())
+      const customerId = await getOrCreateStripeCustomer(stripe, userId, email)
+      const returnUrl = `${PUBLIC_HOST}/?billing=`
+      const session = await stripe.checkout.sessions.create({
+        mode: 'subscription',
+        customer: customerId,
+        line_items: [{ price: PRO_PRICE_ID, quantity: 1 }],
+        success_url: `${returnUrl}success`,
+        cancel_url: `${returnUrl}cancel`,
+        // Stamp the user so the webhook can map the subscription back to them.
+        subscription_data: { metadata: { clerkUserId: userId } },
+        metadata: { clerkUserId: userId },
+      })
+      return { url: session.url }
+    } catch (err) {
+      console.error('createSubscriptionCheckout failed', err)
+      throw new HttpsError('internal', 'Could not start subscription checkout.')
+    }
+  },
+)
+
+export const createPortalSession = onCall<{ clerkToken: string }>(
+  { secrets: [STRIPE_SECRET_KEY, CLERK_SECRET_KEY], cors: true, timeoutSeconds: 30 },
+  async (request) => {
+    const { clerkToken } = request.data ?? {} as { clerkToken: string }
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    const userId = await verifyClerk(clerkToken)
+
+    try {
+      const db = getAdminDb()
+      const snap = await db.collection('users').doc(userId).get()
+      const customerId = (snap.data() as { stripeCustomerId?: string } | undefined)?.stripeCustomerId
+      if (!customerId) throw new HttpsError('failed-precondition', 'No subscription to manage yet.')
+      const stripe = new StripeLib(STRIPE_SECRET_KEY.value())
+      const portal = await stripe.billingPortal.sessions.create({
+        customer: customerId,
+        return_url: `${PUBLIC_HOST}/`,
+      })
+      return { url: portal.url }
+    } catch (err) {
+      if (err instanceof HttpsError) throw err
+      console.error('createPortalSession failed', err)
+      throw new HttpsError('internal', 'Could not open the billing portal.')
+    }
+  },
+)
+
+export const stripeWebhook = onRequest(
+  { secrets: [STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET], cors: false, timeoutSeconds: 30 },
+  async (req, res) => {
+    const sig = req.headers['stripe-signature']
+    if (!sig) { res.status(400).send('Missing signature'); return }
+
+    const stripe = new StripeLib(STRIPE_SECRET_KEY.value())
+    let event: ReturnType<typeof stripe.webhooks.constructEvent>
+    try {
+      // rawBody is required for signature verification — Firebase provides it.
+      event = stripe.webhooks.constructEvent(req.rawBody, sig, STRIPE_WEBHOOK_SECRET.value())
+    } catch (err) {
+      console.error('Stripe webhook signature verification failed', err)
+      res.status(400).send('Invalid signature')
+      return
+    }
+
+    try {
+      const db = getAdminDb()
+
+      // Flip a user's tier based on their Stripe subscription. Keeps Pro until
+      // the period ends on cancellation; drops to free on a dead subscription.
+      const applySubscriptionStatus = async (sub: {
+        id: string
+        status: string
+        metadata?: Record<string, string> | null
+        cancel_at_period_end?: boolean | null
+      }) => {
+        const userId = sub.metadata?.clerkUserId
+        if (!userId) {
+          console.warn('Subscription event without clerkUserId metadata', sub.id)
+          return
+        }
+        // "active" or "trialing" = Pro. "canceled"/"unpaid"/"incomplete_expired"
+        // = free. Stripe keeps status "active" until period end even when the
+        // user has set cancel_at_period_end, so "keep Pro until period ends" is
+        // handled automatically by Stripe's own status timing.
+        const proStatuses = ['active', 'trialing']
+        const isPro = proStatuses.includes(sub.status)
+        await db.collection('users').doc(userId).set({
+          tier: isPro ? 'pro' : 'free',
+          subscriptionStatus: sub.status,
+          stripeSubscriptionId: sub.id,
+          cancelAtPeriodEnd: sub.cancel_at_period_end ?? false,
+        }, { merge: true })
+        console.log(`User ${userId} tier=${isPro ? 'pro' : 'free'} (sub ${sub.status})`)
+      }
+
+      switch (event.type) {
+        case 'checkout.session.completed': {
+          const session = event.data.object
+          // Subscription signup → grant Pro immediately (don't wait for the
+          // separate subscription.created event). The webhook reconciles later.
+          if (session.mode === 'subscription') {
+            const userId = session.metadata?.clerkUserId
+            if (userId) {
+              await db.collection('users').doc(userId).set({
+                tier: 'pro',
+                subscriptionStatus: 'active',
+                ...(typeof session.subscription === 'string' ? { stripeSubscriptionId: session.subscription } : {}),
+              }, { merge: true })
+              console.log(`User ${userId} upgraded to Pro via checkout`)
+            }
+            break
+          }
+          // Otherwise it's a one-time invoice payment.
+          const invoiceId = session.metadata?.invoiceId
+          if (invoiceId && session.payment_status === 'paid') {
+            const invRef = db.collection('invoices').doc(invoiceId)
+            const invSnap = await invRef.get()
+            await invRef.set({
+              status: 'paid',
+              amountDue: 0,
+              paidAt: new Date().toISOString(),
+              stripePaymentIntentId: typeof session.payment_intent === 'string' ? session.payment_intent : null,
+            }, { merge: true })
+            console.log(`Invoice ${invoiceId} marked paid via Stripe`)
+
+            // Auto-advance the project to "closed" now that it's paid. Only move
+            // forward from completed → closed; never knock a project backward.
+            const projectId = (invSnap.data() as { projectId?: string } | undefined)?.projectId
+            if (projectId) {
+              try {
+                const projRef = db.collection('projects').doc(projectId)
+                const projSnap = await projRef.get()
+                const status = (projSnap.data() as { status?: string } | undefined)?.status
+                if (status && status !== 'closed') {
+                  await projRef.set({
+                    status: 'closed',
+                    closedAt: new Date().toISOString(),
+                    notes: 'Invoice paid in full — project auto-closed.',
+                  }, { merge: true })
+                  console.log(`Project ${projectId} auto-closed (invoice paid)`)
+                }
+              } catch (projErr) {
+                console.error('Could not auto-close project after payment', projErr)
+              }
+            }
+          }
+          break
+        }
+        case 'customer.subscription.created':
+        case 'customer.subscription.updated':
+        case 'customer.subscription.deleted': {
+          await applySubscriptionStatus(event.data.object)
+          break
+        }
+        default:
+          // Ignore other event types.
+          break
+      }
+    } catch (err) {
+      console.error('Stripe webhook handling failed', err)
+      res.status(500).send('Handler error')
+      return
+    }
+
+    res.json({ received: true })
   },
 )

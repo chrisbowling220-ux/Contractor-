@@ -1,0 +1,103 @@
+rules_version = '2';
+
+// Per-user isolation is enforced here using the Clerk→Firebase bridge:
+// exchangeFirebaseToken (Cloud Function) mints a Firebase custom token whose
+// uid == the Clerk user id, and the frontend signs in with it. So
+// request.auth.uid == the Clerk user id, and it matches the `createdBy` field
+// (and {userId} doc id) that all data is keyed by.
+//
+// Public share pages (estimate, invoice, change order, thank-you, photo log)
+// are viewed by UNAUTHENTICATED customers, so specific collections allow public
+// READ, and estimates/changeOrders allow a tightly-scoped public UPDATE so the
+// customer can sign off (only the response fields — never totals/line items).
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function isOwner(resourceData) {
+      return isSignedIn() && request.auth.uid == resourceData.createdBy;
+    }
+    // True if the incoming write changes ONLY the listed fields (plus none else).
+    function onlyChanges(allowed) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(allowed);
+    }
+
+    // ── users/{userId}: the owner's profile/tier. Public read so share pages
+    //    can show business branding (name, logo, license). No public write. ──
+    match /users/{userId} {
+      allow read: if true;
+      allow write: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    // ── estimates: owner full access. Public read (view shared estimate).
+    //    Public update limited to the customer sign-off fields only. ──
+    match /estimates/{id} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
+      allow update: if isOwner(resource.data)
+        || onlyChanges(['customerResponse', 'status']);
+      allow delete: if isOwner(resource.data);
+    }
+
+    // ── changeOrders: same pattern as estimates. ──
+    match /changeOrders/{id} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
+      allow update: if isOwner(resource.data)
+        || onlyChanges(['customerResponse', 'status']);
+      allow delete: if isOwner(resource.data);
+    }
+
+    // ── invoices & thankYouPackages: public read (customer views/pays),
+    //    owner-only create/update/delete. The Stripe webhook updates invoices
+    //    via the Admin SDK, which bypasses these rules. ──
+    match /invoices/{id} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
+      allow update, delete: if isOwner(resource.data);
+    }
+    match /thankYouPackages/{id} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
+      allow update, delete: if isOwner(resource.data);
+    }
+
+    // ── customers: public read (photo-log share page needs the customer doc),
+    //    owner-only writes. ──
+    match /customers/{id} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
+      allow update, delete: if isOwner(resource.data);
+    }
+
+    // ── projects, customerPhotos, projectPhotos: owner-only across the board.
+    //    Public pages don't read these directly (thank-you photos are snapshotted
+    //    into the package doc), so no public access needed. ──
+    match /projects/{id} {
+      allow read: if isOwner(resource.data);
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
+      allow update, delete: if isOwner(resource.data);
+    }
+    // customerPhotos: PUBLIC read — the customer photo-log share page
+    // (/log/{customerId}) is viewed by unauthenticated customers. Writes are
+    // owner-only.
+    match /customerPhotos/{id} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
+      allow update, delete: if isOwner(resource.data);
+    }
+    match /projectPhotos/{id} {
+      allow read: if isOwner(resource.data);
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
+      allow update, delete: if isOwner(resource.data);
+    }
+
+    // Everything else: denied.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

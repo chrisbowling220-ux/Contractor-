@@ -9,9 +9,45 @@ html, body, #root {
   margin: 0;
   padding: 0;
   min-height: 100vh;
-  background: #f8fafc;
   color: #1a1f2e;
+  /* Layered "blueprint" background:
+     1. Subtle navy radial glow in upper-left (depth + brand color)
+     2. Faint orange radial glow in lower-right (accent, ties to brand)
+     3. Cross-hatched architectural grid (1px lines every 40px + thin 10px sub-grid)
+     4. Diagonal "drafting" line at low opacity for movement
+     5. Base off-white gradient
+     All fixed so it doesn't scroll with content. */
+  background:
+    /* 1. Top-left navy glow */
+    radial-gradient(ellipse 800px 600px at 0% 0%, rgba(26, 31, 46, 0.06), transparent 60%),
+    /* 2. Bottom-right orange glow */
+    radial-gradient(ellipse 700px 500px at 100% 100%, rgba(249, 115, 22, 0.05), transparent 60%),
+    /* 3a. Major grid lines every 80px (1px navy) */
+    linear-gradient(rgba(26, 31, 46, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(26, 31, 46, 0.05) 1px, transparent 1px),
+    /* 3b. Minor grid lines every 16px (very faint) */
+    linear-gradient(rgba(26, 31, 46, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(26, 31, 46, 0.025) 1px, transparent 1px),
+    /* 4. Soft diagonal sweep */
+    linear-gradient(135deg, transparent 40%, rgba(249, 115, 22, 0.018) 50%, transparent 60%),
+    /* 5. Base */
+    linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%);
+  background-size:
+    100% 100%,
+    100% 100%,
+    80px 80px,
+    80px 80px,
+    16px 16px,
+    16px 16px,
+    100% 100%,
+    100% 100%;
+  background-attachment: fixed;
+  background-repeat: no-repeat, no-repeat, repeat, repeat, repeat, repeat, no-repeat, no-repeat;
 }
+
+/* Inside the signed-in app, the main content area gets a layered blueprint
+   pattern over a soft gradient. Sidebar (navy) and cards (white) sit on top
+   of it cleanly. */
 
 * { box-sizing: border-box; }
 
@@ -36,5 +72,15 @@ input, select, textarea, button {
   body { background: white; }
 }
 
+/* iPhone safe area — keeps content out from under the notch and home indicator
+   when the app is installed as a PWA and runs full-screen. */
+@supports (padding-top: env(safe-area-inset-top)) {
+  body {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse { 50% { opacity: 0.4; } }
+@keyframes slideInRight { from { transform: translateX(120%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }

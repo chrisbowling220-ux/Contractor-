@@ -80,18 +80,35 @@ export default function InvoiceEditModal({ invoice, onRegenerate, onDone, onClos
     }
   }
 
+  // Save current edits, open the branded customer invoice in a new tab/window,
+  // auto-trigger print there, and close back to Projects. Reuses the same
+  // public invoice layout the customer sees, so the printed PDF is consistent.
+  const handlePrint = async () => {
+    setSaving(true)
+    try {
+      await save()
+      const url = `https://contractors-office-96731.web.app/inv/${invoice.id}?print=1`
+      window.open(url, '_blank', 'noopener,noreferrer')
+      onClose()
+    } catch (err) {
+      alert('Could not open print view: ' + (err instanceof Error ? err.message : String(err)))
+      setSaving(false)
+    }
+  }
+
   const fieldLabel: React.CSSProperties = { display: 'block', fontSize: '11px', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '4px' }
   const field: React.CSSProperties = { width: '100%', padding: '8px 10px', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '14px', fontFamily: 'inherit', resize: 'vertical', boxSizing: 'border-box' }
 
   return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.6)', zIndex: 300, padding: '16px', overflowY: 'auto' }}>
       <div onClick={e => e.stopPropagation()} style={{ maxWidth: '640px', margin: '24px auto', background: '#f8fafc', borderRadius: '12px', overflow: 'hidden' }}>
-        <div style={{ background: '#1a1f2e', color: 'white', padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-          <div>
-            <h2 style={{ margin: 0, color: '#f97316', fontSize: '18px' }}>🧾 Edit Invoice {invoice.invoiceNumber}</h2>
-            <p style={{ margin: '2px 0 0', color: '#94a3b8', fontSize: '12px' }}>Edit the wording & payment details. Line items come from the estimate.</p>
-          </div>
-          <button onClick={onClose} style={{ background: 'transparent', color: 'white', border: '1px solid #475569', padding: '6px 14px', borderRadius: '6px', cursor: 'pointer' }}>← Back</button>
+        {/* Sticky header — back button is always reachable, even after scrolling */}
+        <div style={{ background: '#1a1f2e', color: 'white', padding: '14px 16px', position: 'sticky', top: 0, zIndex: 10 }}>
+          <button onClick={onClose} style={{ background: '#f97316', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, fontSize: '14px', marginBottom: '10px' }}>
+            ← Back to Project
+          </button>
+          <h2 style={{ margin: 0, color: '#f97316', fontSize: '18px' }}>🧾 Edit Invoice {invoice.invoiceNumber}</h2>
+          <p style={{ margin: '2px 0 0', color: '#94a3b8', fontSize: '12px' }}>Edit the wording & payment details. Line items come from the estimate.</p>
         </div>
 
         <div style={{ padding: '16px' }}>
@@ -151,6 +168,9 @@ export default function InvoiceEditModal({ invoice, onRegenerate, onDone, onClos
 
           <button onClick={handleDone} disabled={saving} style={{ width: '100%', background: saving ? '#cbd5e1' : '#16a34a', color: 'white', border: 'none', padding: '12px', borderRadius: '8px', cursor: saving ? 'default' : 'pointer', fontWeight: 700, fontSize: '15px' }}>
             Save & Continue to Send →
+          </button>
+          <button onClick={handlePrint} disabled={saving} style={{ width: '100%', marginTop: '8px', background: '#1a1f2e', color: 'white', border: 'none', padding: '12px', borderRadius: '8px', cursor: saving ? 'default' : 'pointer', fontWeight: 700, fontSize: '14px' }}>
+            🖨️ Print or Save as PDF
           </button>
           <button onClick={onClose} style={{ width: '100%', marginTop: '8px', background: 'transparent', border: '1px solid #e2e8f0', padding: '10px', borderRadius: '8px', cursor: 'pointer', color: '#64748b', fontWeight: 600 }}>
             Cancel

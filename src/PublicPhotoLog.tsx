@@ -24,9 +24,16 @@ export default function PublicPhotoLog({ customerId }: { customerId: string }) {
   const [error, setError] = useState('')
 
   useEffect(() => {
-    (async () => {
+    let done = false
+    const fallbackTimer = window.setTimeout(() => {
+      if (done) return
+      setError('Taking longer than expected. Check your connection and reload, or ask your contractor to resend.')
+      setLoading(false)
+    }, 15000)
+    ;(async () => {
       try {
         const cSnap = await getDoc(doc(db, 'customers', customerId))
+        if (done) return
         let ownerId: string | undefined
         if (cSnap.exists()) {
           const cd = cSnap.data() as { name?: string; address?: string; createdBy?: string }
@@ -53,12 +60,17 @@ export default function PublicPhotoLog({ customerId }: { customerId: string }) {
             }
           } catch { /* graceful fallback */ }
         }
-      } catch {
-        setError('Could not load the photo log. Please contact your contractor.')
+      } catch (err) {
+        if (done) return
+        console.error('PublicPhotoLog load failed:', err)
+        setError('Could not load the photo log. Please reload the page or contact your contractor.')
       } finally {
+        done = true
+        window.clearTimeout(fallbackTimer)
         setLoading(false)
       }
     })()
+    return () => { done = true; window.clearTimeout(fallbackTimer) }
   }, [customerId])
 
   if (loading) {

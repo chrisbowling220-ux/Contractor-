@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { db } from './firebase'
 import { collection, addDoc, getDocs, query, updateDoc, deleteDoc, doc, where, onSnapshot } from 'firebase/firestore'
 import { useUser } from '@clerk/clerk-react'
@@ -125,6 +125,46 @@ export default function Projects({ initialStatusFilter }: { initialStatusFilter?
     )
     return () => unsub()
   }, [user?.id])
+
+  // Live subscription on changeOrders so when a customer approves/declines one
+  // from the public share link, the project view reflects it immediately:
+  // status badge flips, and the Contract Total recalculates with the new
+  // approved delta folded in. No refresh needed.
+  useEffect(() => {
+    if (!user?.id) return
+    const sortDesc = <T extends { createdAt?: string }>(arr: T[]) =>
+      arr.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+    const unsub = onSnapshot(
+      query(collection(db, 'changeOrders'), where('createdBy', '==', user.id)),
+      snap => setChangeOrders(sortDesc(snap.docs.map(d => ({ id: d.id, ...d.data() } as ChangeOrder)))),
+      err => console.error('Change orders listener failed:', err),
+    )
+    return () => unsub()
+  }, [user?.id])
+
+  // After a customer pays (card or cash-choice), the dashboard listener stashes
+  // the related projectId in sessionStorage. When this page mounts and projects
+  // are loaded, auto-open that project and its thank-you panel so the user
+  // lands ready to send the thank-you letter — no extra clicks. Runs once
+  // per mount when projects first arrive.
+  const autoOpenedRef = useRef(false)
+  useEffect(() => {
+    if (autoOpenedRef.current) return
+    if (projects.length === 0 || !user?.id) return
+    // Key is user-scoped (set in App.tsx with the same user.id) so a different
+    // contractor on the same browser doesn't inherit a stale signal.
+    const sessionKey = `bp_open_thanks_for_project_${user.id}`
+    let projectId: string | null = null
+    try { projectId = window.sessionStorage?.getItem(sessionKey) || null } catch { /* noop */ }
+    if (!projectId) return
+    const target = projects.find(p => p.id === projectId)
+    if (!target) return
+    autoOpenedRef.current = true
+    try { window.sessionStorage?.removeItem(sessionKey) } catch { /* noop */ }
+    setActiveId(target.id)
+    openThankYouPanel(target).catch(err => console.error('Auto-open thank-you failed:', err))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects, user?.id])
 
   // Load the contractor's full business profile so print/PDF letterhead
   // and thank-you letter can use logo + contact info + license number.
@@ -392,8 +432,14 @@ ${link}
   }
 
   const aggregateForProject = (p: Project) => {
+    // Prefer the explicit projectId link when present (new shape). Fall back
+    // to customer-name + job-type matching ONLY for legacy estimates that
+    // were created before the link existed. This prevents double-counting
+    // when one customer has two same-type projects (e.g. two bathrooms).
     const matchByName = (s: string) => s.toLowerCase() === p.customerName.toLowerCase()
-    const ests = estimates.filter(e => matchByName(e.customerName) && e.jobTypeName === p.jobTypeName)
+    const ests = estimates.filter(e => e.projectId
+      ? e.projectId === p.id
+      : (matchByName(e.customerName) && e.jobTypeName === p.jobTypeName))
     // Filter change orders by projectId (new shape).
     const cos = changeOrders.filter(c => c.projectId === p.id)
     const quoteTotal = ests.reduce((s, e) => s + e.total, 0)
@@ -618,9 +664,14 @@ ${link}
           {/* Thank-You Package — shown when project is Completed or Closed */}
           {(activeProject.status === 'completed' || activeProject.status === 'closed') && (
             <div style={{ ...card, border: '2px solid #f97316', background: '#fff7ed' }}>
+              {invoices.some(inv => inv.projectId === activeProject.id && inv.status === 'paid') && (
+                <div style={{ background: '#f0fdf4', border: '1px solid #86efac', borderRadius: '8px', padding: '10px 14px', marginBottom: '12px', fontSize: '13px', color: '#16a34a', fontWeight: 600 }}>
+                  💳 Invoice paid — now's the perfect time to send {activeProject.customerName.split(' ')[0]} a thank-you with photos from the job.
+                </div>
+              )}
               <h3 style={{ margin: '0 0 4px', fontSize: '16px' }}>🎁 Customer Thank-You Package</h3>
               <p style={{ margin: '0 0 12px', fontSize: '13px', color: '#64748b' }}>
-                A warm, professionally written thank-you letter + a slideshow of photos you choose, shareable via SMS, email, or a copy link. Customer can save it as a PDF from their browser.
+                A warm, professionally written thank-you letter (with photos you choose from the whole job) — shareable via SMS, email, or a copy link. Customer can save it as a PDF.
               </p>
 
               {!thankYouPanelOpen ? (
@@ -723,8 +774,9 @@ ${link}
             </div>
           )}
 
-          {/* Invoice — shown when project is in_progress, completed, or closed */}
-          {(activeProject.status === 'in_progress' || activeProject.status === 'completed' || activeProject.status === 'closed') && (
+          {/* Final Invoice — shown only once the job is marked Complete (or
+              closed). A job in progress isn't invoiced yet. */}
+          {(activeProject.status === 'completed' || activeProject.status === 'closed') && (
             <div style={{ ...card, border: '2px solid #16a34a', background: '#f0fdf4' }}>
               <h3 style={{ margin: '0 0 4px', fontSize: '16px' }}>🧾 Final Invoice</h3>
               <p style={{ margin: '0 0 12px', fontSize: '13px', color: '#64748b' }}>

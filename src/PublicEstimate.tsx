@@ -26,9 +26,16 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
   const [submitError, setSubmitError] = useState('')
 
   useEffect(() => {
-    (async () => {
+    let done = false
+    const fallbackTimer = window.setTimeout(() => {
+      if (done) return
+      setError('Taking longer than expected. Check your connection and reload, or ask your contractor to resend.')
+      setLoading(false)
+    }, 15000)
+    ;(async () => {
       try {
         const snap = await getDoc(doc(db, 'estimates', estimateId))
+        if (done) return
         if (!snap.exists()) {
           setError('This estimate could not be found. The link may be expired or incorrect.')
         } else {
@@ -51,12 +58,17 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
           // Intentionally do NOT pre-fill the signature with the customer name —
           // the customer must type their own name to sign.
         }
-      } catch {
-        setError('Could not load the estimate. Please contact your contractor.')
+      } catch (err) {
+        if (done) return
+        console.error('PublicEstimate load failed:', err)
+        setError('Could not load the estimate. Please reload the page or contact your contractor.')
       } finally {
+        done = true
+        window.clearTimeout(fallbackTimer)
         setLoading(false)
       }
     })()
+    return () => { done = true; window.clearTimeout(fallbackTimer) }
   }, [estimateId])
 
   const submitResponse = async (action: 'approved' | 'declined') => {
@@ -127,9 +139,13 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
         />
 
         <div style={{ padding: '24px' }}>
-          <p style={{ fontSize: '15px', marginTop: 0, marginBottom: '20px' }}>
+          <p style={{ fontSize: '15px', marginTop: 0, marginBottom: '12px' }}>
             Hi <strong>{estimate.customerName}</strong>, here's your estimate.
           </p>
+
+          <div style={{ background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: '8px', padding: '10px 14px', marginBottom: '20px', fontSize: '13px', color: '#92400e', lineHeight: 1.5 }}>
+            ⓘ This is a <strong>rough estimate</strong>, not a guaranteed price. Final cost may change based on actual site conditions, material prices, and any changes to the scope of work. Your contractor will confirm details before work begins.
+          </div>
 
           {ai ? (
             <>

@@ -130,7 +130,7 @@ export default function ThankYouReviewModal({ pkg, fromName, onRegenerate, onClo
               {isPhone() && <a href={smsHref()} style={{ flex: '1 1 auto', background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '10px 12px', borderRadius: '8px', fontWeight: 700, textDecoration: 'none', color: '#1a1f2e', textAlign: 'center' }}>💬 Text</a>}
               <a href={mailtoHref()} style={{ flex: '1 1 auto', background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '10px 12px', borderRadius: '8px', fontWeight: 700, textDecoration: 'none', color: '#1a1f2e', textAlign: 'center' }}>✉️ Email</a>
               <button onClick={handleCopy} style={{ flex: '1 1 auto', background: '#16a34a', color: 'white', border: 'none', padding: '10px 12px', borderRadius: '8px', cursor: 'pointer', fontWeight: 700 }}>{linkCopied ? '✓ Copied' : '🔗 Copy link'}</button>
-              <a href={link} target="_blank" rel="noopener noreferrer" style={{ flex: '1 1 auto', background: '#1a1f2e', color: 'white', border: 'none', padding: '10px 12px', borderRadius: '8px', textDecoration: 'none', textAlign: 'center', fontWeight: 700 }}>👁️ Preview</a>
+              <a href={`${link}?contractor=1`} target="_blank" rel="noopener noreferrer" style={{ flex: '1 1 auto', background: '#1a1f2e', color: 'white', border: 'none', padding: '10px 12px', borderRadius: '8px', textDecoration: 'none', textAlign: 'center', fontWeight: 700 }}>👁️ Preview</a>
             </div>
           </div>
 

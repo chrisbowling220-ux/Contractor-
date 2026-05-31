@@ -90,6 +90,8 @@ export function openEstimatePrintWindow(e: Estimate, profileOrName?: string | Pr
     ${e.jobLocationZip ? `<strong>Location:</strong> ZIP ${esc(e.jobLocationZip)}<br/>` : ''}
     <strong>Date:</strong> ${esc(new Date(e.createdAt).toLocaleDateString())}</p>
 
+    <p style="background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;padding:10px 12px;font-size:12px;color:#92400e;line-height:1.5;">This is a <strong>rough estimate</strong>, not a guaranteed price. Final cost may change based on actual site conditions, material prices, and any changes to the scope of work.</p>
+
     ${ai ? `
       <h2>Summary</h2>
       <p>${esc(ai.customer_summary)}</p>

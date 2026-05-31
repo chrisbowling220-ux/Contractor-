@@ -6,6 +6,7 @@ import Customers from './Customers'
 import Settings, { fetchBusinessName } from './Settings'
 import ScanRoom from './ScanRoom'
 import Projects from './Projects'
+import Estimates from './Estimates'
 import PublicEstimate from './PublicEstimate'
 import PublicPhotoLog from './PublicPhotoLog'
 import PublicChangeOrder from './PublicChangeOrder'
@@ -13,6 +14,8 @@ import PublicThankYou from './PublicThankYou'
 import PublicInvoice from './PublicInvoice'
 import { autoConvertApprovedEstimates } from './lib/autoConvertEstimates'
 import { useFirebaseBridge } from './lib/useFirebaseBridge'
+import BusinessOnboarding from './BusinessOnboarding'
+import QuickPhotoCapture from './QuickPhotoCapture'
 import type { ProjectStatus } from './data/types'
 
 const ORANGE = '#f97316'
@@ -65,19 +68,22 @@ const TILES: Tile[] = [
   { key: 'customers',     label: 'Customers',     icon: '👥', blurb: 'Profiles, photos, history' },
 ]
 
-// Sidebar shows the same set as the dashboard tiles, plus a Settings entry
-// at the bottom (not a tile — secondary action).
+// Sidebar shows the dashboard tiles + Estimates + a Settings entry at the
+// bottom. Estimates isn't a dashboard tile (the Pending Estimates box links
+// there) but belongs in the nav for direct access.
 const NAV_ITEMS: Tile[] = [
   ...TILES,
+  { key: 'estimates', label: 'Estimates', icon: '📝', blurb: 'Pending, approved & declined' },
   { key: 'settings', label: 'Settings', icon: '⚙️', blurb: 'Business profile' },
 ]
 
 const TITLE_MAP: Record<string, string> = {
   dashboard: 'Dashboard',
+  estimates: 'Estimates',
   ...Object.fromEntries(TILES.map(t => [t.key, t.label])),
 }
 
-function DashboardHome({ counts, onPick, onBox, userName }: { counts: ReturnType<typeof useDashboardCounts>; onPick: (key: string) => void; onBox: (key: string, filter: ProjectStatus | 'all') => void; userName?: string }) {
+function DashboardHome({ counts, onPick, onBox, onPhotos, userName }: { counts: ReturnType<typeof useDashboardCounts>; onPick: (key: string) => void; onBox: (key: string, filter: ProjectStatus | 'all') => void; onPhotos: () => void; userName?: string }) {
   const isMobile = useIsMobile()
   const hour = new Date().getHours()
   const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'
@@ -117,7 +123,7 @@ function DashboardHome({ counts, onPick, onBox, userName }: { counts: ReturnType
           <div style={counterLabel}>Active Jobs ›</div>
         </button>
         <button
-          onClick={() => onBox('projects', 'lead')}
+          onClick={() => onPick('estimates')}
           style={{ ...counterCard, border: '2px solid transparent', cursor: 'pointer' }}
           onMouseOver={e => { e.currentTarget.style.borderColor = ORANGE }}
           onMouseOut={e => { e.currentTarget.style.borderColor = 'transparent' }}
@@ -144,10 +150,10 @@ function DashboardHome({ counts, onPick, onBox, userName }: { counts: ReturnType
         gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(3, 1fr)',
         gap: isMobile ? '12px' : '20px',
       }}>
-        {TILES.map(t => (
+        {[...TILES, { key: 'photo-capture', label: 'Job Photos', icon: '📸', blurb: 'Snap photos on site — saved to the job & thank-you letter' }].map(t => (
           <button
             key={t.key}
-            onClick={() => onPick(t.key)}
+            onClick={() => t.key === 'photo-capture' ? onPhotos() : onPick(t.key)}
             style={{
               background: 'white',
               border: '2px solid transparent',
@@ -180,6 +186,19 @@ function DashboardHome({ counts, onPick, onBox, userName }: { counts: ReturnType
 // authorize it. Until then we show a brief loading state.
 function FirebaseGate() {
   const { ready, error } = useFirebaseBridge()
+  const { user } = useUser()
+  // null = still checking; true/false = whether the user needs onboarding.
+  const [needsOnboarding, setNeedsOnboarding] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    if (!ready || !user?.id) return
+    let cancelled = false
+    fetchBusinessName(user.id).then(name => {
+      if (!cancelled) setNeedsOnboarding(!name.trim())
+    }).catch(() => { if (!cancelled) setNeedsOnboarding(false) })
+    return () => { cancelled = true }
+  }, [ready, user?.id])
+
   if (error) {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', background: '#f8fafc', padding: '24px' }}>
@@ -191,7 +210,7 @@ function FirebaseGate() {
       </div>
     )
   }
-  if (!ready) {
+  if (!ready || needsOnboarding === null) {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', background: '#f8fafc' }}>
         <div style={{ textAlign: 'center', color: '#64748b' }}>
@@ -200,6 +219,9 @@ function FirebaseGate() {
         </div>
       </div>
     )
+  }
+  if (needsOnboarding) {
+    return <BusinessOnboarding onDone={() => setNeedsOnboarding(false)} />
   }
   return <Dashboard />
 }
@@ -213,6 +235,7 @@ function Dashboard() {
   const counts = useDashboardCounts(user?.id)
   const isMobile = useIsMobile()
   const [conversionToast, setConversionToast] = useState<string | null>(null)
+  const [photoCaptureOpen, setPhotoCaptureOpen] = useState(false)
   const [businessNameBannerDismissed, setBusinessNameBannerDismissed] = useState(false)
   const [showBusinessNameBanner, setShowBusinessNameBanner] = useState(false)
 
@@ -255,6 +278,116 @@ function Dashboard() {
     )
 
     return () => { cancelled = true; unsub() }
+  }, [user?.id])
+
+  // Notify the contractor when a customer approves/declines a CHANGE ORDER.
+  // The CO doc gains a customerResponse + flips status — we watch for that
+  // transition and pop a toast. Approved COs also automatically fold into the
+  // project's Contract Total (the Projects listener handles the rebuild), so
+  // the "updated version from the original with the change accepted" lands
+  // without a refresh. Tracked IDs prevent re-toasting on reload.
+  useEffect(() => {
+    if (!user?.id) return
+    const notifiedKey = `bp_co_notified_${user.id}`
+    let notified: Set<string>
+    try {
+      notified = new Set(JSON.parse(window.sessionStorage?.getItem(notifiedKey) || '[]') as string[])
+    } catch {
+      notified = new Set()
+    }
+    // Skip the first snapshot so we don't toast for every pre-existing decision
+    // on load. We only want toasts for NEW decisions arriving live.
+    let primed = false
+    const unsub = onSnapshot(
+      query(collection(db, 'changeOrders'), where('createdBy', '==', user.id)),
+      snap => {
+        const newlyDecided: { customerName: string; action: 'approved' | 'declined'; delta: number }[] = []
+        snap.docs.forEach(d => {
+          const data = d.data() as { customerName?: string; customerResponse?: { action?: string }; status?: string; delta?: number }
+          const decided = data.status === 'approved' || data.status === 'declined'
+          if (decided && !notified.has(d.id)) {
+            if (primed) newlyDecided.push({
+              customerName: data.customerName || 'a customer',
+              action: data.status as 'approved' | 'declined',
+              delta: Number(data.delta) || 0,
+            })
+            notified.add(d.id)
+          }
+        })
+        if (newlyDecided.length > 0) {
+          const msg = newlyDecided.map(n => n.action === 'approved'
+            ? `✅ ${n.customerName} APPROVED a change order (${n.delta >= 0 ? '+' : '−'}$${Math.abs(n.delta).toFixed(2)}) — Contract Total updated.`
+            : `❌ ${n.customerName} declined a change order.`).join(' · ')
+          setConversionToast(msg)
+          setTimeout(() => setConversionToast(null), 9000)
+        }
+        try { window.sessionStorage?.setItem(notifiedKey, JSON.stringify(Array.from(notified))) } catch { /* noop */ }
+        primed = true
+      },
+      err => console.error('Change-order notification listener failed:', err),
+    )
+    return () => unsub()
+  }, [user?.id])
+
+  // Notify when a customer pays an invoice — by CARD (webhook flips status to
+  // 'paid') or by CASH (customer taps "Pay Cash" on the share link). Clicking
+  // the toast takes the contractor to Projects, where the project sits open
+  // with the thank-you panel ready to send (the panel auto-opens on payment).
+  useEffect(() => {
+    if (!user?.id) return
+    const notifiedKey = `bp_inv_notified_${user.id}`
+    let notified: Set<string>
+    try {
+      notified = new Set(JSON.parse(window.sessionStorage?.getItem(notifiedKey) || '[]') as string[])
+    } catch {
+      notified = new Set()
+    }
+    let primed = false
+    const unsub = onSnapshot(
+      query(collection(db, 'invoices'), where('createdBy', '==', user.id)),
+      snap => {
+        const events: { customerName: string; mode: 'card' | 'cash'; projectId?: string }[] = []
+        snap.docs.forEach(d => {
+          const data = d.data() as { customerName?: string; status?: string; customerCashChoice?: boolean; projectId?: string }
+          // Two distinct events per invoice: paid (card) and cashChoice. Track
+          // each separately so picking cash AND later paying still fires once
+          // each (rare, but possible).
+          if (data.status === 'paid') {
+            const key = `${d.id}:paid`
+            if (!notified.has(key)) {
+              if (primed) events.push({ customerName: data.customerName || 'a customer', mode: 'card', projectId: data.projectId })
+              notified.add(key)
+            }
+          }
+          if (data.customerCashChoice) {
+            const key = `${d.id}:cash`
+            if (!notified.has(key)) {
+              if (primed) events.push({ customerName: data.customerName || 'a customer', mode: 'cash', projectId: data.projectId })
+              notified.add(key)
+            }
+          }
+        })
+        // Queue the first event's projectId so Projects can auto-open the
+        // thank-you flow for it when the user taps the toast (or navigates).
+        const firstWithProject = events.find(e => e.projectId)
+        if (firstWithProject?.projectId) {
+          // User-scope the key so a different contractor signing in on the
+          // same browser doesn't get hit with another user's pending signal.
+          try { window.sessionStorage?.setItem(`bp_open_thanks_for_project_${user.id}`, firstWithProject.projectId) } catch { /* noop */ }
+        }
+        if (events.length > 0) {
+          const msg = events.map(e => e.mode === 'card'
+            ? `💳 ${e.customerName} paid by card — tap to send a thank-you.`
+            : `💵 ${e.customerName} will pay in cash — tap to send a thank-you.`).join(' · ')
+          setConversionToast(msg)
+          setTimeout(() => setConversionToast(null), 12000)
+        }
+        try { window.sessionStorage?.setItem(notifiedKey, JSON.stringify(Array.from(notified))) } catch { /* noop */ }
+        primed = true
+      },
+      err => console.error('Invoice notification listener failed:', err),
+    )
+    return () => unsub()
   }, [user?.id])
 
   // Detect return from Stripe subscription Checkout (?billing=success|cancel)
@@ -386,6 +519,11 @@ function Dashboard() {
             {isMobile && (
               <button onClick={() => setMenuOpen(true)} style={{ background: 'none', border: 'none', fontSize: '24px', cursor: 'pointer', padding: '4px 8px', lineHeight: 1 }}>☰</button>
             )}
+            {page !== 'dashboard' && (
+              <button onClick={() => go('dashboard')} style={{ background: '#f1f5f9', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '6px 12px', cursor: 'pointer', fontWeight: 600, fontSize: '13px', color: '#1a1f2e', whiteSpace: 'nowrap' }}>
+                ← Dashboard
+              </button>
+            )}
             <h1 style={{ fontSize: isMobile ? '16px' : '20px', fontWeight: 600, margin: 0 }}>{TITLE_MAP[page] ?? page}</h1>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
@@ -393,6 +531,8 @@ function Dashboard() {
             <UserButton />
           </div>
         </div>
+
+        {photoCaptureOpen && <QuickPhotoCapture onClose={() => setPhotoCaptureOpen(false)} />}
 
         {conversionToast && (
           <div
@@ -444,10 +584,11 @@ function Dashboard() {
                 </div>
               </div>
             )}
-            <DashboardHome counts={counts} onPick={go} onBox={goWithFilter} userName={user?.firstName || undefined} />
+            <DashboardHome counts={counts} onPick={go} onBox={goWithFilter} onPhotos={() => setPhotoCaptureOpen(true)} userName={user?.firstName || undefined} />
           </>
         )}
         {page === 'projects' && <Projects key={projectsFilter} initialStatusFilter={projectsFilter} />}
+        {page === 'estimates' && <Estimates />}
         {page === 'customers' && <Customers />}
         {page === 'scan-room' && <ScanRoom onNavigate={go} />}
         {page === 'settings' && <Settings />}

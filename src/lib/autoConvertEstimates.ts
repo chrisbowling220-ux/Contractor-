@@ -100,6 +100,13 @@ export async function autoConvertApprovedEstimates(userId: string): Promise<{
           updates.notes = notesFor(e)
           didAdvance = true
         }
+        // If the estimate is no longer declined (e.g. the contractor adjusted it
+        // and the customer then approved the new version), un-flag the project so
+        // it leaves the Declined view and rejoins the active pipeline.
+        if (!declined && proj.declined) {
+          updates.declined = false
+          didAdvance = true
+        }
         if (Object.keys(updates).length > 0) {
           await updateDoc(doc(db, 'projects', e.projectId), updates)
         }

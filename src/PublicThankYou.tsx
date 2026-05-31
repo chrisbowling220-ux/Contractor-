@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { doc, getDoc } from 'firebase/firestore'
 import { db } from './firebase'
 import type { ThankYouPackage } from './data/types'
+
+const PUBLIC_HOST = 'https://contractors-office-96731.web.app'
 
 // Public thank-you page at /thanks/<id>. No sign-in required.
 // Renders the AI-written letter + slideshow of project photos.
@@ -11,15 +13,32 @@ export default function PublicThankYou({ packageId }: { packageId: string }) {
   const [error, setError] = useState('')
 
   useEffect(() => {
-    (async () => {
+    let done = false
+    // Safety: if the Firestore read hangs (poor network, blocked request,
+    // whatever), don't leave the customer staring at a spinner forever.
+    // After 15s, surface a clear error with a retry button.
+    const fallbackTimer = window.setTimeout(() => {
+      if (done) return
+      setError('Taking longer than expected. Check your connection and reload, or ask your contractor to resend.')
+      setLoading(false)
+    }, 15000)
+    ;(async () => {
       try {
         const snap = await getDoc(doc(db, 'thankYouPackages', packageId))
-        if (!snap.exists()) setError('This page could not be found.')
+        if (done) return
+        if (!snap.exists()) setError('This page could not be found. The link may have expired — please ask your contractor to resend it.')
         else setPkg({ id: snap.id, ...snap.data() } as ThankYouPackage)
-      } catch {
-        setError('Could not load. Please contact your contractor.')
-      } finally { setLoading(false) }
+      } catch (err) {
+        if (done) return
+        console.error('PublicThankYou load failed:', err)
+        setError('Could not load. Please reload the page or contact your contractor.')
+      } finally {
+        done = true
+        window.clearTimeout(fallbackTimer)
+        setLoading(false)
+      }
     })()
+    return () => { done = true; window.clearTimeout(fallbackTimer) }
   }, [packageId])
 
   if (loading) {
@@ -29,8 +48,11 @@ export default function PublicThankYou({ packageId }: { packageId: string }) {
     return (
       <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f8fafc', padding: '24px' }}>
         <div style={{ maxWidth: '460px', textAlign: 'center' }}>
-          <h1 style={{ color: '#dc2626', fontSize: '20px', marginBottom: '12px' }}>Not Available</h1>
-          <p style={{ color: '#64748b' }}>{error || 'Unknown error.'}</p>
+          <h1 style={{ color: '#dc2626', fontSize: '20px', marginBottom: '12px' }}>Couldn't load this page</h1>
+          <p style={{ color: '#64748b', marginBottom: '20px', lineHeight: 1.5 }}>{error || 'Unknown error.'}</p>
+          <button onClick={() => window.location.reload()} style={{ background: '#f97316', color: 'white', border: 'none', padding: '12px 24px', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, fontSize: '14px' }}>
+            Reload
+          </button>
         </div>
       </div>
     )
@@ -39,9 +61,94 @@ export default function PublicThankYou({ packageId }: { packageId: string }) {
   const { letter, photos } = pkg
   const today = pkg.createdAt ? new Date(pkg.createdAt).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' }) : ''
 
+  // Show a contractor-only toolbar when the contractor previews this page
+  // (the in-app "Preview" button appends ?contractor=1). Real customers never
+  // see these controls.
+  const isContractorView = useMemo(() => {
+    if (typeof window === 'undefined') return false
+    return new URLSearchParams(window.location.search).get('contractor') === '1'
+  }, [])
+  const [copied, setCopied] = useState(false)
+  const customerLink = `${PUBLIC_HOST}/thanks/${pkg.id}` // no contractor flag — clean link for the customer
+
+  const goBack = () => {
+    if (typeof window === 'undefined') return
+    // If they got here via window.open (no real history), close the tab.
+    // Otherwise go back to the previous page (the review modal in the app).
+    if (window.history.length > 1) window.history.back()
+    else window.close()
+  }
+  const goEdit = () => {
+    // Send the contractor back to the app — they can re-open the review modal
+    // for this letter from the project's thank-you section.
+    window.location.href = `${PUBLIC_HOST}/`
+  }
+  const handleShareCustomerLink = async () => {
+    const nav = typeof navigator !== 'undefined' ? navigator : undefined
+    if (nav?.share) {
+      try {
+        await nav.share({
+          title: `A thank-you from ${pkg.contractorBusiness || 'your contractor'}`,
+          text: `A note for ${pkg.customerName}: ${customerLink}`,
+          url: customerLink,
+        })
+        return
+      } catch { /* fall through to copy */ }
+    }
+    try {
+      await navigator.clipboard.writeText(customerLink)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2500)
+    } catch {
+      alert(`Copy failed. Manual link: ${customerLink}`)
+    }
+  }
+  const smsHref = () => {
+    const body = `${customerLink}\n\nA quick note from ${pkg.contractorBusiness || 'your contractor'} — thank you again!`
+    const enc = encodeURIComponent(body)
+    return /iPhone|iPad|iPod/i.test(typeof navigator !== 'undefined' ? navigator.userAgent : '')
+      ? `sms:&body=${enc}` : `sms:?body=${enc}`
+  }
+  const mailtoHref = () => {
+    const subject = `A thank-you from ${pkg.contractorBusiness || 'your contractor'}`
+    const body = `Hi ${pkg.customerName},\n\n${customerLink}\n\nThanks again,\n${pkg.contractorName || pkg.contractorBusiness || ''}`
+    return `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
+  }
+
   return (
     <div style={{ minHeight: '100vh', background: '#f8fafc', padding: 'clamp(16px, 4vw, 32px) clamp(12px, 3vw, 24px)' }}>
       <div style={{ maxWidth: '720px', margin: '0 auto' }}>
+
+        {/* Contractor toolbar — only visible when previewing from inside the
+            app (?contractor=1). The real customer link is clean and has none
+            of these buttons. */}
+        {isContractorView && (
+          <div className="bp-contractor-bar" style={{ background: '#1a1f2e', color: 'white', borderRadius: '12px', padding: '14px 16px', marginBottom: '16px', boxShadow: '0 4px 12px rgba(0,0,0,0.15)', position: 'sticky', top: '12px', zIndex: 10 }}>
+            <p style={{ margin: '0 0 10px', fontSize: '12px', color: '#94a3b8', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '1px' }}>
+              👁️ Preview — this is what {pkg.customerName.split(' ')[0]} will see
+            </p>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+              <button onClick={goBack} style={{ background: '#f97316', color: 'white', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, fontSize: '13px' }}>
+                ← Back
+              </button>
+              <button onClick={goEdit} style={{ background: '#475569', color: 'white', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, fontSize: '13px' }}>
+                ✏️ Edit
+              </button>
+              <button onClick={() => window.print()} style={{ background: '#475569', color: 'white', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, fontSize: '13px' }}>
+                🖨️ Print / PDF
+              </button>
+              <a href={smsHref()} style={{ background: '#475569', color: 'white', textDecoration: 'none', padding: '10px 14px', borderRadius: '8px', fontWeight: 700, fontSize: '13px', display: 'inline-block' }}>
+                💬 Text
+              </a>
+              <a href={mailtoHref()} style={{ background: '#475569', color: 'white', textDecoration: 'none', padding: '10px 14px', borderRadius: '8px', fontWeight: 700, fontSize: '13px', display: 'inline-block' }}>
+                ✉️ Email
+              </a>
+              <button onClick={handleShareCustomerLink} style={{ background: '#16a34a', color: 'white', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, fontSize: '13px' }}>
+                {copied ? '✓ Copied' : '📤 Send / Share'}
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Letter — branded as a real letterhead */}
         <div style={{ background: 'white', borderRadius: '12px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', padding: 'clamp(24px, 5vw, 48px)', marginBottom: '20px' }}>
@@ -110,11 +217,12 @@ export default function PublicThankYou({ packageId }: { packageId: string }) {
         </p>
       </div>
 
-      {/* Print styles: clean letterhead look */}
+      {/* Print styles: clean letterhead look — hide the contractor toolbar
+          and any buttons when printing. */}
       <style>{`
         @media print {
           body { background: white; }
-          button { display: none !important; }
+          button, a, .bp-contractor-bar { display: none !important; }
         }
       `}</style>
     </div>

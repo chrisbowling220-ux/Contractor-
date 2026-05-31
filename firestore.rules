@@ -37,8 +37,12 @@ service cloud.firestore {
     match /estimates/{id} {
       allow read: if true;
       allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
+      // Owner: full update. Anonymous customer: ONLY the two response fields,
+      // and ONLY for setting status to a final 'approved' or 'declined' value.
+      // Cannot reset an approved estimate, cannot forge an arbitrary status.
       allow update: if isOwner(resource.data)
-        || onlyChanges(['customerResponse', 'status']);
+        || (onlyChanges(['customerResponse', 'status'])
+            && request.resource.data.status in ['approved', 'declined']);
       allow delete: if isOwner(resource.data);
     }
 
@@ -47,7 +51,8 @@ service cloud.firestore {
       allow read: if true;
       allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
       allow update: if isOwner(resource.data)
-        || onlyChanges(['customerResponse', 'status']);
+        || (onlyChanges(['customerResponse', 'status'])
+            && request.resource.data.status in ['approved', 'declined']);
       allow delete: if isOwner(resource.data);
     }
 
@@ -57,7 +62,12 @@ service cloud.firestore {
     match /invoices/{id} {
       allow read: if true;
       allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
-      allow update, delete: if isOwner(resource.data);
+      // Owner can update anything. Anonymous customers can ONLY toggle the
+      // cash-choice fields (so picking "Pay Cash" on the share page records
+      // their intent). They cannot change amounts, line items, or status.
+      allow update: if isOwner(resource.data)
+        || onlyChanges(['customerCashChoice', 'customerCashAt']);
+      allow delete: if isOwner(resource.data);
     }
     match /thankYouPackages/{id} {
       allow read: if true;

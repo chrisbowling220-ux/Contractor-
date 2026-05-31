@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useAuth, useUser } from '@clerk/clerk-react'
-import { doc, updateDoc } from 'firebase/firestore'
+import { doc, updateDoc, deleteField } from 'firebase/firestore'
 import { db } from './firebase'
 import { toCustomerView } from './lib/customerView'
 import { copyShareLink, shareLinkFor, smsHref, mailtoHref, nativeShare, isPhone } from './lib/shareEstimate'
@@ -123,8 +123,22 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint }:
         estimatedHours: Number(estimatedHours) || 0,
         scopeOfWork: `SCOPE OF WORK — ${estimate.jobTypeName}\n\nCLIENT: ${customerName}\n\nSUMMARY:\n${customerSummary}\n\n${workScope}`,
       }
-      await updateDoc(doc(db, 'estimates', estimate.id), updates)
-      const updated: Estimate = { ...estimate, ...updates } as Estimate
+      // If the customer had already DECLINED (or approved) this estimate and the
+      // contractor is now editing it to re-send, reset it to "pending" and clear
+      // the old response so the customer gets a fresh Accept/Decline on the
+      // improved version (instead of seeing the stale "Declined" screen).
+      const reset = estimate.status !== 'pending'
+      const writePayload: Record<string, unknown> = { ...updates }
+      if (reset) {
+        writePayload.status = 'pending'
+        writePayload.customerResponse = deleteField()
+      }
+      await updateDoc(doc(db, 'estimates', estimate.id), writePayload)
+      const updated: Estimate = {
+        ...estimate,
+        ...updates,
+        ...(reset ? { status: 'pending' as const, customerResponse: undefined } : {}),
+      } as Estimate
       onSaved(updated)
       setDirty(false)
       setSaveStatus('✓ Saved')

@@ -2,7 +2,8 @@ import { useState, useEffect, useRef } from 'react'
 import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore'
 import { ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage'
 import { httpsCallable } from 'firebase/functions'
-import { db, storage, functions } from './firebase'
+import { signOut as firebaseSignOut } from 'firebase/auth'
+import { db, storage, functions, firebaseAuth } from './firebase'
 import { useUser, useAuth } from '@clerk/clerk-react'
 
 const FREE_TIER_AI_LIMIT = 5
@@ -15,7 +16,7 @@ const portalSessionCallable = httpsCallable<{ clerkToken: string }, { url: strin
 // BuildPro+ branding when fields are empty.
 export default function Settings() {
   const { user } = useUser()
-  const { getToken } = useAuth()
+  const { getToken, signOut } = useAuth()
   const [tier, setTier] = useState<'free' | 'pro'>('free')
   const [aiQuotesUsed, setAiQuotesUsed] = useState(0)
   const [billingBusy, setBillingBusy] = useState(false)
@@ -130,6 +131,20 @@ export default function Settings() {
     } catch (err) {
       alert('Could not open billing portal: ' + (err instanceof Error ? err.message : String(err)))
       setBillingBusy(false)
+    }
+  }
+
+  const logOff = async () => {
+    if (!confirm('Log off of BuildPro+?')) return
+    try {
+      // Tear down the Firebase session first, then the Clerk session. Once
+      // Clerk signs out, the app's <SignedOut> automatically shows the sign-in
+      // page. The hard reload guarantees a clean slate (no stale listeners).
+      try { await firebaseSignOut(firebaseAuth) } catch { /* may already be signed out */ }
+      await signOut()
+      window.location.href = '/'
+    } catch (err) {
+      alert('Could not log off: ' + (err instanceof Error ? err.message : String(err)))
     }
   }
 
@@ -278,7 +293,7 @@ export default function Settings() {
           <>
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
               <span style={{ background: '#f0fdf4', color: '#16a34a', padding: '4px 12px', borderRadius: '999px', fontSize: '12px', fontWeight: 700, textTransform: 'uppercase' }}>BuildPro+ Pro</span>
-              <span style={{ fontSize: '13px', color: '#64748b' }}>Unlimited instant quotes · $19.99/mo</span>
+              <span style={{ fontSize: '13px', color: '#64748b' }}>Unlimited AI generations · $19.99/mo</span>
             </div>
             <button onClick={manageSubscription} disabled={billingBusy} style={{ background: billingBusy ? '#cbd5e1' : '#1a1f2e', color: 'white', border: 'none', padding: '10px 20px', borderRadius: '8px', cursor: billingBusy ? 'default' : 'pointer', fontWeight: 700, fontSize: '14px' }}>
               {billingBusy ? 'Opening…' : 'Manage subscription'}
@@ -288,10 +303,10 @@ export default function Settings() {
         ) : (
           <>
             <p style={{ fontSize: '14px', color: '#1a1f2e', marginTop: 0, marginBottom: '8px' }}>
-              You're on the <strong>Free</strong> plan — {Math.max(0, FREE_TIER_AI_LIMIT - aiQuotesUsed)} of {FREE_TIER_AI_LIMIT} free instant quotes left.
+              You're on the <strong>Free</strong> plan — {Math.max(0, FREE_TIER_AI_LIMIT - aiQuotesUsed)} of {FREE_TIER_AI_LIMIT} free AI generations left. Each instant quote, change order, invoice cover note, and thank-you letter uses one.
             </p>
             <ul style={{ fontSize: '13px', color: '#475569', margin: '0 0 16px', paddingLeft: '20px', lineHeight: 1.7 }}>
-              <li><strong>Pro ($19.99/mo):</strong> unlimited instant quotes</li>
+              <li><strong>Pro ($19.99/mo):</strong> unlimited AI generations</li>
               <li>Instant change orders, invoices & thank-you letters</li>
               <li>Cancel anytime</li>
             </ul>
@@ -300,6 +315,19 @@ export default function Settings() {
             </button>
           </>
         )}
+      </div>
+
+      {/* Account / Log off */}
+      <div style={{ ...card, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+        <div>
+          <h3 style={{ margin: '0 0 4px', fontSize: '16px' }}>👤 Account</h3>
+          <p style={{ margin: 0, fontSize: '13px', color: '#64748b' }}>
+            Signed in as {user?.primaryEmailAddress?.emailAddress || user?.firstName || 'you'}.
+          </p>
+        </div>
+        <button onClick={logOff} style={{ background: '#fef2f2', color: '#dc2626', border: '1px solid #fecaca', padding: '12px 24px', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, fontSize: '14px' }}>
+          🔒 Log Off
+        </button>
       </div>
     </div>
   )

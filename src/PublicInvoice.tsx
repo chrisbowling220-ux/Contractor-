@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { doc, getDoc } from 'firebase/firestore'
+import { doc, getDoc, updateDoc } from 'firebase/firestore'
 import { db } from './firebase'
 import { BrandHeader, BrandFooter } from './lib/BrandHeader'
 import type { Invoice } from './data/types'
@@ -15,6 +15,7 @@ export default function PublicInvoice({ invoiceId }: { invoiceId: string }) {
   const [error, setError] = useState('')
   const [paying, setPaying] = useState(false)
   const [payError, setPayError] = useState('')
+  const [showCash, setShowCash] = useState(false)
 
   async function payByCard() {
     setPaying(true)
@@ -37,16 +38,43 @@ export default function PublicInvoice({ invoiceId }: { invoiceId: string }) {
   }
 
   useEffect(() => {
-    (async () => {
+    let done = false
+    const fallbackTimer = window.setTimeout(() => {
+      if (done) return
+      setError('Taking longer than expected. Check your connection and reload, or ask your contractor to resend.')
+      setLoading(false)
+    }, 15000)
+    ;(async () => {
       try {
         const snap = await getDoc(doc(db, 'invoices', invoiceId))
-        if (!snap.exists()) setError('This invoice could not be found.')
+        if (done) return
+        if (!snap.exists()) setError('This invoice could not be found. The link may have expired — please ask your contractor to resend.')
         else setInvoice({ id: snap.id, ...snap.data() } as Invoice)
-      } catch {
-        setError('Could not load. Please contact your contractor.')
-      } finally { setLoading(false) }
+      } catch (err) {
+        if (done) return
+        console.error('PublicInvoice load failed:', err)
+        setError('Could not load. Please reload the page or contact your contractor.')
+      } finally {
+        done = true
+        window.clearTimeout(fallbackTimer)
+        setLoading(false)
+      }
     })()
+    return () => { done = true; window.clearTimeout(fallbackTimer) }
   }, [invoiceId])
+
+  // When opened with ?print=1 (from the contractor's invoice editor "Print or
+  // Save as PDF" button), auto-trigger the browser print dialog once the
+  // invoice is rendered. The contractor can then save as PDF or print and
+  // close the tab to return to the app — the editor closed itself already.
+  useEffect(() => {
+    if (typeof window === 'undefined' || !invoice) return
+    const shouldPrint = new URLSearchParams(window.location.search).get('print') === '1'
+    if (!shouldPrint) return
+    // Small delay so the layout and any images (logo) are painted first.
+    const t = window.setTimeout(() => window.print(), 600)
+    return () => window.clearTimeout(t)
+  }, [invoice])
 
   if (loading) {
     return <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f8fafc' }}><p style={{ color: '#64748b' }}>Loading…</p></div>
@@ -164,11 +192,39 @@ export default function PublicInvoice({ invoiceId }: { invoiceId: string }) {
 
           {invoice.status !== 'paid' && invoice.amountDue > 0 && (
             <>
-              <button onClick={payByCard} disabled={paying} style={{ width: '100%', background: paying ? '#94a3b8' : '#16a34a', color: 'white', border: 'none', padding: '14px', borderRadius: '8px', cursor: paying ? 'default' : 'pointer', fontWeight: 700, fontSize: '15px', marginBottom: '12px' }}>
-                {paying ? 'Redirecting to secure checkout…' : `💳 Pay $${invoice.amountDue.toFixed(2)} by Card`}
+              <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#64748b', letterSpacing: '1px', margin: '0 0 10px' }}>How would you like to pay?</h3>
+              <button onClick={payByCard} disabled={paying} style={{ width: '100%', background: paying ? '#94a3b8' : '#16a34a', color: 'white', border: 'none', padding: '14px', borderRadius: '8px', cursor: paying ? 'default' : 'pointer', fontWeight: 700, fontSize: '15px', marginBottom: '10px' }}>
+                {paying ? 'Redirecting to secure checkout…' : `💳 Pay Now — $${invoice.amountDue.toFixed(2)} by Card`}
               </button>
               {payError && <p style={{ color: '#dc2626', fontSize: '13px', textAlign: 'center', marginTop: 0, marginBottom: '12px' }}>{payError}</p>}
-              <p style={{ fontSize: '11px', color: '#94a3b8', textAlign: 'center', margin: '0 0 16px' }}>Secure payment powered by Stripe. Your card details never touch this site.</p>
+              <p style={{ fontSize: '11px', color: '#94a3b8', textAlign: 'center', margin: '0 0 14px' }}>Secure payment powered by Stripe. Your card details never touch this site.</p>
+
+              {!showCash ? (
+                <button
+                  onClick={async () => {
+                    setShowCash(true)
+                    // Record the customer's cash choice on the invoice so the
+                    // contractor gets notified. The rule only permits writing
+                    // these two fields from an unauthenticated session — no
+                    // amounts/status can be tampered with.
+                    try {
+                      await updateDoc(doc(db, 'invoices', invoiceId), {
+                        customerCashChoice: true,
+                        customerCashAt: new Date().toISOString(),
+                      })
+                    } catch (err) {
+                      console.warn('Could not record cash choice', err)
+                    }
+                  }}
+                  style={{ width: '100%', background: 'white', color: '#1a1f2e', border: '1px solid #cbd5e1', padding: '12px', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, fontSize: '14px', marginBottom: '16px' }}
+                >
+                  💵 Pay Cash / In Person
+                </button>
+              ) : (
+                <div style={{ background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: '8px', padding: '14px', marginBottom: '16px', fontSize: '13px', color: '#92400e', lineHeight: 1.6 }}>
+                  Sounds good — you can settle up directly with {invoice.businessName || 'your contractor'} in cash, check, or however you've arranged. Your contractor has been notified that you'll be paying in person. Thank you!
+                </div>
+              )}
             </>
           )}
 

@@ -1,0 +1,1 @@
+- [Project context](project_buildpro.md) — BuildPro+ contractor app: what was audited, key findings, architecture notes

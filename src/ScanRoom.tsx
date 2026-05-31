@@ -216,6 +216,9 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
   const [transcript, setTranscript] = useState('')
   const [recording, setRecording] = useState(false)
   const [transcribing, setTranscribing] = useState(false)
+  const [audioElapsed, setAudioElapsed] = useState(0)
+  // Max 2 voice sessions per estimate. Resets when the estimate is saved/cleared.
+  const [voiceSessionsUsed, setVoiceSessionsUsed] = useState(0)
   const [images, setImages] = useState<{ preview: string; data: string }[]>([])
   const [analyzing, setAnalyzing] = useState(false)
   const [result, setResult] = useState<AIQuote | null>(null)
@@ -233,6 +236,8 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
   const audioStreamRef = useRef<MediaStream | null>(null)
+  const audioTimerRef = useRef<number | null>(null)
+  const audioAutoStopRef = useRef<number | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const cameraInputRef = useRef<HTMLInputElement>(null)
   const videoRecorderRef = useRef<MediaRecorder | null>(null)
@@ -249,6 +254,8 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
   useEffect(() => () => {
     mediaRecorderRef.current?.stop()
     audioStreamRef.current?.getTracks().forEach(t => t.stop())
+    if (audioTimerRef.current) clearInterval(audioTimerRef.current)
+    if (audioAutoStopRef.current) clearTimeout(audioAutoStopRef.current)
     videoRecorderRef.current?.stop()
     videoStreamRef.current?.getTracks().forEach(t => t.stop())
     if (videoTimerRef.current) clearInterval(videoTimerRef.current)
@@ -377,10 +384,17 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
     setVideoRecording(false)
   }
 
+  const AUDIO_MAX_SECONDS = 25
+  const MAX_VOICE_SESSIONS = 2
+
   const startRecording = async () => {
     setError('')
     if (!audioSupported) {
       setError('Audio recording not supported in this browser. Type the scope below instead.')
+      return
+    }
+    if (voiceSessionsUsed >= MAX_VOICE_SESSIONS) {
+      setError(`You've used both voice recordings for this estimate. Type any extra details below, or start a new estimate.`)
       return
     }
     try {
@@ -389,23 +403,46 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
       const mimeType = pickRecorderMimeType()
       const rec = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream)
       audioChunksRef.current = []
+
       rec.ondataavailable = e => {
         if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data)
       }
+
+      // Flip the UI to "listening" only once the recorder has actually started,
+      // so the first words aren't clipped while the mic is still warming up.
+      rec.onstart = () => {
+        setRecording(true)
+        setAudioElapsed(0)
+        audioTimerRef.current = window.setInterval(() => setAudioElapsed(s => s + 1), 1000)
+        // Hard stop at the max so a session can't run forever.
+        audioAutoStopRef.current = window.setTimeout(() => stopRecording(), AUDIO_MAX_SECONDS * 1000)
+      }
+
       rec.onstop = async () => {
+        if (audioTimerRef.current) { clearInterval(audioTimerRef.current); audioTimerRef.current = null }
+        if (audioAutoStopRef.current) { clearTimeout(audioAutoStopRef.current); audioAutoStopRef.current = null }
         stream.getTracks().forEach(t => t.stop())
         audioStreamRef.current = null
+        setRecording(false)
+        setAudioElapsed(0)
         const blob = new Blob(audioChunksRef.current, { type: rec.mimeType || mimeType || 'audio/webm' })
         if (blob.size === 0) {
           setError('No audio captured — try again.')
           return
         }
+        // Count the session only when we actually captured something.
+        setVoiceSessionsUsed(n => n + 1)
         await sendAudioForTranscription(blob, rec.mimeType || mimeType)
       }
-      rec.onerror = () => setError('Recording error — please try again.')
+
+      rec.onerror = () => {
+        setError('Recording error — please try again.')
+        setRecording(false)
+      }
       mediaRecorderRef.current = rec
-      rec.start()
-      setRecording(true)
+      // timeslice=1000ms → fires ondataavailable every second, so data is
+      // flushed continuously instead of only at stop (fixes empty/partial blobs).
+      rec.start(1000)
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Microphone access denied'
       setError(`Couldn't start recording: ${msg}. Check that you've granted microphone permission.`)
@@ -413,8 +450,10 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
   }
 
   const stopRecording = () => {
-    mediaRecorderRef.current?.stop()
-    setRecording(false)
+    // Guard against double-stop (auto-stop + manual tap).
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop()
+    }
   }
 
   const sendAudioForTranscription = async (blob: Blob, mimeType: string) => {
@@ -479,7 +518,12 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
           images: imgs.map(i => i.data),
           hourlyRateOverride: Number(aiHourlyRate) || undefined,
           markupPercentOverride: aiMarkupPct === '' ? undefined : Number(aiMarkupPct),
-          debugForceFail: new URLSearchParams(window.location.search).get('debugForceFail') || undefined,
+          // Dev-only knob: lets local builds force a synthetic failure to
+          // exercise the retry/fallback paths. Never honored in production —
+          // an end user can't burn quota or trigger errors with ?debugForceFail.
+          debugForceFail: import.meta.env.DEV
+            ? (new URLSearchParams(window.location.search).get('debugForceFail') || undefined)
+            : undefined,
         },
       })
       setResult(res.data)
@@ -508,6 +552,10 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
         setResult(fallback)
         setUsedFallback(true)
         setError(`${errMsg} — showing a placeholder so you can edit and save.`)
+        // Still save + open the editor so the user always gets the edit/share
+        // flow, even when the generator was unavailable.
+        const savedFallback = await saveAsEstimateAndReturn(fallback)
+        if (savedFallback) setSavedEstimate(savedFallback)
       } catch {
         setError(errMsg)
       }
@@ -743,22 +791,32 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
 
       <div style={card}>
         <h3 style={{ marginBottom: '4px' }}>🎤 Voice Narration</h3>
-        <p style={{ fontSize: '12px', color: '#64748b', marginBottom: '12px' }}>Press record, talk through the job, then press stop. Audio is transcribed by Google Speech-to-Text after you stop — no echoes, no duplicates.</p>
+        <p style={{ fontSize: '12px', color: '#64748b', marginBottom: '12px' }}>Tap record and start talking right away — it listens immediately and types out what you say (up to 25 seconds). You get <strong>2 recordings per estimate</strong>; anything else you can type in the box.</p>
         {!audioSupported && <p style={{ fontSize: '13px', color: '#dc2626', marginBottom: '8px' }}>⚠ Audio recording not supported in this browser. Type narration in the box below.</p>}
-        <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap', alignItems: 'center' }}>
           {!recording ? (
-            <button onClick={startRecording} disabled={!audioSupported || transcribing} style={{ background: '#dc2626', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '6px', cursor: (!audioSupported || transcribing) ? 'not-allowed' : 'pointer', fontWeight: 600, opacity: transcribing ? 0.6 : 1 }}>
-              ● {transcript ? 'Record more' : 'Start Recording'}
+            <button onClick={startRecording} disabled={!audioSupported || transcribing || voiceSessionsUsed >= MAX_VOICE_SESSIONS} style={{ background: (transcribing || voiceSessionsUsed >= MAX_VOICE_SESSIONS) ? '#cbd5e1' : '#dc2626', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '6px', cursor: (!audioSupported || transcribing || voiceSessionsUsed >= MAX_VOICE_SESSIONS) ? 'not-allowed' : 'pointer', fontWeight: 600 }}>
+              ● {voiceSessionsUsed === 0 ? 'Start Recording' : 'Record Again'}
             </button>
           ) : (
             <button onClick={stopRecording} style={{ background: '#1a1f2e', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
-              ■ Stop <span style={{ color: '#ef4444', animation: 'pulse 1s ease-in-out infinite' }}>● REC</span>
+              ■ Stop <span style={{ color: '#ef4444', animation: 'pulse 1s ease-in-out infinite' }}>● {audioElapsed}s / {AUDIO_MAX_SECONDS}s</span>
             </button>
           )}
+          {!recording && (
+            <span style={{ fontSize: '12px', color: voiceSessionsUsed >= MAX_VOICE_SESSIONS ? '#dc2626' : '#94a3b8', fontWeight: 600 }}>
+              {MAX_VOICE_SESSIONS - voiceSessionsUsed} recording{MAX_VOICE_SESSIONS - voiceSessionsUsed === 1 ? '' : 's'} left
+            </span>
+          )}
           {transcript && !recording && !transcribing && (
-            <button onClick={() => setTranscript('')} style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '10px 16px', borderRadius: '6px', cursor: 'pointer' }}>Clear</button>
+            <button onClick={() => setTranscript('')} style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '10px 16px', borderRadius: '6px', cursor: 'pointer' }}>Clear text</button>
           )}
         </div>
+        {recording && (
+          <p style={{ fontSize: '13px', color: '#dc2626', marginBottom: '8px', fontWeight: 600 }}>
+            🔴 Listening — speak now. Auto-stops at {AUDIO_MAX_SECONDS}s, or tap Stop when done.
+          </p>
+        )}
         {transcribing && (
           <p style={{ fontSize: '13px', color: '#7c3aed', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
             <span style={{ display: 'inline-block', width: '12px', height: '12px', border: '2px solid #c4b5fd', borderTopColor: '#7c3aed', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
@@ -916,6 +974,12 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
           estimate={savedEstimate}
           onClose={() => {
             setSavedEstimate(null)
+            // Fresh estimate next time → reset narration + the 2 voice sessions.
+            setTranscript('')
+            setImages([])
+            setResult(null)
+            setSavedId(null)
+            setVoiceSessionsUsed(0)
             if (onNavigate) onNavigate('projects')
           }}
           onSaved={updated => setSavedEstimate(updated)}

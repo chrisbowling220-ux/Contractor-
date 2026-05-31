@@ -21,11 +21,18 @@ export default function PublicChangeOrder({ changeOrderId }: { changeOrderId: st
   const [submitError, setSubmitError] = useState('')
 
   useEffect(() => {
-    (async () => {
+    let done = false
+    const fallbackTimer = window.setTimeout(() => {
+      if (done) return
+      setError('Taking longer than expected. Check your connection and reload, or ask your contractor to resend.')
+      setLoading(false)
+    }, 15000)
+    ;(async () => {
       try {
         const snap = await getDoc(doc(db, 'changeOrders', changeOrderId))
+        if (done) return
         if (!snap.exists()) {
-          setError('This change order could not be found.')
+          setError('This change order could not be found. The link may be expired or incorrect.')
         } else {
           const data = { id: snap.id, ...snap.data() } as ChangeOrder
           setCo(data)
@@ -45,10 +52,17 @@ export default function PublicChangeOrder({ changeOrderId }: { changeOrderId: st
           // Intentionally do NOT pre-fill the signature with the customer name —
           // the customer must type their own name to sign.
         }
-      } catch {
-        setError('Could not load. Please contact your contractor.')
-      } finally { setLoading(false) }
+      } catch (err) {
+        if (done) return
+        console.error('PublicChangeOrder load failed:', err)
+        setError('Could not load. Please reload the page or contact your contractor.')
+      } finally {
+        done = true
+        window.clearTimeout(fallbackTimer)
+        setLoading(false)
+      }
     })()
+    return () => { done = true; window.clearTimeout(fallbackTimer) }
   }, [changeOrderId])
 
   const submitResponse = async (action: 'approved' | 'declined') => {

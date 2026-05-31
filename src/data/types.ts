@@ -187,6 +187,11 @@ export interface Invoice {
   status: 'draft' | 'sent' | 'paid' | 'overdue'
   dueDate: string               // ISO date
   paidAt?: string
+  // Set when the customer chooses "Pay Cash / In Person" on the public invoice
+  // page (they'll settle up directly with the contractor). Status stays "sent"
+  // until the contractor manually confirms cash received.
+  customerCashChoice?: boolean
+  customerCashAt?: string
   createdAt: string
   createdBy?: string
 }

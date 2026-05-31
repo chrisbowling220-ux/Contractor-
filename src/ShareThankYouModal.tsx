@@ -88,7 +88,7 @@ export default function ShareThankYouModal({ pkg, fromName, onClose }: Props) {
             <button onClick={handleCopy} style={{ flex: '1 1 auto', background: '#16a34a', color: 'white', border: 'none', padding: '12px 14px', borderRadius: '8px', cursor: 'pointer', fontWeight: 700 }}>
               {linkCopied ? '✓ Copied' : '🔗 Copy link'}
             </button>
-            <a href={link} target="_blank" rel="noopener noreferrer" style={{ flex: '1 1 auto', background: '#1a1f2e', color: 'white', border: 'none', padding: '12px 14px', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, textDecoration: 'none', textAlign: 'center', display: 'inline-block' }}>
+            <a href={`${link}?contractor=1`} target="_blank" rel="noopener noreferrer" style={{ flex: '1 1 auto', background: '#1a1f2e', color: 'white', border: 'none', padding: '12px 14px', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, textDecoration: 'none', textAlign: 'center', display: 'inline-block' }}>
               👁️ Preview
             </a>
           </div>

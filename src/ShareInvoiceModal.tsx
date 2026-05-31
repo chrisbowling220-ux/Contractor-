@@ -66,7 +66,10 @@ export default function ShareInvoiceModal({ invoice, fromName, onClose }: Props)
   return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.65)', zIndex: 300, padding: '16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <div onClick={e => e.stopPropagation()} style={{ maxWidth: '480px', width: '100%', background: 'white', borderRadius: '12px', overflow: 'hidden', boxShadow: '0 12px 40px rgba(0,0,0,0.3)' }}>
-        <div style={{ background: 'linear-gradient(135deg, #1a1f2e 0%, #0f172a 100%)', color: 'white', padding: '20px 24px' }}>
+        <div style={{ background: 'linear-gradient(135deg, #1a1f2e 0%, #0f172a 100%)', color: 'white', padding: '16px 20px', position: 'sticky', top: 0, zIndex: 10 }}>
+          <button onClick={onClose} style={{ background: '#f97316', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, fontSize: '14px', marginBottom: '10px' }}>
+            ← Back to Project
+          </button>
           <h2 style={{ margin: '0 0 4px', fontSize: '20px', fontWeight: 800, color: '#f97316' }}>🧾 Invoice {invoice.invoiceNumber}</h2>
           <p style={{ margin: 0, fontSize: '13px', color: '#94a3b8' }}>
             ${invoice.amountDue.toFixed(2)} due from {invoice.customerName}.

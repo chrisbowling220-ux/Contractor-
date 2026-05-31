@@ -1,10 +1,11 @@
+// deploy-marker: stripe-live-v7 (confirm live price deployed)
 import { onCall, onRequest, HttpsError } from 'firebase-functions/v2/https'
 import { defineSecret } from 'firebase-functions/params'
 import { verifyToken } from '@clerk/backend'
 import Anthropic from '@anthropic-ai/sdk'
 import StripeLib from 'stripe'
 import { SpeechClient } from '@google-cloud/speech'
-import { initializeApp, getApps } from 'firebase-admin/app'
+import { initializeApp } from 'firebase-admin/app'
 import { getFirestore, FieldValue, Firestore } from 'firebase-admin/firestore'
 import { getAuth, Auth } from 'firebase-admin/auth'
 import { aiQuoteSchema, changeOrderSchema, ARITHMETIC_RULES } from './aiQuoteSchema'
@@ -13,20 +14,36 @@ import { aiQuoteSchema, changeOrderSchema, ARITHMETIC_RULES } from './aiQuoteSch
 // deploy tool parses this file before runtime env vars are available, and
 // initializeApp() at the top level can hang past the 10s deploy-parse limit.
 // We call this on first use inside a handler, where env is ready.
-let _adminDb: Firestore | null = null
-function getAdminDb(): Firestore {
-  if (_adminDb) return _adminDb
-  if (getApps().length === 0) initializeApp()
-  _adminDb = getFirestore()
-  return _adminDb
+// Ensure a default Firebase Admin app exists before any service is used.
+// Idempotent and defensive: initializeApp() throws if already initialized, so
+// we guard on getApps() AND catch the duplicate-app case. We do NOT memoize the
+// service handles, because a memoized handle can outlive its app on a recycled
+// instance and then throw "default Firebase app does not exist".
+// Idempotent admin app init. We try every time: if it's already initialized,
+// initializeApp() throws "duplicate-app" which we catch. This is more reliable
+// than checking getApps() — that array can contain a placeholder app that
+// passes the length check but fails getFirestore()/getAuth() lookups.
+function ensureAdminApp(): void {
+  try {
+    initializeApp()
+  } catch (err: unknown) {
+    const code = (err as { code?: string })?.code
+    // duplicate-app is the only error we want to swallow.
+    if (code !== 'app/duplicate-app') {
+      console.error('initializeApp failed:', err)
+      throw err
+    }
+  }
 }
 
-let _adminAuth: Auth | null = null
+function getAdminDb(): Firestore {
+  ensureAdminApp()
+  return getFirestore()
+}
+
 function getAdminAuth(): Auth {
-  if (_adminAuth) return _adminAuth
-  if (getApps().length === 0) initializeApp()
-  _adminAuth = getAuth()
-  return _adminAuth
+  ensureAdminApp()
+  return getAuth()
 }
 
 const ANTHROPIC_API_KEY = defineSecret('ANTHROPIC_API_KEY')
@@ -41,7 +58,9 @@ const PUBLIC_HOST = 'https://contractors-office-96731.web.app'
 
 // The $19.99/mo "BuildPro+ Pro" recurring price. Test-mode price ID for now;
 // swap to the live price_... here when going live.
-const PRO_PRICE_ID = 'price_1TbzCzKz3SO2ZkDQ5M3ZYbyr'
+// LIVE-mode $19.99/mo BuildPro+ Pro price. Must be paired with the live
+// sk_live_ secret key — a live price will NOT work with a test secret key.
+const PRO_PRICE_ID = 'price_1Tbj8IKz3SO2ZkDQQ4gjBq9j'
 
 // ──────────────────────────────────────────────────────────────────────────
 // Subscription / usage gate
@@ -77,7 +96,7 @@ async function consumeAiQuoteOrThrow(userId: string, featureName: string): Promi
     if (tier === 'free' && used >= FREE_TIER_AI_LIMIT) {
       throw new HttpsError(
         'resource-exhausted',
-        `You've used all ${FREE_TIER_AI_LIMIT} free instant ${featureName}s. Upgrade to BuildPro+ Pro for unlimited generations.`,
+        `You've used all ${FREE_TIER_AI_LIMIT} free AI generations. Upgrade to BuildPro+ Pro for unlimited.`,
       )
     }
 
@@ -203,7 +222,26 @@ NORTH CAROLINA BASELINE PRICES (Home Depot / Lowe's, 2026, central NC retail —
 - Concrete mix (60lb bag): $5.48
 - Joint compound (4.5 gal bucket): $17.97
 
-For items not in the reference list, use realistic 2026 retail prices in the same spirit, adjusted for the job ZIP per the regional guidelines above. If the ZIP is in central NC, use the baseline as-is. If the ZIP is in a higher-cost or lower-cost region, scale appropriately.`
+For items not in the reference list, use realistic 2026 retail prices in the same spirit, adjusted for the job ZIP per the regional guidelines above. If the ZIP is in central NC, use the baseline as-is. If the ZIP is in a higher-cost or lower-cost region, scale appropriately.
+
+COMPLETENESS — THIS IS THE MOST IMPORTANT RULE. You have full knowledge of everything stocked at Home Depot and Lowe's. Build a COMPLETE material list as if you were physically walking the store aisles filling a cart to finish this exact job start to finish. Do NOT list only the obvious headline materials — include EVERY consumable and incidental the job actually requires. Contractors lose money by forgetting small items, so you must not forget them. Walk through these categories for EVERY job and include any that apply:
+- Fasteners: screws, nails (right type/length), anchors, construction adhesive, staples
+- Adhesives/sealants: thinset, mortar, caulk (silicone/paintable), liquid nails, wood glue
+- Finishing: primer, paint, joint compound, mesh/paper tape, sandpaper, wood filler, trim/molding, transition strips
+- Prep/protection: drop cloths, painter's tape, plastic sheeting, rosin paper
+- Sub-surface: underlayment, backer board, vapor barrier, felt/ice-and-water, flashing
+- Trade rough-ins: wire, boxes, breakers, wire nuts (electrical); pipe, fittings, valves, solder/flux or PEX rings (plumbing)
+- Fixtures/hardware: outlets, switches, cover plates, hinges, handles, brackets
+- Disposal/misc: contractor bags, blades, drill bits, shims, spacers
+For each, pick the correct product and 2026 store price. If the contractor's narration or photos imply a material, include it. When in doubt, include the item with a note in contractor_notes rather than omitting it. A thorough, complete list is the single most valuable thing this estimate provides.
+
+RIGHT-SIZE THE QUANTITY — bill for what the job actually USES, not rounded-up whole packages, when the leftover would not be consumed by this job:
+- If a job needs roughly HALF a can of paint, charge for half a can: set unit to the fractional amount (e.g. quantity 0.5, unit "gallon") and the line_total = 0.5 × can price. Do NOT charge a full $31.98 gallon to use $16 worth.
+- Same for partial bags/buckets/tubes/rolls/boxes: a job using a third of a 50 lb thinset bag is priced at ~1/3 of the bag. A quarter-tube of caulk is ~1/4 of the tube.
+- Be PRECISE and REALISTIC about how much is genuinely used. A small patch uses a cup of joint compound, not a whole bucket — price the cup.
+- EXCEPTION — items sold and consumed as whole units that you can't split or won't reuse: studs, sheets of drywall/plywood, tiles, outlets, switches, fixtures, single fasteners. These round UP to whole units, and that's where the WASTE FACTOR applies (you buy a whole sheet and waste the offcut). You can't use "half a stud."
+- The distinction: divisible bulk consumables (paint, compound, caulk, adhesive, sand, grout) → price the actual fraction used. Discrete whole units (boards, sheets, tiles, fixtures) → round up + apply waste %.
+- Do NOT pad. Do NOT inflate quantities to be "safe." An accurate, lean, honest material list wins the job and protects the contractor's reputation. Over-quoting loses customers.`
 
 const NC_LABOR_GUIDANCE = `LABOR PRICING — Fair-market rates (2026), scaled by job ZIP:
 NORTH CAROLINA BASELINE (central NC, Roxboro/Durham area):
@@ -349,9 +387,10 @@ How to read the inputs:
 - If room dimensions are not stated in the transcript and not inferable from images, make reasonable estimates (e.g. "approximately 10×12 ft based on visible fixtures") and note your assumptions in contractor_notes.
 
 Material strategy:
-- Generate a complete material list with realistic items, units, and 2026 retail unit prices at Home Depot / Lowe's in central North Carolina (see reference prices below).
-- Apply per-material waste factors (tile 10–15%, drywall 10%, paint 5%, lumber 10%, flooring 8–10%, fasteners/incidentals 15%).
-- Show your quantity math explicitly in quantity_math, including any dimension assumptions.
+- Generate a COMPLETE material list with realistic items, units, and 2026 retail unit prices at Home Depot / Lowe's (see reference prices below). Completeness is critical — see the COMPLETENESS rule in the pricing section. Include every consumable and incidental (fasteners, adhesives, caulk, primer, tape, underlayment, trim, fixtures, disposal) the job needs, not just the headline materials. Build the list as if walking the store aisles filling a cart to finish this exact job. Forgetting small items costs the contractor money — do not forget them.
+- Apply per-material waste factors (tile 10–15%, drywall 10%, paint 5%, lumber 10%, flooring 8–10%, fasteners/incidentals 15%) — but ONLY to discrete whole units (sheets, studs, tiles, fixtures) where you buy whole and waste offcuts.
+- RIGHT-SIZE divisible bulk consumables (see the RIGHT-SIZE rule in the pricing section): if the job uses half a can of paint, price 0.5 of a can — don't bill a full can. A small patch uses a cup of joint compound, not a whole bucket. Bill what's actually used. Do NOT pad or over-quote — accuracy wins the job.
+- Show your quantity math explicitly in quantity_math, including any dimension assumptions and any fractional-use reasoning.
 
 Labor and pricing:
 - Estimate labor hours by phase based on the scope you inferred. Use the productivity benchmarks below — do NOT pad hours.
@@ -1077,15 +1116,15 @@ Output a JSON object with these exact fields:
 - greeting: A short greeting line. E.g. "Dear Sarah," or "Hi Mike,". Use the customer's first name if possible.
 - opening: ONE sentence thanking them for the opportunity to work on their project. If a business name is provided in the user prompt, weave it naturally into this opening sentence — e.g. "Thank you for choosing [BusinessName] for your kitchen remodel." When no business name is given, use a personal opening like "Thank you for letting me handle your kitchen remodel."
 - body: TWO short paragraphs (3-5 sentences each):
-    1) A warm reflection on the work — what was satisfying, any standout moments, the customer's role in making it go smoothly.
-    2) A note about quality, the photos enclosed, and a hint that you stand behind the work and welcome follow-up if anything needs attention. If a business name is provided, you may end this paragraph referencing the business once more (e.g. "Everyone at [BusinessName] appreciates the trust you put in us.") — but don't overdo it.
+    1) A warm reflection on the work — what was satisfying, any standout moments, the customer's role in making it go smoothly. Include ONE light, tasteful touch of humor somewhere in this paragraph — a friendly, good-natured line that fits a tradesman talking to a customer (e.g. a gentle joke about the weather, the coffee, the dog supervising the job, or how good it feels to finally see it finished). Keep it warm and human, never crude or sarcastic. Just one — don't force jokes throughout.
+    2) Reassure them about quality and the photos enclosed. You MUST include a clear satisfaction-guarantee line in the contractor's voice: that you take pride in customer satisfaction, you stand behind your work, and if ANYTHING about the project bothers them for any reason, they should call so you can make it right. Express that you hope they enjoy the finished project as much as you enjoyed building it the way they envisioned. If a business name is provided, you may reference it once more here.
 - closing: A short closing line ("With appreciation," / "Sincerely," / "Thank you again,") on its own line, followed by the contractor's name (use EXACTLY the name given in the user prompt — never invent one) on the next line, then the business name on a third line if provided. If no contractor name is given, use just the closing line and business name. Use real newlines between each. Format example (placeholders — substitute the real values from the user prompt):
     With appreciation,
     [Contractor Name]
     [Business Name]
 
 Tone:
-- Genuine and human, not corporate.
+- Genuine and human, not corporate. A little warmth and ONE light, tasteful joke are welcome — it should read like a real, likable tradesman wrote it, not a template.
 - Professional but not stiff — like a respected tradesman writing a personal note.
 - 200-250 words total across the body. Customer-facing.
 - No bullet lists, no headings, no markdown. Just clean prose.
@@ -1453,6 +1492,13 @@ export const stripeWebhook = onRequest(
         // = free. Stripe keeps status "active" until period end even when the
         // user has set cancel_at_period_end, so "keep Pro until period ends" is
         // handled automatically by Stripe's own status timing.
+        //
+        // DELIBERATE: 'past_due' is NOT in proStatuses. When a card declines on
+        // renewal, the user immediately drops to free until Stripe successfully
+        // retries (Stripe's smart retry kicks the sub back to 'active', firing
+        // another webhook that restores Pro). This is stricter than Stripe's
+        // grace-period default, but it prevents free-riding during the retry
+        // window. To soften, add 'past_due' to proStatuses.
         const proStatuses = ['active', 'trialing']
         const isPro = proStatuses.includes(sub.status)
         await db.collection('users').doc(userId).set({
@@ -1486,6 +1532,15 @@ export const stripeWebhook = onRequest(
           if (invoiceId && session.payment_status === 'paid') {
             const invRef = db.collection('invoices').doc(invoiceId)
             const invSnap = await invRef.get()
+            // Idempotency: Stripe guarantees AT-LEAST-once delivery, so we'll
+            // sometimes get the same paid event twice. Skip if already paid so
+            // we don't overwrite the original paidAt timestamp or re-fire the
+            // project-close logic.
+            const currentStatus = (invSnap.data() as InvoiceDoc | undefined)?.status
+            if (currentStatus === 'paid') {
+              console.log(`Invoice ${invoiceId} already marked paid — skipping duplicate webhook event`)
+              break
+            }
             await invRef.set({
               status: 'paid',
               amountDue: 0,

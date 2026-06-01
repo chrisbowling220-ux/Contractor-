@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useUser } from '@clerk/clerk-react'
-import { collection, query, where, onSnapshot, doc, deleteDoc } from 'firebase/firestore'
+import { collection, query, where, onSnapshot, doc, deleteDoc, addDoc } from 'firebase/firestore'
 import { db } from './firebase'
 import EstimatePreview from './EstimatePreview'
 import { openEstimatePrintWindow } from './lib/printEstimate'
@@ -61,6 +61,28 @@ export default function Estimates({ initialTab = 'pending' }: { initialTab?: Tab
       await deleteDoc(doc(db, 'estimates', e.id))
     } catch (err) {
       alert('Delete failed: ' + (err instanceof Error ? err.message : String(err)))
+    }
+  }
+
+  // Clone an estimate as a fresh, pending one — "same as the last bathroom".
+  // New ID, status reset to pending, no customer response, not yet linked to a
+  // project (the sweep will create a fresh project when it's approved/sent).
+  const duplicateEstimate = async (e: Estimate) => {
+    if (!user?.id) { alert('Not signed in.'); return }
+    try {
+      const { id: _omit, customerResponse: _r, projectAutoCreated: _pac, projectId: _pid, ...rest } = e as Estimate & Record<string, unknown>
+      void _omit; void _r; void _pac; void _pid
+      const clone: Record<string, unknown> = {
+        ...rest,
+        status: 'pending',
+        createdAt: new Date().toISOString(),
+        createdBy: user.id,
+      }
+      const ref = await addDoc(collection(db, 'estimates'), clone)
+      // Open the new copy in the editor so they can tweak customer/details.
+      setPreview({ id: ref.id, ...clone } as Estimate)
+    } catch (err) {
+      alert('Could not duplicate: ' + (err instanceof Error ? err.message : String(err)))
     }
   }
 
@@ -145,6 +167,9 @@ export default function Estimates({ initialTab = 'pending' }: { initialTab?: Tab
                   </button>
                   <button onClick={() => shareEstimate(e)} style={{ background: '#0ea5e9', color: 'white', border: 'none', padding: '8px 14px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}>
                     {copiedId === e.id ? '✓ Copied' : '📤 Share'}
+                  </button>
+                  <button onClick={() => duplicateEstimate(e)} title="Make a copy to reuse for a similar job" style={{ background: 'white', color: '#1a1f2e', border: '1px solid #cbd5e1', padding: '8px 14px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}>
+                    📄 Duplicate
                   </button>
                   <button onClick={() => deleteEstimate(e)} style={{ background: '#fef2f2', color: '#dc2626', border: '1px solid #fecaca', padding: '8px 14px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}>
                     🗑️ Delete

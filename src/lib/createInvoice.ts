@@ -175,6 +175,75 @@ export async function createInvoice(args: BuildInvoiceArgs): Promise<Invoice> {
   return { id: ref.id, ...payload } as Invoice
 }
 
+// Creates a DEPOSIT invoice the moment a customer approves an estimate that
+// requested an upfront deposit. It states the work order (from the estimate
+// scope), the deposit due now, and the balance due at completion. No AI call —
+// the wording is deterministic so it's instant and reliable.
+export async function createDepositInvoice(args: {
+  userId: string
+  estimate: Estimate
+  project: { id: string }
+  profile: BusinessProfile
+  contractorName?: string
+  customerEmail?: string
+  customerPhone?: string
+  customerAddress?: string
+  invoiceNumber: string
+}): Promise<Invoice> {
+  const { userId, estimate, project, profile } = args
+  const deposit = +(estimate.depositAmount || 0).toFixed(2)
+  const jobTotal = +(estimate.total || 0).toFixed(2)
+  const balance = +Math.max(0, jobTotal - deposit).toFixed(2)
+
+  const lineItems: InvoiceLine[] = [{
+    name: `Deposit to begin work — ${estimate.jobTypeName}`,
+    quantity: 1,
+    unitPrice: deposit,
+    lineTotal: deposit,
+  }]
+
+  // Work order / steps pulled from the estimate's scope, plus clear deposit terms.
+  const introNote = `Thank you for approving your ${estimate.jobTypeName.toLowerCase()}. This invoice is for the deposit to schedule and begin the work. Once it's paid, we'll lock in your start date.`
+  const paymentTerms =
+    `WORK ORDER\n${(estimate.scopeOfWork || estimate.description || estimate.jobTypeName).trim()}\n\n` +
+    `PAYMENT TERMS\n` +
+    `• Total job: $${jobTotal.toFixed(2)}\n` +
+    `• Deposit due now (this invoice): $${deposit.toFixed(2)}\n` +
+    `• Balance due at completion: $${balance.toFixed(2)}\n\n` +
+    `Work begins once the deposit is received. The remaining balance is invoiced when the job is finished and you've had a chance to look it over.`
+
+  const payload: Record<string, unknown> = {
+    projectId: project.id,
+    customerName: estimate.customerName,
+    jobTypeName: `${estimate.jobTypeName} — Deposit`,
+    invoiceNumber: args.invoiceNumber,
+    introNote,
+    paymentTerms,
+    lineItems,
+    subtotal: deposit,
+    amountPaid: 0,
+    amountDue: deposit,
+    status: 'sent',
+    dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    isDeposit: true,
+    createdAt: new Date().toISOString(),
+    createdBy: userId,
+  }
+  if (estimate.jobLocationZip) payload.jobLocationZip = estimate.jobLocationZip
+  if (args.customerEmail) payload.customerEmail = args.customerEmail
+  if (args.customerPhone) payload.customerPhone = args.customerPhone
+  if (args.customerAddress) payload.customerAddress = args.customerAddress
+  if (profile.businessName) payload.businessName = profile.businessName
+  if (profile.businessPhone) payload.businessPhone = profile.businessPhone
+  if (profile.businessEmail) payload.businessEmail = profile.businessEmail
+  if (profile.licenseNumber) payload.licenseNumber = profile.licenseNumber
+  if (profile.logoUrl) payload.logoUrl = profile.logoUrl
+  if (args.contractorName) payload.contractorName = args.contractorName
+
+  const ref = await addDoc(collection(db, 'invoices'), payload)
+  return { id: ref.id, ...payload } as Invoice
+}
+
 // Re-runs ONLY the cover copy (intro note + payment terms) for an existing
 // invoice — used by the "Regenerate wording" button in the invoice editor.
 export async function regenerateInvoiceCopy(args: {

@@ -5,6 +5,8 @@ import { toCustomerView } from './lib/customerView'
 import { BrandHeader, BrandFooter } from './lib/BrandHeader'
 import type { Estimate } from './data/types'
 
+const DEPOSIT_INVOICE_URL = 'https://us-central1-contractors-office-96731.cloudfunctions.net/createDepositInvoiceForApproval'
+
 // Renders a single estimate at /q/<id> for the customer to view without signing in.
 // Markup is hidden via toCustomerView so the customer sees baked-in material prices.
 // Customer can accept or decline; the response is written back to the same doc.
@@ -24,6 +26,9 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
   const [showDeclineBox, setShowDeclineBox] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState('')
+  // Deposit-payment state (after approval, when a deposit was requested).
+  const [preparingDeposit, setPreparingDeposit] = useState(false)
+  const [depositInvoiceId, setDepositInvoiceId] = useState<string | null>(null)
 
   useEffect(() => {
     let done = false
@@ -96,10 +101,53 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
         status: action,
       })
       setEstimate({ ...estimate, customerResponse, status: action })
+
+      // If they APPROVED an estimate with a deposit, prepare the deposit invoice
+      // server-side so they can pay it right now (card or cash).
+      if (action === 'approved' && estimate.depositRequested && (estimate.depositAmount || 0) > 0) {
+        setPreparingDeposit(true)
+        try {
+          const resp = await fetch(DEPOSIT_INVOICE_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ estimateId: estimate.id }),
+          })
+          const data = await resp.json().catch(() => ({}))
+          if (resp.ok && data.invoiceId) setDepositInvoiceId(data.invoiceId)
+        } catch (err) {
+          console.warn('Deposit invoice prep failed:', err)
+        } finally {
+          setPreparingDeposit(false)
+        }
+      }
     } catch (err) {
       setSubmitError('Could not submit your response. ' + (err instanceof Error ? err.message : String(err)))
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  // Customer chose to pay the FULL job upfront instead of just the deposit.
+  // Re-create the invoice at the full amount (server-verified) and go pay it.
+  const payFullInstead = async () => {
+    if (!estimate) return
+    setPreparingDeposit(true)
+    try {
+      const resp = await fetch(DEPOSIT_INVOICE_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ estimateId: estimate.id, payFull: true }),
+      })
+      const data = await resp.json().catch(() => ({}))
+      if (resp.ok && data.invoiceId) {
+        window.location.href = `/inv/${data.invoiceId}`
+      } else {
+        setSubmitError(data.error || 'Could not prepare the full-payment invoice.')
+      }
+    } catch {
+      setSubmitError('Could not prepare the full-payment invoice. Please try again.')
+    } finally {
+      setPreparingDeposit(false)
     }
   }
 
@@ -218,6 +266,28 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
                   on {new Date(response!.respondedAt).toLocaleString()}
                 </p>
                 <p style={{ margin: '16px 0 0', fontSize: '14px', color: '#1a1f2e' }}>Your contractor has been notified and will be in touch to schedule the work.</p>
+
+                {/* Deposit payment — pay now (card), pay the full job, or cash */}
+                {estimate.depositRequested && (estimate.depositAmount || 0) > 0 && (
+                  <div style={{ marginTop: '20px', borderTop: '1px solid #bbf7d0', paddingTop: '16px' }}>
+                    {preparingDeposit ? (
+                      <p style={{ fontSize: '14px', color: '#16a34a', fontWeight: 600 }}>Preparing your deposit invoice…</p>
+                    ) : depositInvoiceId ? (
+                      <>
+                        <p style={{ fontSize: '13px', color: '#1a1f2e', margin: '0 0 12px', fontWeight: 600 }}>Ready to get started? Choose how you'd like to pay:</p>
+                        <a href={`/inv/${depositInvoiceId}`} style={{ display: 'block', background: '#16a34a', color: 'white', padding: '14px', borderRadius: '8px', fontWeight: 700, fontSize: '15px', textDecoration: 'none', marginBottom: '10px' }}>
+                          💳 Pay Deposit ${(estimate.depositAmount || 0).toFixed(2)} Now
+                        </a>
+                        <button onClick={payFullInstead} disabled={preparingDeposit} style={{ display: 'block', width: '100%', background: '#1a1f2e', color: 'white', padding: '14px', borderRadius: '8px', fontWeight: 700, fontSize: '15px', border: 'none', cursor: 'pointer', marginBottom: '10px' }}>
+                          💰 Pay Full ${(estimate.total || 0).toFixed(2)} Now Instead
+                        </button>
+                        <p style={{ fontSize: '12px', color: '#64748b', margin: 0 }}>Prefer to pay cash? No problem — just arrange it with your contractor. Work begins once the deposit is settled.</p>
+                      </>
+                    ) : (
+                      <p style={{ fontSize: '13px', color: '#64748b' }}>Your contractor will send a deposit invoice shortly so you can pay by card or cash.</p>
+                    )}
+                  </div>
+                )}
               </div>
             ) : (
               <div style={{ background: '#fef2f2', border: '2px solid #dc2626', borderRadius: '12px', padding: '20px', textAlign: 'center' }}>
@@ -239,13 +309,18 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
             )
           ) : (
             <div style={{ background: '#fff7ed', border: '2px solid #f97316', borderRadius: '12px', padding: '20px' }}>
+              {estimate.depositRequested && (estimate.depositAmount || 0) > 0 && (
+                <div style={{ background: 'white', border: '1px solid #fcd34d', borderRadius: '8px', padding: '12px 14px', marginBottom: '14px', fontSize: '13px', color: '#1a1f2e', lineHeight: 1.6 }}>
+                  💵 <strong>A deposit of ${(estimate.depositAmount || 0).toFixed(2)}</strong> is requested to schedule and begin the work. The remaining <strong>${Math.max(0, (estimate.total || 0) - (estimate.depositAmount || 0)).toFixed(2)}</strong> is due when the job is complete. After you accept, you'll receive an invoice for the deposit.
+                </div>
+              )}
               <h3 style={{ margin: '0 0 6px', fontSize: '16px', color: '#1a1f2e' }}>Ready to move forward?</h3>
               <p style={{ margin: '0 0 14px', fontSize: '13px', color: '#64748b' }}>
                 Type your full name to sign, then choose Accept or Decline.
               </p>
 
               <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '4px' }}>
-                Your Signature (typed full name) *
+                Your Signature (typed full name) — consent to terms *
               </label>
               <input
                 value={signedName}
@@ -287,6 +362,12 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
                   {showDeclineBox ? '❌ Confirm Decline' : '❌ Decline'}
                 </button>
               </div>
+              <p style={{ margin: '12px 0 0', fontSize: '11px', color: '#94a3b8', lineHeight: 1.5 }}>
+                By typing your name and tapping Accept, you electronically sign this estimate and agree to its scope and pricing
+                {estimate.depositRequested && (estimate.depositAmount || 0) > 0
+                  ? `, including the payment terms — a deposit of $${(estimate.depositAmount || 0).toFixed(2)} due upfront and the balance of $${Math.max(0, (estimate.total || 0) - (estimate.depositAmount || 0)).toFixed(2)} due at completion.`
+                  : '.'}
+              </p>
               {showDeclineBox && (
                 <button onClick={() => { setShowDeclineBox(false); setDeclineReason('') }} style={{ background: 'transparent', border: 'none', color: '#64748b', padding: '8px 0', marginTop: '8px', cursor: 'pointer', fontSize: '13px', textDecoration: 'underline' }}>
                   Cancel — go back

@@ -32,7 +32,7 @@ const sendCallable = httpsCallable<
 // Hard-coded to the `.web.app` domain. The `.firebaseapp.com` domain is shared
 // across many Firebase projects and has been falsely flagged by Google Safe
 // Browsing; `.web.app` is a cleaner shared domain with fewer false positives.
-const PUBLIC_HOST = 'https://contractors-office-96731.web.app'
+import { PUBLIC_HOST } from './config'
 
 export function shareLinkFor(estimateId: string): string {
   return `${PUBLIC_HOST}/q/${estimateId}`

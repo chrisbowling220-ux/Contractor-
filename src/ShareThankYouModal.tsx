@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { isPhone } from './lib/shareEstimate'
 import type { ThankYouPackage } from './data/types'
 
-const PUBLIC_HOST = 'https://contractors-office-96731.web.app'
+import { PUBLIC_HOST } from './lib/config'
 
 interface Props {
   pkg: ThankYouPackage

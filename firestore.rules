@@ -105,6 +105,13 @@ service cloud.firestore {
       allow update, delete: if isOwner(resource.data);
     }
 
+    // userMaterialPrices/{userId}: the contractor's own learned price book.
+    // Doc id IS the user id — only that user can read/write it. (The generator
+    // function reads it via the Admin SDK, which bypasses these rules.)
+    match /userMaterialPrices/{userId} {
+      allow read, write: if isSignedIn() && request.auth.uid == userId;
+    }
+
     // Everything else: denied.
     match /{document=**} {
       allow read, write: if false;

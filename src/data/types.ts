@@ -73,6 +73,15 @@ export interface Estimate {
   scopeOfWork: string
   aiQuote?: AIQuote
   status: 'pending' | 'approved' | 'declined'
+  // Optional upfront deposit the contractor requests before starting work.
+  // Off by default — many jobs/customers pay only at completion. When set, the
+  // customer sees the deposit terms on the estimate, and on approval a deposit
+  // invoice is auto-generated (deposit due now, balance due at completion).
+  depositRequested?: boolean
+  depositAmount?: number          // dollar amount of the deposit
+  // True once the deposit invoice has been auto-created for this estimate, so
+  // we don't create duplicates on repeat dashboard loads.
+  depositInvoiceCreated?: boolean
   createdAt: string
   createdBy?: string
   // Set when the customer accepts/declines via the public share link.
@@ -192,6 +201,9 @@ export interface Invoice {
   // until the contractor manually confirms cash received.
   customerCashChoice?: boolean
   customerCashAt?: string
+  // True for the upfront-deposit invoice auto-created when a customer approves
+  // an estimate that requested a deposit. The final invoice nets this out.
+  isDeposit?: boolean
   createdAt: string
   createdBy?: string
 }

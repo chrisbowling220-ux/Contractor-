@@ -3,6 +3,56 @@
 A running list maintained during development. Not user-facing. Update as things
 get done or new ideas come up.
 
+> ⚠️ STACK NOTE: This app is **React + Firebase (Firestore + Cloud Functions)**.
+> It is NOT Supabase/Postgres. Any SQL schema ideas must be translated to
+> Firestore collections — do not bolt on a second backend.
+
+## BIG FEATURE: Real per-ZIP material pricing (catalog + regional factors)
+
+**Why:** The AI currently *estimates* regional prices from its training (good,
+free, but not live). Contractors want accuracy to their actual local store.
+
+**Legal reality (decided):** We do NOT scrape Lowes.com / HomeDepot.com — it
+violates their ToS, gets IP-banned, and re-publishing their prices commercially
+adds liability. There is no public Lowe's price API. So pricing data comes from:
+(a) a catalog we maintain, (b) regional adjustment factors, (c) the contractor's
+own saved prices, and/or (d) a licensed construction-cost data provider later.
+
+**The design (Firestore translation of the proposed SQL schema):**
+
+- `materials/{id}` (the product catalog — already partly exists in
+  src/data/materials.ts): `{ sku, name, category, unit, basePrice, updatedAt }`
+- `regionalPricing/{zipPrefix}`: `{ zipPrefix:"900", regionName:"Southern California",
+  priceFactor:1.30, laborFactor:1.45 }` — first 3 ZIP digits → region + multiplier.
+- `regionalPriceOverrides/{id}`: `{ materialId, zipPrefix, overridePrice }` —
+  exact price for a specific item in a specific region when the factor isn't
+  precise enough (high-value items).
+- `userMaterialPrices/{userId}/{materialId}`: per-contractor real prices from
+  THEIR store. Beats the regional estimate for that user. Most accurate + legal.
+- Quotes already snapshot line items + prices at quote time (we store the full
+  estimate doc), so no separate quotes table needed — Firestore `estimates`
+  already does this.
+
+**Flow:** user enters ZIP → look up `regionalPricing` by first 3 digits → get
+region + factor. For each material the AI lists: price =
+  userMaterialPrices override ?? regionalPriceOverride ?? (basePrice × factor).
+The AI keeps doing what it's great at (deciding WHAT materials + quantities);
+the catalog handles WHAT IT COSTS. Best of both.
+
+**Admin (for Chris, platform owner):** a CSV import screen → bulk upsert into
+`materials` (sku,name,category,unit,basePrice) and `regionalPricing`
+(zipPrefix,regionName,priceFactor,laborFactor). Lets prices be refreshed from
+any legitimate source (store visits, a price-data subscription).
+
+**Effort:** multi-session build. Worth it once there are paying users and time
+to maintain the price data (stale data is worse than a good estimate). Until
+then, the improved AI regional estimates (deployed) are the pricing engine.
+
+**Paid data option (when funded):** license RSMeans-style construction cost
+data, or a compliant retail-price API (SerpApi / BlueCart / Bright Data — they
+scrape on their own infra and sell results; still ToS-gray but shifts the risk
+off us). Per-call cost; revisit when subscription revenue covers it.
+
 ## Before going live to the public
 
 - [ ] **Flip Stripe to live mode** (do together, deliberately):

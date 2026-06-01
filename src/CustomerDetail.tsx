@@ -5,6 +5,7 @@ import { ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'fi
 import { useUser } from '@clerk/clerk-react'
 import { copyShareLink, isPhone } from './lib/shareEstimate'
 import type { CustomerPhoto } from './data/types'
+import { PUBLIC_HOST } from './lib/config'
 
 interface Customer {
   id: string
@@ -20,9 +21,6 @@ interface Props {
 }
 
 // The public share link for a customer's photo log lives at /log/<customerId>.
-// Pinned to .web.app to avoid the false-positive Safe Browsing flag on the
-// shared .firebaseapp.com domain.
-const PUBLIC_HOST = 'https://contractors-office-96731.web.app'
 function logShareLink(customerId: string): string {
   return `${PUBLIC_HOST}/log/${customerId}`
 }

@@ -226,6 +226,8 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
   const [savedId, setSavedId] = useState<string | null>(null)
   const [aiHourlyRate, setAiHourlyRate] = useState('65')
   const [aiMarkupPct, setAiMarkupPct] = useState('20')
+  // Optional upfront deposit, chosen right here in Quick Quote. '' = none.
+  const [depositPct, setDepositPct] = useState('')
   const [loadingMessage, setLoadingMessage] = useState('')
   const [usedFallback, setUsedFallback] = useState(false)
   const [videoRecording, setVideoRecording] = useState(false)
@@ -595,6 +597,12 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
       createdAt: new Date().toISOString(),
       createdBy: user.id,
     }
+    // Apply the upfront-deposit choice from Quick Quote, if any.
+    const pct = Number(depositPct) || 0
+    if (pct > 0) {
+      payload.depositRequested = true
+      payload.depositAmount = +((ai.final_customer_quote * pct) / 100).toFixed(2)
+    }
     if (customerId) payload.customerId = customerId
     try {
       const docRef = await addDoc(collection(db, 'estimates'), payload)
@@ -844,6 +852,21 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
             <label style={label}>Markup %</label>
             <input type="number" value={aiMarkupPct} onChange={e => setAiMarkupPct(e.target.value)} style={input} placeholder="20" />
             <p style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px' }}>Small: 15–20% · Medium: 20–25% · Specialty: 25–35%</p>
+          </div>
+          <div>
+            <label style={label}>Upfront Deposit (optional)</label>
+            <select value={depositPct} onChange={e => setDepositPct(e.target.value)} style={input}>
+              <option value="">No deposit — pay at completion</option>
+              <option value="10">10% upfront</option>
+              <option value="15">15% upfront</option>
+              <option value="20">20% upfront</option>
+              <option value="25">25% upfront</option>
+              <option value="33">33% upfront</option>
+              <option value="50">50% upfront</option>
+            </select>
+            <p style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px' }}>
+              {depositPct ? `Estimate will require ${depositPct}% upfront, balance at completion.` : 'Leave as "No deposit" if the customer pays only when the job is done.'}
+            </p>
           </div>
         </div>
       </div>

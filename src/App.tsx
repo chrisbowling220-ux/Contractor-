@@ -7,6 +7,7 @@ import Settings, { fetchBusinessName } from './Settings'
 import ScanRoom from './ScanRoom'
 import Projects from './Projects'
 import Estimates from './Estimates'
+import Schedule from './Schedule'
 import PublicEstimate from './PublicEstimate'
 import PublicPhotoLog from './PublicPhotoLog'
 import PublicChangeOrder from './PublicChangeOrder'
@@ -31,22 +32,92 @@ function useIsMobile() {
   return isMobile
 }
 
+interface DashboardData {
+  activeJobs: number
+  pendingEstimates: number
+  customers: number
+  // Stats
+  revenueThisMonth: number      // sum of paid invoices this calendar month
+  estimatesWon: number          // approved estimates (all time)
+  estimatesLost: number         // declined estimates (all time)
+  avgJobSize: number            // avg approved estimate total
+  // Needs attention
+  attention: { id: string; kind: 'overdue_invoice' | 'stale_estimate' | 'starting_soon'; label: string; projectId?: string }[]
+}
+
 function useDashboardCounts(userId: string | undefined) {
-  const [counts, setCounts] = useState({ activeJobs: 0, pendingEstimates: 0, customers: 0 })
+  const [counts, setCounts] = useState<DashboardData>({
+    activeJobs: 0, pendingEstimates: 0, customers: 0,
+    revenueThisMonth: 0, estimatesWon: 0, estimatesLost: 0, avgJobSize: 0, attention: [],
+  })
   useEffect(() => {
-    if (!userId) { setCounts({ activeJobs: 0, pendingEstimates: 0, customers: 0 }); return }
+    if (!userId) {
+      setCounts({ activeJobs: 0, pendingEstimates: 0, customers: 0, revenueThisMonth: 0, estimatesWon: 0, estimatesLost: 0, avgJobSize: 0, attention: [] })
+      return
+    }
     (async () => {
       try {
-        const [projects, estimates, customers] = await Promise.all([
+        const [projects, estimates, customers, invoices] = await Promise.all([
           getDocs(query(collection(db, 'projects'), where('createdBy', '==', userId))),
           getDocs(query(collection(db, 'estimates'), where('createdBy', '==', userId))),
           getDocs(query(collection(db, 'customers'), where('createdBy', '==', userId))),
+          getDocs(query(collection(db, 'invoices'), where('createdBy', '==', userId))),
         ])
-        // "Active" = anything in flight: estimated, contracted, or in_progress.
         const activeStatuses = new Set(['estimated', 'contracted', 'in_progress'])
         const activeJobs = projects.docs.filter(d => activeStatuses.has(d.data().status as string)).length
-        const pendingEstimates = estimates.docs.filter(d => (d.data().status as string) === 'pending').length
-        setCounts({ activeJobs, pendingEstimates, customers: customers.size })
+        const estDocs = estimates.docs.map(d => ({ id: d.id, ...d.data() } as Record<string, unknown> & { id: string }))
+        const pendingEstimates = estDocs.filter(e => e.status === 'pending').length
+        const won = estDocs.filter(e => e.status === 'approved')
+        const lost = estDocs.filter(e => e.status === 'declined').length
+        const avgJobSize = won.length > 0 ? +(won.reduce((s, e) => s + ((e.total as number) || 0), 0) / won.length).toFixed(0) : 0
+
+        // Revenue this calendar month = paid invoices with paidAt in this month.
+        const now = new Date()
+        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime()
+        const invDocs = invoices.docs.map(d => ({ id: d.id, ...d.data() } as Record<string, unknown> & { id: string }))
+        const revenueThisMonth = +invDocs
+          .filter(i => i.status === 'paid' && i.paidAt && new Date(i.paidAt as string).getTime() >= monthStart)
+          .reduce((s, i) => s + ((i.subtotal as number) || 0), 0).toFixed(2)
+
+        // Needs attention:
+        const attention: DashboardData['attention'] = []
+        const DAY = 86400000
+        // 1) Unpaid invoices past their due date.
+        invDocs.filter(i => i.status !== 'paid' && i.dueDate && new Date(i.dueDate as string).getTime() < now.getTime())
+          .forEach(i => attention.push({
+            id: `inv-${i.id}`,
+            kind: 'overdue_invoice',
+            label: `Invoice ${i.invoiceNumber || ''} for ${i.customerName || 'customer'} is past due ($${((i.amountDue as number) || 0).toFixed(2)})`,
+            projectId: i.projectId as string | undefined,
+          }))
+        // 2) Estimates sent 3+ days ago with no customer response yet.
+        estDocs.filter(e => e.status === 'pending' && e.createdAt && (now.getTime() - new Date(e.createdAt as string).getTime()) > 3 * DAY)
+          .forEach(e => attention.push({
+            id: `est-${e.id}`,
+            kind: 'stale_estimate',
+            label: `${e.customerName || 'A customer'} hasn't responded to their estimate in ${Math.floor((now.getTime() - new Date(e.createdAt as string).getTime()) / DAY)} days`,
+            projectId: e.projectId as string | undefined,
+          }))
+        // 3) Jobs scheduled to start today or tomorrow.
+        const todayStr = new Date().toISOString().slice(0, 10)
+        const tomorrowStr = new Date(now.getTime() + DAY).toISOString().slice(0, 10)
+        projects.docs.map(d => ({ id: d.id, ...d.data() } as Record<string, unknown> & { id: string }))
+          .filter(p => !p.archived && !p.declined && p.status !== 'closed' && typeof p.startDate === 'string'
+            && ((p.startDate as string).slice(0, 10) === todayStr || (p.startDate as string).slice(0, 10) === tomorrowStr))
+          .forEach(p => {
+            const when = (p.startDate as string).slice(0, 10) === todayStr ? 'today' : 'tomorrow'
+            attention.push({
+              id: `start-${p.id}`,
+              kind: 'starting_soon',
+              label: `${p.jobTypeName || 'Job'} for ${p.customerName || 'customer'} starts ${when}`,
+              projectId: p.id,
+            })
+          })
+
+        setCounts({
+          activeJobs, pendingEstimates, customers: customers.size,
+          revenueThisMonth, estimatesWon: won.length, estimatesLost: lost, avgJobSize, attention,
+        })
       } catch (err) {
         console.error('Dashboard counts failed:', err)
       }
@@ -74,12 +145,14 @@ const TILES: Tile[] = [
 const NAV_ITEMS: Tile[] = [
   ...TILES,
   { key: 'estimates', label: 'Estimates', icon: '📝', blurb: 'Pending, approved & declined' },
+  { key: 'schedule', label: 'Schedule', icon: '📅', blurb: 'Upcoming jobs by start date' },
   { key: 'settings', label: 'Settings', icon: '⚙️', blurb: 'Business profile' },
 ]
 
 const TITLE_MAP: Record<string, string> = {
   dashboard: 'Dashboard',
   estimates: 'Estimates',
+  schedule: 'Schedule',
   ...Object.fromEntries(TILES.map(t => [t.key, t.label])),
 }
 
@@ -143,6 +216,44 @@ function DashboardHome({ counts, onPick, onBox, onPhotos, userName }: { counts: 
           <div style={counterLabel}>Customers ›</div>
         </button>
       </div>
+
+      {/* Needs attention — overdue invoices + stale estimates so nothing slips */}
+      {counts.attention.length > 0 && (
+        <div style={{ background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: '12px', padding: isMobile ? '14px' : '18px', marginBottom: isMobile ? '20px' : '28px' }}>
+          <h2 style={{ fontSize: isMobile ? '14px' : '15px', fontWeight: 800, margin: '0 0 10px', color: '#92400e', textTransform: 'uppercase', letterSpacing: '0.5px' }}>⚠️ Needs your attention ({counts.attention.length})</h2>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {counts.attention.map(a => (
+              <button key={a.id} onClick={() => onPick(a.kind === 'stale_estimate' ? 'estimates' : a.kind === 'starting_soon' ? 'schedule' : 'projects')} style={{ textAlign: 'left', background: 'white', border: '1px solid #fde68a', borderRadius: '8px', padding: '10px 12px', cursor: 'pointer', fontSize: '13px', color: '#1a1f2e', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span>{a.kind === 'overdue_invoice' ? '💸' : a.kind === 'starting_soon' ? '📅' : '⏳'}</span>
+                <span style={{ flex: 1 }}>{a.label}</span>
+                <span style={{ color: '#94a3b8' }}>›</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Business stats — the scoreboard */}
+      {(counts.revenueThisMonth > 0 || counts.estimatesWon > 0 || counts.estimatesLost > 0) && (
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: isMobile ? '8px' : '16px', marginBottom: isMobile ? '20px' : '28px' }}>
+          <div style={{ ...counterCard, textAlign: 'left' }}>
+            <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Paid this month</div>
+            <div style={{ fontSize: isMobile ? '20px' : '26px', fontWeight: 800, color: '#16a34a' }}>${counts.revenueThisMonth.toLocaleString()}</div>
+          </div>
+          <div style={{ ...counterCard, textAlign: 'left' }}>
+            <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Jobs won</div>
+            <div style={{ fontSize: isMobile ? '20px' : '26px', fontWeight: 800, color: '#1a1f2e' }}>{counts.estimatesWon}<span style={{ fontSize: '13px', color: '#94a3b8', fontWeight: 600 }}> won · {counts.estimatesLost} lost</span></div>
+          </div>
+          <div style={{ ...counterCard, textAlign: 'left' }}>
+            <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Win rate</div>
+            <div style={{ fontSize: isMobile ? '20px' : '26px', fontWeight: 800, color: '#1a1f2e' }}>{counts.estimatesWon + counts.estimatesLost > 0 ? Math.round((counts.estimatesWon / (counts.estimatesWon + counts.estimatesLost)) * 100) : 0}%</div>
+          </div>
+          <div style={{ ...counterCard, textAlign: 'left' }}>
+            <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Avg job size</div>
+            <div style={{ fontSize: isMobile ? '20px' : '26px', fontWeight: 800, color: '#1a1f2e' }}>${counts.avgJobSize.toLocaleString()}</div>
+          </div>
+        </div>
+      )}
 
       <h2 style={{ fontSize: isMobile ? '16px' : '18px', fontWeight: 700, marginBottom: '12px', color: NAVY, textTransform: 'uppercase', letterSpacing: '1px' }}>What do you want to do?</h2>
       <div style={{
@@ -589,6 +700,7 @@ function Dashboard() {
         )}
         {page === 'projects' && <Projects key={projectsFilter} initialStatusFilter={projectsFilter} />}
         {page === 'estimates' && <Estimates />}
+        {page === 'schedule' && <Schedule onOpenProject={() => go('projects')} />}
         {page === 'customers' && <Customers />}
         {page === 'scan-room' && <ScanRoom onNavigate={go} />}
         {page === 'settings' && <Settings />}

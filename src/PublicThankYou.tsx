@@ -3,7 +3,7 @@ import { doc, getDoc } from 'firebase/firestore'
 import { db } from './firebase'
 import type { ThankYouPackage } from './data/types'
 
-const PUBLIC_HOST = 'https://contractors-office-96731.web.app'
+import { PUBLIC_HOST } from './lib/config'
 
 // Public thank-you page at /thanks/<id>. No sign-in required.
 // Renders the AI-written letter + slideshow of project photos.

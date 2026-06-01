@@ -17,6 +17,7 @@ import InvoiceEditModal from './InvoiceEditModal'
 import type { Invoice } from './data/types'
 import EstimatePreview from './EstimatePreview'
 import { openEstimatePrintWindow } from './lib/printEstimate'
+import { PUBLIC_HOST } from './lib/config'
 import { fetchBusinessProfile } from './Settings'
 import type { BusinessProfile } from './Settings'
 import type { ThankYouPackage } from './data/types'
@@ -66,6 +67,7 @@ export default function Projects({ initialStatusFilter }: { initialStatusFilter?
   const [invoices, setInvoices] = useState<Invoice[]>([])
   const [statusFilter, setStatusFilter] = useState<ProjectStatus | 'all'>(initialStatusFilter ?? 'all')
   const [viewMode, setViewMode] = useState<'active' | 'completed' | 'declined'>('active')
+  const [searchQuery, setSearchQuery] = useState('')
 
   const [customerName, setCustomerName] = useState('')
   const [jobTypeName, setJobTypeName] = useState(JOB_CATALOG[0].name)
@@ -226,6 +228,17 @@ export default function Projects({ initialStatusFilter }: { initialStatusFilter?
     }
   }
 
+  const setProjectStartDate = async (p: Project, dateStr: string) => {
+    try {
+      const startDate = dateStr || ''
+      await updateDoc(doc(db, 'projects', p.id), { startDate })
+      // Local update for instant feedback (listener will reconcile too).
+      setProjects(prev => prev.map(x => x.id === p.id ? { ...x, startDate } : x))
+    } catch (err) {
+      alert('Could not set start date: ' + (err instanceof Error ? err.message : String(err)))
+    }
+  }
+
   const deleteProject = async (p: Project) => {
     if (!confirm(`Delete the project for "${p.customerName}" (${p.jobTypeName})? This cannot be undone. Linked estimates and change orders stay.`)) return
     try {
@@ -354,7 +367,10 @@ export default function Projects({ initialStatusFilter }: { initialStatusFilter?
         changeOrders: agg.cos,
         profile,
         contractorName: user.fullName || user.firstName || undefined,
-        amountPaid: Number(invoiceAmountPaid) || 0,
+        // Auto-credit any PAID deposit for this project, plus anything the
+        // contractor manually enters — so the final invoice shows the correct
+        // remaining balance.
+        amountPaid: paidDepositForProject(project.id) + (Number(invoiceAmountPaid) || 0),
         dueInDays: Number(invoiceDueDays) || 14,
         invoiceNumber: nextInvoiceNumber(sameYearCount),
       })
@@ -395,9 +411,6 @@ export default function Projects({ initialStatusFilter }: { initialStatusFilter?
     }
   }
 
-  // Pinned host for share links — see lib/shareEstimate.ts for why.
-  const PUBLIC_HOST = 'https://contractors-office-96731.web.app'
-
   const copyChangeOrderLink = async (coId: string) => {
     const link = `${PUBLIC_HOST}/co/${coId}`
     try {
@@ -431,6 +444,14 @@ ${link}
     return `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
   }
 
+  // Sum of PAID deposit invoices for a project — credited against the final
+  // invoice so the customer only owes the remaining balance.
+  const paidDepositForProject = (projectId: string) =>
+    +invoices
+      .filter(inv => inv.projectId === projectId && inv.isDeposit && inv.status === 'paid')
+      .reduce((s, inv) => s + (inv.subtotal || 0), 0)
+      .toFixed(2)
+
   const aggregateForProject = (p: Project) => {
     // Prefer the explicit projectId link when present (new shape). Fall back
     // to customer-name + job-type matching ONLY for legacy estimates that
@@ -458,8 +479,17 @@ ${link}
     if (viewMode === 'declined') pool = projects.filter(p => p.declined)
     else if (viewMode === 'completed') pool = projects.filter(p => p.archived && !p.declined)
     else pool = projects.filter(p => !p.archived && !p.declined)
-    return statusFilter === 'all' ? pool : pool.filter(p => p.status === statusFilter)
-  }, [projects, statusFilter, viewMode])
+    if (statusFilter !== 'all') pool = pool.filter(p => p.status === statusFilter)
+    // Free-text search across customer name, job type, ZIP, and notes.
+    const q = searchQuery.trim().toLowerCase()
+    if (q) pool = pool.filter(p =>
+      (p.customerName || '').toLowerCase().includes(q)
+      || (p.jobTypeName || '').toLowerCase().includes(q)
+      || (p.jobLocationZip || '').toLowerCase().includes(q)
+      || (p.description || '').toLowerCase().includes(q),
+    )
+    return pool
+  }, [projects, statusFilter, viewMode, searchQuery])
   const activeProject = activeId ? projects.find(p => p.id === activeId) ?? null : null
   const activeAgg = activeProject ? aggregateForProject(activeProject) : null
 
@@ -547,6 +577,22 @@ ${link}
           <div style={card}><p style={{ color: '#64748b', fontSize: '12px' }}>Contract Total</p><p style={{ fontSize: '22px', fontWeight: 700, color: '#f97316' }}>${activeAgg.contractTotal.toFixed(2)}</p></div>
           <div style={card}><p style={{ color: '#64748b', fontSize: '12px' }}>Estimates</p><p style={{ fontSize: '22px', fontWeight: 700 }}>{activeAgg.ests.length}</p></div>
           <div style={card}><p style={{ color: '#64748b', fontSize: '12px' }}>Change Orders</p><p style={{ fontSize: '22px', fontWeight: 700 }}>{activeAgg.cos.length}</p></div>
+        </div>
+
+        {/* Schedule — set the job's start date. Shows on the Schedule view. */}
+        <div style={{ ...card, marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: '160px' }}>
+            <p style={{ margin: 0, fontSize: '12px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', fontWeight: 700 }}>📅 Scheduled Start</p>
+            <p style={{ margin: '2px 0 0', fontSize: '14px', color: activeProject.startDate ? '#1a1f2e' : '#94a3b8' }}>
+              {activeProject.startDate ? new Date(activeProject.startDate + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }) : 'No start date set'}
+            </p>
+          </div>
+          <input
+            type="date"
+            value={activeProject.startDate ? activeProject.startDate.slice(0, 10) : ''}
+            onChange={e => setProjectStartDate(activeProject, e.target.value)}
+            style={{ padding: '10px', border: '1px solid #cbd5e1', borderRadius: '8px', fontSize: '14px' }}
+          />
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '16px' }}>
@@ -991,6 +1037,20 @@ ${link}
           <button onClick={() => setShowForm(!showForm)} style={{ background: '#f97316', color: 'white', border: 'none', padding: '12px 22px', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, fontSize: '14px', boxShadow: '0 2px 8px rgba(249,115,22,0.25)' }}>
             {showForm ? '✕ Cancel' : '+ New Project'}
           </button>
+        )}
+      </div>
+
+      {/* Search box — find any job fast by customer, type, ZIP, or notes */}
+      <div style={{ position: 'relative', marginBottom: '12px' }}>
+        <span style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8', fontSize: '15px' }}>🔍</span>
+        <input
+          value={searchQuery}
+          onChange={e => setSearchQuery(e.target.value)}
+          placeholder="Search by customer, job type, ZIP…"
+          style={{ width: '100%', padding: '11px 12px 11px 38px', border: '1px solid #cbd5e1', borderRadius: '10px', fontSize: '15px', boxSizing: 'border-box' }}
+        />
+        {searchQuery && (
+          <button onClick={() => setSearchQuery('')} style={{ position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)', background: '#f1f5f9', border: 'none', borderRadius: '6px', padding: '4px 10px', cursor: 'pointer', fontSize: '12px', color: '#64748b', fontWeight: 600 }}>Clear</button>
         )}
       </div>
 

@@ -2,6 +2,8 @@ import { collection, getDocs, getDoc, query, where, addDoc, doc, updateDoc } fro
 import { db } from '../firebase'
 import type { Estimate, Project, ProjectStatus } from '../data/types'
 import { PROJECT_STATUS_ORDER } from '../data/types'
+import { createDepositInvoice, nextInvoiceNumber } from './createInvoice'
+import { fetchBusinessProfile } from '../Settings'
 
 // We've merged Estimates into Projects — every estimate should belong to a
 // project, and the project's status should AUTO-ADVANCE based on the customer's
@@ -115,6 +117,38 @@ export async function autoConvertApprovedEstimates(userId: string): Promise<{
         // ── No project yet — create one at the right status. ──
         await createProjectFor(e, userId, target, declined)
         changed.push(e)
+      }
+
+      // ── Deposit invoice: if this estimate was APPROVED and requested a
+      //    deposit, auto-create the deposit invoice once (idempotent via the
+      //    depositInvoiceCreated flag). Re-read the estimate's projectId since
+      //    createProjectFor may have just set it. ──
+      const approved = e.status === 'approved' && e.customerResponse?.action === 'approved'
+      if (approved && e.depositRequested && (e.depositAmount || 0) > 0 && !e.depositInvoiceCreated) {
+        try {
+          const eSnap = await getDoc(doc(db, 'estimates', e.id))
+          const fresh = eSnap.exists() ? ({ id: e.id, ...eSnap.data() } as Estimate) : e
+          if (fresh.projectId && !fresh.depositInvoiceCreated) {
+            const profile = await fetchBusinessProfile(userId)
+            // Invoice number: count this user's invoices this year.
+            const invSnap = await getDocs(query(collection(db, 'invoices'), where('createdBy', '==', userId)))
+            const thisYear = new Date().getFullYear()
+            const sameYear = invSnap.docs.filter(d => {
+              const c = d.data().createdAt as string
+              return c && new Date(c).getFullYear() === thisYear
+            }).length
+            await createDepositInvoice({
+              userId,
+              estimate: fresh,
+              project: { id: fresh.projectId },
+              profile,
+              invoiceNumber: nextInvoiceNumber(sameYear),
+            })
+            await updateDoc(doc(db, 'estimates', e.id), { depositInvoiceCreated: true })
+          }
+        } catch (depErr) {
+          console.error('Deposit invoice creation failed for estimate', e.id, depErr)
+        }
       }
     } catch (err) {
       console.error('Auto-convert/reconcile failed for estimate', e.id, err)

@@ -4,6 +4,7 @@ import { doc, updateDoc, deleteField } from 'firebase/firestore'
 import { db } from './firebase'
 import { toCustomerView } from './lib/customerView'
 import { copyShareLink, shareLinkFor, smsHref, mailtoHref, nativeShare, isPhone } from './lib/shareEstimate'
+import { rememberMaterialPrices } from './lib/learnedPrices'
 import type { Estimate, AIQuote, AIMaterialLine } from './data/types'
 
 interface Props {
@@ -32,6 +33,9 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint }:
   const [estimatedHours, setEstimatedHours] = useState(String(initialAi?.labor.estimated_hours ?? estimate.estimatedHours ?? 0))
   const [rentalsTotal, setRentalsTotal] = useState(String(initialAi?.price_breakdown.rentals_subtotal ?? estimate.rentalsTotal ?? 0))
   const [contractorNotes, setContractorNotes] = useState(initialAi?.contractor_notes || '')
+  // Optional upfront deposit (off by default).
+  const [depositRequested, setDepositRequested] = useState(!!estimate.depositRequested)
+  const [depositAmount, setDepositAmount] = useState(String(estimate.depositAmount ?? ''))
   const [saving, setSaving] = useState(false)
   const [saveStatus, setSaveStatus] = useState('')
   const [linkCopied, setLinkCopied] = useState(false)
@@ -42,7 +46,7 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint }:
     // not a change.
     setDirty(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [customerName, customerSummary, workScope, materials, hourlyRate, estimatedHours, rentalsTotal, contractorNotes])
+  }, [customerName, customerSummary, workScope, materials, hourlyRate, estimatedHours, rentalsTotal, contractorNotes, depositRequested, depositAmount])
 
   // Reset dirty on mount.
   useEffect(() => { setDirty(false) }, [])
@@ -112,6 +116,7 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint }:
     setSaveStatus('')
     try {
       const editedQuote = buildEditedQuote()
+      const depAmt = depositRequested ? Math.min(Math.max(0, Number(depositAmount) || 0), computed.total) : 0
       const updates: Record<string, unknown> = {
         customerName,
         aiQuote: editedQuote,
@@ -122,6 +127,8 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint }:
         hourlyRate: Number(hourlyRate) || 0,
         estimatedHours: Number(estimatedHours) || 0,
         scopeOfWork: `SCOPE OF WORK — ${estimate.jobTypeName}\n\nCLIENT: ${customerName}\n\nSUMMARY:\n${customerSummary}\n\n${workScope}`,
+        depositRequested: depositRequested && depAmt > 0,
+        depositAmount: depositRequested ? depAmt : 0,
       }
       // If the customer had already DECLINED (or approved) this estimate and the
       // contractor is now editing it to re-send, reset it to "pending" and clear
@@ -140,6 +147,8 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint }:
         ...(reset ? { status: 'pending' as const, customerResponse: undefined } : {}),
       } as Estimate
       onSaved(updated)
+      // Learn the contractor's edited material prices for smarter future quotes.
+      if (user?.id) rememberMaterialPrices(user.id, materials)
       setDirty(false)
       setSaveStatus('✓ Saved')
       setTimeout(() => setSaveStatus(''), 2500)
@@ -294,6 +303,33 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint }:
               <span style={{ color: '#fb923c', fontSize: '14px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '1px' }}>Grand Total</span>
               <span style={{ color: '#f97316', fontSize: '28px', fontWeight: 700 }}>${computed.total.toFixed(2)}</span>
             </div>
+          </div>
+
+          {/* Optional upfront deposit — off by default. Some jobs/customers
+              prefer to pay only at completion, so the contractor chooses. */}
+          <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '14px', marginTop: '12px' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', fontWeight: 700, fontSize: '14px', color: '#1a1f2e' }}>
+              <input type="checkbox" checked={depositRequested} onChange={e => setDepositRequested(e.target.checked)} style={{ width: '18px', height: '18px', cursor: 'pointer' }} />
+              💵 Request an upfront deposit before starting
+            </label>
+            {depositRequested && (
+              <div style={{ marginTop: '12px' }}>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '8px' }}>
+                  <span style={{ fontSize: '13px', color: '#64748b' }}>Deposit amount $</span>
+                  <input type="number" value={depositAmount} onChange={e => setDepositAmount(e.target.value)} placeholder="0.00" style={{ width: '120px', padding: '8px 10px', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '14px' }} />
+                  {/* Quick % helpers */}
+                  {[25, 50].map(pct => (
+                    <button key={pct} onClick={() => setDepositAmount((computed.total * pct / 100).toFixed(2))} style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', borderRadius: '6px', padding: '6px 10px', cursor: 'pointer', fontSize: '12px', fontWeight: 600 }}>{pct}%</button>
+                  ))}
+                </div>
+                {Number(depositAmount) > 0 && (
+                  <p style={{ margin: 0, fontSize: '13px', color: '#16a34a', fontWeight: 600 }}>
+                    Customer pays <strong>${(Number(depositAmount) || 0).toFixed(2)}</strong> upfront · <strong>${Math.max(0, computed.total - (Number(depositAmount) || 0)).toFixed(2)}</strong> balance due at completion.
+                  </p>
+                )}
+                <p style={{ margin: '6px 0 0', fontSize: '11px', color: '#94a3b8' }}>When the customer approves, a deposit invoice is created automatically. Leave this off if they'll pay only at the end.</p>
+              </div>
+            )}
           </div>
 
           {/* Save + share row */}

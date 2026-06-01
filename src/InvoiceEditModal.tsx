@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { doc, updateDoc } from 'firebase/firestore'
 import { db } from './firebase'
 import type { Invoice } from './data/types'
+import { PUBLIC_HOST } from './lib/config'
 
 interface Props {
   invoice: Invoice
@@ -87,7 +88,7 @@ export default function InvoiceEditModal({ invoice, onRegenerate, onDone, onClos
     setSaving(true)
     try {
       await save()
-      const url = `https://contractors-office-96731.web.app/inv/${invoice.id}?print=1`
+      const url = `${PUBLIC_HOST}/inv/${invoice.id}?print=1`
       window.open(url, '_blank', 'noopener,noreferrer')
       onClose()
     } catch (err) {

@@ -7,6 +7,48 @@ get done or new ideas come up.
 > It is NOT Supabase/Postgres. Any SQL schema ideas must be translated to
 > Firestore collections — do not bolt on a second backend.
 
+## 🔖 CURRENT STATE — pick up here next session
+
+**App is LIVE & launch-ready** at https://contractors-office-96731.web.app
+Stripe is fully LIVE (real payments work, $1 test passed). Security audited clean.
+
+**IN PROGRESS — Custom domain `builderspro.cc` (bought at Cloudflare):**
+- DNS records ADDED in Cloudflare + confirmed propagating:
+  - A record: `builderspro.cc` → `199.36.158.100` (DNS only / gray cloud)
+  - TXT record: `builderspro.cc` → `hosting-site=contractors-office-96731`
+- Firebase is provisioning SSL (auto, takes mins–hours). NOT live yet.
+- All app share-links centralized into `src/lib/config.ts` — to switch the whole
+  app to the new domain, change the ONE `PUBLIC_HOST` line there to
+  `https://builderspro.cc` and deploy hosting. (Currently still .web.app so
+  nothing breaks while SSL provisions.)
+- NEXT once Firebase shows builderspro.cc "Connected" with SSL:
+  1. Flip config.ts PUBLIC_HOST → builderspro.cc, `firebase deploy --only hosting`
+  2. Verify `builderspro.cc` in Resend (resend.com) + add the DNS records it gives
+     (SPF/DKIM TXT records) in Cloudflare — same copy-paste flow as Firebase DNS.
+  3. Build the EMAIL FEATURES (all were waiting on the domain + Resend):
+     - Customer invoice emails (currently sendEstimateEmail only reaches the
+       account owner via Resend sandbox — domain unlocks sending to anyone)
+     - "Customer signed" instant alert → email the contractor on approve/decline
+     - Day-before job reminders → daily scheduled Cloud Function checks projects
+       with startDate == tomorrow, emails contractor + customer. (Calendar/
+       scheduling UI already built: Schedule page + startDate picker.)
+- Branding note: domain is "builderspro" (plural) + .cc, app is "BuildPro+".
+  Consider aligning branding or keeping both. Not blocking.
+
+**Built this session (all deployed unless noted):** deposit system (toggle in
+Quick Quote, pay deposit/full/cash in the estimate after approval, auto deposit
+invoice via createDepositInvoiceForApproval fn), My Prices (app learns saved
+material-price edits → userMaterialPrices/{uid}, fed to generator), multi-trade
+knowledge (electrical/plumbing/HVAC/ground-up) + code-awareness (defers to local
+AHJ), tighter material quantities (no over-counting), Schedule/calendar, business
+stats + needs-attention dashboard, search, duplicate estimate, log-off in Settings.
+
+**Still TODO after domain+email:** final 6-step human click-through test; Batch
+items now folded into email features above. Stripe Connect 3% fee (documented
+below) is the only big deferred build.
+
+Docs in repo: PRESENTATION.md (full pitch), LAUNCH_KIT.md (marketing/posts/flyer).
+
 ## BIG FEATURE: Real per-ZIP material pricing (catalog + regional factors)
 
 **Why:** The AI currently *estimates* regional prices from its training (good,

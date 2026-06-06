@@ -101,6 +101,40 @@ NORTH CAROLINA BASELINE PRICES (Home Depot / Lowe's, 2026, central NC retail —
 
 For items not in the reference list, use realistic 2026 retail prices in the same spirit, adjusted for the job ZIP per the regional guidelines above. If the ZIP is in central NC, use the baseline as-is. If the ZIP is in a higher-cost or lower-cost region, scale appropriately.`
 
+const FASTENER_PRICING = `FASTENER & SCREW PRICING — Lowe's Published List Prices (2026, verify before quoting as prices vary by region):
+
+DRYWALL SCREWS (coarse thread, bugle head, Phillips drive):
+- #6 × 1 in    — $5.98 / box of 289  (~$0.021/pc) | use for 1/4" drywall to metal
+- #6 × 1-1/4 in — $6.98 / box of 245  (~$0.028/pc) | most common single-layer drywall
+- #6 × 1-5/8 in — $6.98 / box of 189  (~$0.037/pc) | double-layer or 5/8" drywall
+- #6 × 1-1/4 in — $24.98 / 5-lb box of 1190 (~$0.021/pc) | bulk, medium jobs
+- #6 × 1-5/8 in — $24.98 / 5-lb box of 945  (~$0.026/pc) | bulk, medium jobs
+- #6 × 1-1/4 in — $49.98 / 25-lb box of 6125 (~$0.008/pc) | bulk, large jobs
+
+WOOD & CONSTRUCTION SCREWS (Star/Torx drive unless noted):
+- #8 × 1-5/8 in — $10.48 / 153-ct (~$0.068/pc) | interior framing, light structural
+- #8 × 2 in     — $10.48 / 129-ct (~$0.081/pc) | interior framing
+- #10 × 3 in    — $10.48 / 73-ct  (~$0.144/pc) | heavy structural, treated lumber
+
+DECK & EXTERIOR SCREWS (Star/Torx drive):
+- Deck Plus #10 × 2-1/2 in — $29.98 / 365-ct (~$0.082/pc) | standard deck boards
+- Deck Plus #10 × 3 in     — $10.98 / 62-ct  (~$0.177/pc) | small packs
+- Deck Plus #10 × 3 in     — $29.98 / 310-ct (~$0.097/pc) | medium jobs
+- DeckForce #10 × 3 in     — $29.98 / 316-ct (~$0.095/pc) | alternative brand
+- Deck Plus #10 × 3 in     — $59.98 / 5-lb 800-ct (~$0.075/pc) | bulk deck projects
+
+SPECIALTY SCREWS:
+- Interior trim screw, yellow zinc #9 × 3 in     — $10.48 / 72-ct (~$0.146/pc) | finish trim work
+- Power Pro exterior epoxy #10 × 3 in             — $12.98 / 70-ct (~$0.185/pc) | high-exposure exterior
+- Simpson Strong-Tie SD #9 × 1-1/2 in (mech-galv) — $15.98 / 100-ct (~$0.160/pc) | structural connectors
+
+FASTENER USAGE RULES (apply these when building material lists):
+- Drywall: buy bulk 5-lb or 25-lb boxes for any job over 10 sheets; use per-piece price for estimates but quote the nearest box size
+- Decking: use 8–10 screws per 8-ft deck board for 5/4 boards, 6–8 for 2x6; add 10% waste
+- Framing: use #10 × 3 in for PT lumber connections, #8 × 2 in for interior 2x4 framing
+- Always quote the most cost-effective pack size for the job volume
+- Source: Lowe's online list pricing — note that in-store pricing and regional pricing may differ slightly`
+
 const NC_LABOR_GUIDANCE = `LABOR PRICING — Fair-market rates (2026), scaled by job ZIP:
 NORTH CAROLINA BASELINE (central NC, Roxboro/Durham area):
 - Default hourly_rate: $65/hour for a solo skilled tradesman (handyman, painter, basic plumber/electrician).
@@ -275,6 +309,8 @@ Your job:
 
 ${NC_PRICING_GUIDANCE}
 
+${FASTENER_PRICING}
+
 ${NC_LABOR_GUIDANCE}
 
 ${SHED_KNOWLEDGE}
@@ -310,6 +346,8 @@ Labor and pricing:
 work_scope and customer_summary go directly in front of the customer. contractor_notes are private — flag risks, hidden-condition assumptions, permit requirements, and questions needing field verification before the job starts.
 
 ${NC_PRICING_GUIDANCE}
+
+${FASTENER_PRICING}
 
 ${NC_LABOR_GUIDANCE}
 

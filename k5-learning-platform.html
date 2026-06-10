@@ -1,0 +1,958 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Kids Learning Adventure — Teacher Platform</title>
+<style>
+  :root{
+    --pink:#ff8fab; --blue:#5bc0eb; --purple:#9b5de5; --green:#43aa8b;
+    --yellow:#ffd166; --orange:#ff8c42; --ink:#2b2d42; --muted:#6b7280;
+    --card:#ffffff; --line:#e9e7f3; --good:#2a9d8f;
+    --shadow:0 8px 24px rgba(43,45,66,.10);
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{
+    font-family:'Comic Sans MS','Trebuchet MS',system-ui,sans-serif;
+    color:var(--ink); min-height:100vh;
+    background:linear-gradient(180deg,#bfe9ff 0%,#d9f3ff 35%,#eafff3 100%);
+  }
+  /* Kid-friendly decorative background (pure SVG, works offline) */
+  #scenery{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden}
+  #scenery svg{position:absolute}
+  .cloud{animation:drift 60s linear infinite}
+  .cloud2{animation:drift 90s linear infinite}
+  @keyframes drift{from{transform:translateX(-120px)}to{transform:translateX(110vw)}}
+  .floaty{animation:bob 6s ease-in-out infinite}
+  @keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-14px)}}
+  .hills{position:fixed;left:0;right:0;bottom:0;z-index:0;pointer-events:none}
+  .wrap{position:relative;z-index:1;max-width:1100px;margin:0 auto;padding:18px}
+
+  /* Header */
+  header.topbar{
+    background:rgba(255,255,255,.85);backdrop-filter:blur(8px);
+    border-radius:22px;padding:14px 20px;box-shadow:var(--shadow);
+    display:flex;align-items:center;gap:14px;flex-wrap:wrap;border:3px solid #fff;
+  }
+  .logo{font-size:1.5rem;font-weight:bold;display:flex;align-items:center;gap:8px}
+  .logo .badge{background:var(--yellow);border-radius:14px;padding:4px 10px}
+  .spacer{flex:1}
+  .who{font-size:.95rem;color:var(--muted);text-align:right;line-height:1.2}
+  .who b{color:var(--ink)}
+
+  button{font-family:inherit;cursor:pointer;border:none;border-radius:14px;
+    padding:10px 16px;font-size:.95rem;font-weight:bold;transition:transform .08s,box-shadow .12s}
+  button:active{transform:scale(.96)}
+  .btn{background:var(--blue);color:#fff;box-shadow:0 4px 0 #3aa7d6}
+  .btn:hover{box-shadow:0 6px 0 #3aa7d6}
+  .btn.pink{background:var(--pink);box-shadow:0 4px 0 #e76d8c}
+  .btn.purple{background:var(--purple);box-shadow:0 4px 0 #7d3fc9}
+  .btn.green{background:var(--green);box-shadow:0 4px 0 #2f8b6f}
+  .btn.gray{background:#eef0f6;color:var(--ink);box-shadow:0 4px 0 #d6d9e6}
+  .btn.small{padding:7px 12px;font-size:.85rem}
+  .btn:disabled{opacity:.5;cursor:not-allowed;box-shadow:none}
+
+  /* Auth */
+  .center-screen{min-height:80vh;display:flex;align-items:center;justify-content:center}
+  .auth-card{background:var(--card);border-radius:26px;box-shadow:var(--shadow);
+    padding:30px;width:min(440px,94vw);border:4px solid #fff;text-align:center}
+  .auth-card h1{font-size:1.6rem;margin-bottom:4px}
+  .auth-card p.sub{color:var(--muted);margin-bottom:18px}
+  .field{text-align:left;margin-bottom:12px}
+  .field label{display:block;font-size:.85rem;color:var(--muted);margin-bottom:4px;font-weight:bold}
+  .field input,.field select{width:100%;padding:12px;border:2px solid var(--line);
+    border-radius:14px;font-family:inherit;font-size:1rem;background:#fbfaff}
+  .field input:focus,.field select:focus{outline:none;border-color:var(--purple)}
+  .auth-toggle{margin-top:14px;font-size:.9rem;color:var(--muted)}
+  .auth-toggle a{color:var(--purple);font-weight:bold;cursor:pointer;text-decoration:underline}
+  .msg{margin-top:10px;font-size:.9rem;min-height:1.2em}
+  .msg.err{color:#e63946}.msg.ok{color:var(--good)}
+
+  /* Tiers + filters */
+  .tier-tabs{display:flex;gap:10px;flex-wrap:wrap;margin:18px 0 8px}
+  .tier-tab{background:rgba(255,255,255,.8);border:3px solid #fff;border-radius:18px;
+    padding:12px 16px;display:flex;flex-direction:column;align-items:center;min-width:140px;
+    box-shadow:var(--shadow);position:relative}
+  .tier-tab.active{outline:4px solid var(--accent,var(--purple));outline-offset:1px}
+  .tier-tab .te{font-size:1.7rem}
+  .tier-tab b{font-size:1rem}
+  .tier-tab span{font-size:.78rem;color:var(--muted)}
+
+  .toolbar{background:rgba(255,255,255,.85);border-radius:18px;padding:12px;
+    display:flex;gap:10px;flex-wrap:wrap;align-items:center;box-shadow:var(--shadow);margin-bottom:14px;border:3px solid #fff}
+  .toolbar select,.toolbar input[type=search]{padding:9px 12px;border:2px solid var(--line);
+    border-radius:12px;font-family:inherit;font-size:.9rem;background:#fbfaff}
+  .chip{display:inline-flex;align-items:center;gap:6px;font-size:.85rem;color:var(--muted)}
+  .chip input{width:18px;height:18px;accent-color:var(--purple)}
+
+  /* Progress */
+  .progress-row{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:14px}
+  .stat{background:var(--card);border-radius:18px;padding:14px 18px;box-shadow:var(--shadow);
+    border:3px solid #fff;flex:1;min-width:130px;text-align:center}
+  .stat .v{font-size:1.8rem;font-weight:bold;color:var(--purple)}
+  .stat .l{font-size:.8rem;color:var(--muted)}
+  .bar{height:14px;background:#eef0f6;border-radius:10px;overflow:hidden;margin-top:8px}
+  .bar > i{display:block;height:100%;background:linear-gradient(90deg,var(--green),var(--yellow));border-radius:10px;transition:width .4s}
+
+  /* Cards grid */
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
+  .card{background:var(--card);border-radius:20px;box-shadow:var(--shadow);border:3px solid #fff;
+    overflow:hidden;display:flex;flex-direction:column}
+  .card.done{outline:3px solid var(--good);opacity:.92}
+  .card-top{padding:14px 16px;display:flex;align-items:flex-start;gap:10px;border-bottom:2px dashed var(--line)}
+  .card-top .ico{font-size:1.8rem;line-height:1}
+  .card-top h3{font-size:1.05rem;line-height:1.2}
+  .tags{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+  .tag{font-size:.7rem;font-weight:bold;padding:3px 8px;border-radius:20px;color:#fff}
+  .tag.type{background:var(--orange)}
+  .tag.subj{background:var(--blue)}
+  .tag.time{background:#adb5bd}
+  .tag.new{background:var(--pink)}
+  .card-body{padding:14px 16px;flex:1}
+  .card-body p.sum{color:var(--muted);font-size:.9rem;margin-bottom:8px}
+  .details{font-size:.88rem;display:none}
+  .details.open{display:block}
+  .details h4{margin:10px 0 4px;font-size:.85rem;color:var(--purple)}
+  .details ul,.details ol{margin-left:18px}
+  .details li{margin-bottom:3px}
+  .card-actions{padding:12px 16px;border-top:2px dashed var(--line);display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .check{display:flex;align-items:center;gap:8px;font-weight:bold;cursor:pointer;font-size:.9rem}
+  .check input{width:22px;height:22px;accent-color:var(--good)}
+  .done-stamp{color:var(--good);font-size:.78rem;margin-left:auto}
+
+  .empty{background:rgba(255,255,255,.85);border-radius:18px;padding:30px;text-align:center;color:var(--muted);box-shadow:var(--shadow)}
+
+  /* Modal */
+  .modal-bg{position:fixed;inset:0;background:rgba(43,45,66,.45);z-index:50;display:none;
+    align-items:center;justify-content:center;padding:16px}
+  .modal-bg.show{display:flex}
+  .modal{background:#fff;border-radius:24px;box-shadow:var(--shadow);width:min(560px,96vw);
+    max-height:90vh;overflow:auto;padding:24px;border:4px solid #fff}
+  .modal h2{margin-bottom:8px}
+  .modal .unlock-list{margin:12px 0;display:flex;flex-direction:column;gap:8px}
+  .modal .unlock-item{background:#f6f4ff;border-radius:14px;padding:10px 12px;font-size:.9rem}
+
+  footer.note{text-align:center;color:var(--muted);font-size:.8rem;margin:24px 0 10px}
+
+  @media print{
+    body *{visibility:hidden}
+    #printArea,#printArea *{visibility:visible}
+    #printArea{position:absolute;inset:0;padding:30px;background:#fff;color:#000;font-family:'Trebuchet MS',sans-serif}
+    #scenery,.hills{display:none}
+  }
+  #printArea{display:none}
+  .ws-line{border-bottom:2px solid #222;height:34px;margin:10px 0}
+  .ws-prob{margin:14px 0;font-size:1.1rem}
+  .ws-box{display:inline-block;width:46px;height:46px;border:2px solid #222;border-radius:8px;vertical-align:middle;margin:0 6px}
+</style>
+</head>
+<body>
+
+<!-- ===== Kid-friendly scenery (decorative, offline SVG) ===== -->
+<div id="scenery" aria-hidden="true">
+  <!-- sun -->
+  <svg class="floaty" style="top:18px;right:30px" width="120" height="120" viewBox="0 0 120 120">
+    <g fill="#ffd166"><circle cx="60" cy="60" r="34"/>
+    <g stroke="#ffd166" stroke-width="7" stroke-linecap="round">
+    <line x1="60" y1="6" x2="60" y2="22"/><line x1="60" y1="98" x2="60" y2="114"/>
+    <line x1="6" y1="60" x2="22" y2="60"/><line x1="98" y1="60" x2="114" y2="60"/>
+    <line x1="20" y1="20" x2="32" y2="32"/><line x1="88" y1="88" x2="100" y2="100"/>
+    <line x1="100" y1="20" x2="88" y2="32"/><line x1="32" y1="88" x2="20" y2="100"/></g></g>
+    <circle cx="50" cy="58" r="4" fill="#e08a00"/><circle cx="70" cy="58" r="4" fill="#e08a00"/>
+    <path d="M48 70 Q60 82 72 70" stroke="#e08a00" stroke-width="4" fill="none" stroke-linecap="round"/>
+  </svg>
+  <!-- rainbow -->
+  <svg class="floaty" style="top:90px;left:24px" width="180" height="100" viewBox="0 0 180 100">
+    <g fill="none" stroke-width="9">
+      <path d="M15 95 A75 75 0 0 1 165 95" stroke="#ff6b6b"/>
+      <path d="M27 95 A63 63 0 0 1 153 95" stroke="#ffa552"/>
+      <path d="M39 95 A51 51 0 0 1 141 95" stroke="#ffd166"/>
+      <path d="M51 95 A39 39 0 0 1 129 95" stroke="#43aa8b"/>
+      <path d="M63 95 A27 27 0 0 1 117 95" stroke="#5bc0eb"/>
+    </g>
+  </svg>
+  <!-- clouds -->
+  <svg class="cloud" style="top:60px" width="140" height="70" viewBox="0 0 140 70">
+    <g fill="#ffffff"><circle cx="40" cy="42" r="24"/><circle cx="68" cy="34" r="30"/><circle cx="100" cy="44" r="22"/><rect x="36" y="44" width="70" height="22" rx="11"/></g>
+  </svg>
+  <svg class="cloud2" style="top:200px" width="110" height="56" viewBox="0 0 140 70">
+    <g fill="#ffffff" opacity=".9"><circle cx="40" cy="42" r="24"/><circle cx="68" cy="34" r="30"/><circle cx="100" cy="44" r="22"/><rect x="36" y="44" width="70" height="22" rx="11"/></g>
+  </svg>
+  <!-- balloons -->
+  <svg class="floaty" style="bottom:120px;right:40px" width="90" height="150" viewBox="0 0 90 150">
+    <ellipse cx="30" cy="40" rx="24" ry="30" fill="#ff8fab"/><path d="M30 70 L30 140" stroke="#cfd2e0" stroke-width="2"/>
+    <ellipse cx="62" cy="56" rx="20" ry="26" fill="#9b5de5"/><path d="M62 82 L40 140" stroke="#cfd2e0" stroke-width="2"/>
+  </svg>
+  <!-- stars -->
+  <svg class="floaty" style="top:320px;right:60px" width="50" height="50" viewBox="0 0 50 50"><path d="M25 3 l6 14 15 1 -11 10 4 15 -14 -8 -14 8 4 -15 -11 -10 15 -1z" fill="#ffd166"/></svg>
+  <svg class="floaty" style="top:430px;left:50px" width="36" height="36" viewBox="0 0 50 50"><path d="M25 3 l6 14 15 1 -11 10 4 15 -14 -8 -14 8 4 -15 -11 -10 15 -1z" fill="#5bc0eb"/></svg>
+</div>
+<svg class="hills" width="100%" height="170" viewBox="0 0 1200 170" preserveAspectRatio="none">
+  <path d="M0 90 Q300 20 600 80 T1200 70 L1200 170 L0 170 Z" fill="#9be3b4"/>
+  <path d="M0 120 Q300 70 600 120 T1200 110 L1200 170 L0 170 Z" fill="#6fcf97"/>
+  <g fill="#43aa8b"><path d="M120 130 l24 -48 24 48z"/><path d="M150 130 l24 -56 24 56z"/>
+  <path d="M980 132 l22 -44 22 44z"/><path d="M1010 132 l22 -52 22 52z"/></g>
+  <g fill="#ff8fab"><circle cx="420" cy="128" r="7"/><circle cx="700" cy="120" r="7"/></g>
+  <g fill="#ffd166"><circle cx="420" cy="128" r="3"/><circle cx="700" cy="120" r="3"/></g>
+</svg>
+
+<div class="wrap">
+
+  <!-- ===== LOGIN / SIGNUP ===== -->
+  <div id="authView" class="center-screen">
+    <div class="auth-card">
+      <div style="font-size:3rem">🎒✏️🌟</div>
+      <h1>Kids Learning Adventure</h1>
+      <p class="sub">Teacher Platform — sign in to manage your class</p>
+
+      <div id="loginForm">
+        <div class="field"><label>Email</label><input id="loginEmail" type="email" placeholder="you@school.edu" autocomplete="username"></div>
+        <div class="field"><label>Password</label><input id="loginPass" type="password" placeholder="••••••••" autocomplete="current-password"></div>
+        <button class="btn purple" style="width:100%" onclick="doLogin()">Sign In</button>
+        <div class="auth-toggle">New teacher? <a onclick="showAuth('signup')">Create an account</a></div>
+        <div id="loginMsg" class="msg"></div>
+      </div>
+
+      <div id="signupForm" style="display:none">
+        <div class="field"><label>Full Name</label><input id="suName" type="text" placeholder="Ms. Rivera"></div>
+        <div class="field"><label>School</label><input id="suSchool" type="text" placeholder="Maple Elementary"></div>
+        <div class="field"><label>Grade you teach</label>
+          <select id="suGrade">
+            <option>Kindergarten</option><option>Grade 1</option><option>Grade 2</option>
+            <option>Grade 3</option><option>Grade 4</option><option>Grade 5</option><option>Mixed / Multiple</option>
+          </select></div>
+        <div class="field"><label>Email</label><input id="suEmail" type="email" placeholder="you@school.edu" autocomplete="username"></div>
+        <div class="field"><label>Password (min 6 chars)</label><input id="suPass" type="password" placeholder="••••••••" autocomplete="new-password"></div>
+        <button class="btn green" style="width:100%" onclick="doSignup()">Create Account</button>
+        <div class="auth-toggle">Already have an account? <a onclick="showAuth('login')">Sign in</a></div>
+        <div id="signupMsg" class="msg"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== APP ===== -->
+  <div id="appView" style="display:none">
+    <header class="topbar">
+      <div class="logo"><span class="badge">🎓</span> Learning Adventure</div>
+      <div class="spacer"></div>
+      <div class="who" id="whoBox"></div>
+      <button class="btn green small" onclick="openNewYear()">📅 New School Year</button>
+      <button class="btn gray small" onclick="doLogout()">Sign Out</button>
+    </header>
+
+    <div class="tier-tabs" id="tierTabs"></div>
+
+    <div class="progress-row" id="progressRow"></div>
+
+    <div class="toolbar">
+      <select id="fType" onchange="render()">
+        <option value="all">All Types</option>
+        <option value="activity">🧩 Activities</option>
+        <option value="game">🎮 Class Games</option>
+        <option value="worksheet">📝 Worksheets</option>
+      </select>
+      <select id="fSubject" onchange="render()"><option value="all">All Subjects</option></select>
+      <input id="fSearch" type="search" placeholder="🔍 Search…" oninput="render()">
+      <label class="chip"><input type="checkbox" id="fHideDone" onchange="render()"> Hide completed</label>
+      <div class="spacer"></div>
+      <span class="chip" id="countChip"></span>
+    </div>
+
+    <div class="grid" id="grid"></div>
+    <div id="emptyState"></div>
+
+    <footer class="note">
+      Progress is saved on this device for each teacher. Use <b>New School Year</b> to reset
+      check-marks and unlock more advanced activities. 🌟
+    </footer>
+  </div>
+</div>
+
+<!-- New school year modal -->
+<div class="modal-bg" id="yearModal">
+  <div class="modal">
+    <h2 id="ymTitle">📅 Start a New School Year?</h2>
+    <p id="ymBody" style="color:var(--muted)"></p>
+    <div class="unlock-list" id="ymUnlocks"></div>
+    <div style="display:flex;gap:10px;margin-top:16px">
+      <button class="btn green" onclick="confirmNewYear()" id="ymConfirm">✅ Yes, start fresh</button>
+      <button class="btn gray" onclick="closeModal('yearModal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- What's new modal -->
+<div class="modal-bg" id="newsModal">
+  <div class="modal">
+    <h2>🎉 Welcome to School Year <span id="nmYear"></span>!</h2>
+    <p style="color:var(--muted)">Check-marks were reset and these newer, more advanced activities are now unlocked:</p>
+    <div class="unlock-list" id="nmUnlocks"></div>
+    <button class="btn purple" style="margin-top:14px" onclick="closeModal('newsModal')">Let's go! 🚀</button>
+  </div>
+</div>
+
+<div id="printArea"></div>
+
+<script>
+/* ============================================================
+   Kids Learning Adventure — Teacher Platform
+   Self-contained, offline-friendly. Per-teacher progress in
+   localStorage. Age-group sections, check-marks, yearly reset,
+   and progressive "content updates" via unlock levels.
+   ============================================================ */
+
+const STORE_KEY = 'k5_platform_v1';
+const SESSION_KEY = 'k5_session_v1';
+const MAX_LEVEL = 3; // highest unlock level shipped
+
+const TIERS = [
+  { id:'early',    name:'Early Learners',   grades:'Grades K–1', ages:'Ages 5–7',  emoji:'🌱', accent:'#ff8fab' },
+  { id:'growing',  name:'Growing Learners', grades:'Grades 2–3', ages:'Ages 7–9',  emoji:'🌿', accent:'#5bc0eb' },
+  { id:'advanced', name:'Advanced Learners',grades:'Grades 4–5', ages:'Ages 9–11', emoji:'🌳', accent:'#9b5de5' },
+];
+
+const SUBJECTS = {
+  sel:    {name:'Social–Emotional', emoji:'😊'},
+  reading:{name:'Reading & Language', emoji:'📖'},
+  math:   {name:'Math', emoji:'🔢'},
+  science:{name:'Science', emoji:'🔬'},
+  social: {name:'Social Studies', emoji:'🌍'},
+  art:    {name:'Art & Creativity', emoji:'🎨'},
+};
+
+/* Helper to build content items concisely */
+function item(o){ return Object.assign({ time:'10–15 min', materials:[], steps:[], teaching:[], prompts:[] }, o); }
+
+/* ---------- CONTENT LIBRARY ----------
+   level: school-year at which it unlocks (1 = available from year 1).
+   Higher levels = the "newer / more advanced" updates for upcoming years. */
+const CONTENT = [
+  /* ===== EARLY (K–1) ===== */
+  item({id:'e_emotion', tier:'early', type:'activity', subject:'sel', level:1, emoji:'😊', title:'Emotion Detective',
+    summary:'Recognize and name feelings from faces and situations.',
+    materials:['Emotion face cards or the on-screen faces'],
+    steps:['Show a feeling face and ask "What feeling is this?"','Have students copy the face.','Ask "When do you feel this way?"'],
+    teaching:['Naming feelings builds self-awareness','Connect feelings to the body (tummy, fists, smile)']}),
+  item({id:'e_friend', tier:'early', type:'activity', subject:'sel', level:1, emoji:'🤝', title:'Sharing & Friendship',
+    summary:'Practice sharing and kind words through simple scenarios.',
+    steps:['Read a sharing scenario ("Two kids, one crayon").','Students suggest a kind solution.','Role-play the kind choice.'],
+    teaching:['Model turn-taking language','Praise specific kind actions']}),
+  item({id:'e_count', tier:'early', type:'activity', subject:'math', level:1, emoji:'🔢', title:'Counting & Number Friends',
+    summary:'Count to 20 and match numbers to quantities.',
+    materials:['Counting objects (blocks, beads)'],
+    steps:['Count objects together 1–10, then 1–20.','Show a number, build that many.','Find "one more / one less".'],
+    teaching:['One-to-one correspondence','Subitizing small groups']}),
+  item({id:'e_phonics', tier:'early', type:'activity', subject:'reading', level:1, emoji:'📖', title:'Phonics Sound Safari',
+    summary:'Hunt for objects that start with a target letter sound.',
+    steps:['Pick a letter sound (e.g., /m/).','Find classroom items that start with it.','Stretch the word: "mmm-map".'],
+    teaching:['Letter–sound correspondence','Beginning sound isolation']}),
+  item({id:'e_color', tier:'early', type:'activity', subject:'science', level:1, emoji:'🌈', title:'Color Mixing Magic',
+    summary:'Discover secondary colors by mixing primaries.',
+    materials:['Paint or colored water + droppers'],
+    steps:['Predict: red + yellow = ?','Mix and observe.','Record results with crayons.'],
+    teaching:['Make a prediction, then test it','Primary vs secondary colors']}),
+  item({id:'e_art', tier:'early', type:'activity', subject:'art', level:1, emoji:'🎨', title:'Creative Corner Drawing',
+    summary:'Open-ended drawing prompts for self-expression.',
+    materials:['Paper, crayons'],
+    steps:['Give a prompt ("Draw your happy place").','Students draw freely.','Share one thing about the picture.'],
+    teaching:['Self-expression','Speaking & listening when sharing']}),
+  item({id:'e_breath', tier:'early', type:'activity', subject:'sel', level:2, emoji:'🧘', title:'Calm-Down Corner Breathing',
+    summary:'Self-regulation with simple breathing techniques.',
+    steps:['Teach "smell the flower, blow the candle".','Try "star breathing" tracing fingers.','Name a calm-down strategy to use later.'],
+    teaching:['Self-regulation toolkit','Recognizing big feelings early']}),
+  item({id:'e_plant', tier:'early', type:'activity', subject:'science', level:2, emoji:'🌱', title:'Plant Growth Observation',
+    summary:'Plant a seed and track growth over days.',
+    time:'Ongoing', materials:['Cup, soil, bean seed'],
+    steps:['Plant seeds and place in light.','Draw what you see each day.','Discuss what plants need.'],
+    teaching:['Living things have needs','Recording observations over time']}),
+
+  item({id:'e_g_simon', tier:'early', type:'game', subject:'sel', level:1, emoji:'👂', title:'Simon Says: Feelings Edition',
+    summary:'Practice impulse control while showing emotions.', time:'10–15 min',
+    materials:['Open space'],
+    steps:['"Simon says show a happy face!"','Mix in commands without "Simon says".','If they move without "Simon says", they sit.'],
+    teaching:['Our bodies show emotions','Waiting and listening']}),
+  item({id:'e_g_freeze', tier:'early', type:'game', subject:'sel', level:1, emoji:'🎵', title:'Freeze Dance: Learning Edition',
+    summary:'Dance, then freeze and answer a quick question.', time:'10–15 min',
+    materials:['Music'],
+    steps:['Play music — everyone dances.','Stop music — everyone FREEZE!','Ask a quick review question before resuming.'],
+    teaching:['Following directions','Self-control']}),
+  item({id:'e_g_duck', tier:'early', type:'game', subject:'reading', level:1, emoji:'🦆', title:'Duck Duck Goose: Academic',
+    summary:'Tap heads naming letters/sounds instead of duck.', time:'10–15 min',
+    steps:['Sit in a circle.','Tapper names a letter sound each tap.','On the target, say "Goose!" and chase.'],
+    teaching:['Letter/sound review','Gross-motor energy break']}),
+  item({id:'e_g_redlight', tier:'early', type:'game', subject:'sel', level:1, emoji:'🚦', title:'Red Light, Green Light',
+    summary:'Move on green, stop on red — answer to move forward.', time:'10 min',
+    steps:['Students line up across the room.','Green = move; Red = freeze.','Add: answer a question correctly to advance.'],
+    teaching:['Impulse control','Quick recall']}),
+  item({id:'e_g_chairs', tier:'early', type:'game', subject:'reading', level:2, emoji:'🪑', title:'Musical Chairs: Learning',
+    summary:'When the music stops, read the word on your chair.', time:'15 min',
+    materials:['Chairs, music, word cards'],
+    steps:['Tape a sight word to each chair.','When music stops, sit and read your word.','Remove a chair each round.'],
+    teaching:['Sight-word fluency','Good sportsmanship']}),
+  item({id:'e_g_mirror', tier:'early', type:'game', subject:'sel', level:2, emoji:'🪞', title:'Mirror Me',
+    summary:'Copy the leader exactly, like a mirror.', time:'10 min',
+    steps:['Pair up; one leads slow movements.','Partner mirrors precisely.','Switch leaders.'],
+    teaching:['Focus & attention','Non-verbal connection']}),
+
+  item({id:'e_w_feelings', tier:'early', type:'worksheet', subject:'sel', level:1, emoji:'😊', title:'Feelings Detective Worksheet',
+    summary:'Match faces to feeling words and color them.',
+    instructions:'Draw a line from each face to its feeling word. Then color the face that matches how you feel today.',
+    prompts:['😊 happy','😢 sad','😠 angry','😲 surprised','😨 scared']}),
+  item({id:'e_w_shapes', tier:'early', type:'worksheet', subject:'math', level:1, emoji:'🔺', title:'Shapes Worksheet',
+    summary:'Trace, name, and find shapes.',
+    instructions:'Trace each shape, write its name, and circle 2 objects in the room with that shape.',
+    prompts:['Circle','Square','Triangle','Rectangle']}),
+  item({id:'e_w_sight', tier:'early', type:'worksheet', subject:'reading', level:1, emoji:'👁️', title:'Sight Words Practice',
+    summary:'Read, trace, and write high-frequency words.',
+    instructions:'Read each word, trace it, then write it on your own.',
+    prompts:['the','and','is','you','see','like','go']}),
+  item({id:'e_w_patterns', tier:'early', type:'worksheet', subject:'math', level:1, emoji:'🔁', title:'Patterns Worksheet',
+    summary:'Finish the AB and ABB patterns.',
+    instructions:'Look at each pattern and draw what comes next.',
+    prompts:['🔴🔵🔴🔵 ___','⭐🌙⭐🌙 ___','🔺🔺🟦🔺🔺 ___']}),
+  item({id:'e_w_rhyme', tier:'early', type:'worksheet', subject:'reading', level:1, emoji:'🎵', title:'Rhyming Worksheet',
+    summary:'Match words that rhyme.',
+    instructions:'Draw a line between the two words that rhyme.',
+    prompts:['cat — hat','dog — log','sun — fun','bee — tree']}),
+  item({id:'e_w_cutpaste', tier:'early', type:'worksheet', subject:'art', level:1, emoji:'✂️', title:'Cut & Paste Worksheet',
+    summary:'Cut pictures and sort them into groups.',
+    instructions:'Cut out the pictures at the bottom and paste them under the correct heading.',
+    prompts:['Things that are BIG','Things that are SMALL']}),
+  item({id:'e_w_maze', tier:'early', type:'worksheet', subject:'math', level:1, emoji:'🌀', title:'Maze Worksheet',
+    summary:'Trace the path from start to finish.',
+    instructions:'Use your pencil to trace a path from START to the FINISH without crossing the walls.'}),
+  item({id:'e_w_senses', tier:'early', type:'worksheet', subject:'science', level:2, emoji:'👃', title:'5 Senses Worksheet',
+    summary:'Match each sense to its body part.',
+    instructions:'Draw a line from each sense to the body part you use for it.',
+    prompts:['See — 👀 eyes','Hear — 👂 ears','Smell — 👃 nose','Taste — 👅 tongue','Touch — ✋ hands']}),
+
+  /* ===== GROWING (2–3) ===== */
+  item({id:'g_friendprob', tier:'growing', type:'activity', subject:'sel', level:1, emoji:'🤝', title:'Friendship Problem-Solving',
+    summary:'Work through real friendship conflicts with a steps chart.',
+    steps:['Present a conflict ("left out at recess").','Brainstorm 3 solutions.','Pick one and act it out.'],
+    teaching:['Perspective-taking','Generating multiple solutions']}),
+  item({id:'g_addsub', tier:'growing', type:'activity', subject:'math', level:1, emoji:'➕', title:'Addition & Subtraction Adventures',
+    summary:'Build fact fluency within 20 with stories and counters.',
+    materials:['Counters or number line'],
+    steps:['Tell a math story ("7 frogs, 3 hop away").','Model with counters.','Write the equation.'],
+    teaching:['Connect stories to equations','Strategies: count on, make ten']}),
+  item({id:'g_comprehend', tier:'growing', type:'activity', subject:'reading', level:1, emoji:'📖', title:'Reading Comprehension Quest',
+    summary:'Read a short passage and answer who/what/where/why.',
+    steps:['Read a short passage aloud.','Ask 4 W-questions.','Retell in order.'],
+    teaching:['Recall key details','Sequencing a retell']}),
+  item({id:'g_weather', tier:'growing', type:'activity', subject:'science', level:1, emoji:'⛅', title:'Weather & Seasons Science',
+    summary:'Track daily weather and connect to seasons.',
+    time:'Ongoing',
+    steps:['Observe today\'s weather.','Add it to a class chart.','Discuss which season it fits.'],
+    teaching:['Patterns over time','Data collection']}),
+  item({id:'g_helpers', tier:'growing', type:'activity', subject:'social', level:1, emoji:'👷', title:'Community Helpers',
+    summary:'Learn jobs that keep a community running.',
+    steps:['Brainstorm helpers (firefighter, nurse…).','Match tools to jobs.','Draw "a helper I am thankful for".'],
+    teaching:['Roles in a community','Gratitude']}),
+  item({id:'g_conflict', tier:'growing', type:'activity', subject:'sel', level:2, emoji:'🗣️', title:'Conflict Resolution Role-Play',
+    summary:'Practice "I feel… because…" statements.',
+    steps:['Teach the "I-message" frame.','Pairs act out a disagreement.','Resolve using I-messages.'],
+    teaching:['Assertive (not aggressive) communication','Listening to both sides']}),
+  item({id:'g_multiply', tier:'growing', type:'activity', subject:'math', level:2, emoji:'✖️', title:'Multiplication Intro',
+    summary:'Understand multiplication as equal groups & arrays.',
+    materials:['Counters, grid paper'],
+    steps:['Make equal groups ("3 groups of 4").','Build an array.','Write the multiplication sentence.'],
+    teaching:['Repeated addition → multiplication','Arrays show rows × columns']}),
+
+  item({id:'g_g_hotpotato', tier:'growing', type:'game', subject:'sel', level:1, emoji:'🥔', title:'Hot Potato: Question Circle',
+    summary:'Pass the potato; when music stops, answer a question.', time:'10–15 min',
+    materials:['Soft ball / "potato", music'],
+    steps:['Pass the potato while music plays.','Music stops — holder answers a question.','Mix review + "get to know you" questions.'],
+    teaching:['Quick recall','Building classroom community']}),
+  item({id:'g_g_story', tier:'growing', type:'game', subject:'reading', level:1, emoji:'📖', title:'Team Story Builders',
+    summary:'Each student adds one sentence to a class story.', time:'15–20 min',
+    steps:['Give a story starter.','Each student adds ONE sentence that connects.','Must include a feeling word; no "The End" until all add.'],
+    teaching:['Story structure: beginning/middle/end','"Yes, and…" — accepting others\' ideas']}),
+  item({id:'g_g_bingo', tier:'growing', type:'game', subject:'math', level:1, emoji:'🎱', title:'Learning Bingo',
+    summary:'Get 5 in a row reviewing words, numbers, or shapes.', time:'15 min',
+    materials:['Bingo cards (5×5), markers'],
+    steps:['Hand out cards.','Call a clue; students cover the answer.','First to 5-in-a-row calls "Bingo!"'],
+    teaching:['Flexible review (sight words, numbers, shapes)','Listening for clues']}),
+  item({id:'g_g_world', tier:'growing', type:'game', subject:'math', level:1, emoji:'🌎', title:'Around the World',
+    summary:'Answer math facts fastest to travel the room.', time:'10–15 min',
+    materials:['Fact cards'],
+    steps:['Two students face off on a fact.','Faster correct answer moves on.','Try to travel all the way around.'],
+    teaching:['Fact fluency','Good sportsmanship']}),
+  item({id:'g_g_sparkle', tier:'growing', type:'game', subject:'reading', level:1, emoji:'✨', title:'Sparkle (Spelling)',
+    summary:'Spell words one letter per student around the circle.', time:'10 min',
+    steps:['Say a word.','Each student says the next letter in turn.','After the last letter, next person says "Sparkle!" and the following student sits.'],
+    teaching:['Spelling patterns','Attention & sequencing']}),
+  item({id:'g_g_balltoss', tier:'growing', type:'game', subject:'sel', level:1, emoji:'⚽', title:'Ball Toss Q&A',
+    summary:'Catch the ball, answer, then toss to a friend.', time:'10 min',
+    materials:['Soft ball'],
+    steps:['Toss the ball to a student.','They answer a question, then toss onward.','Keep the ball moving.'],
+    teaching:['Engagement & focus','Including everyone']}),
+  item({id:'g_g_corners', tier:'growing', type:'game', subject:'reading', level:2, emoji:'🧭', title:'Four Corners',
+    summary:'Move to the corner that matches the correct answer.', time:'10–15 min',
+    steps:['Label corners A/B/C/D.','Read a question with 4 choices.','Students go to the corner they think is right.'],
+    teaching:['Movement + decision making','Whole-group assessment at a glance']}),
+  item({id:'g_g_phone', tier:'growing', type:'game', subject:'sel', level:2, emoji:'📞', title:'Telephone / Whisper Chain',
+    summary:'Pass a message and see how it changes.', time:'10 min',
+    steps:['Whisper a sentence to the first student.','Pass it around the circle.','Compare the last version to the first!'],
+    teaching:['Careful listening','Why clear communication matters']}),
+
+  item({id:'g_w_math', tier:'growing', type:'worksheet', subject:'math', level:1, emoji:'🔢', title:'Math Adventure Worksheet',
+    summary:'Addition and subtraction practice within 20.',
+    instructions:'Solve each problem. Show your work using a number line if you need to.',
+    prompts:['7 + 6 =','15 − 8 =','9 + 9 =','12 − 5 =','8 + 7 =','20 − 11 =']}),
+  item({id:'g_w_seq', tier:'growing', type:'worksheet', subject:'reading', level:1, emoji:'🔢', title:'Sequencing Worksheet',
+    summary:'Put story events in 1-2-3-4 order.',
+    instructions:'Number the events from first (1) to last (4).',
+    prompts:['___ The seed sprouts','___ We plant the seed','___ The flower blooms','___ We water it each day']}),
+  item({id:'g_w_sentence', tier:'growing', type:'worksheet', subject:'reading', level:1, emoji:'✍️', title:'Sentence Building Worksheet',
+    summary:'Build complete sentences from word banks.',
+    instructions:'Use the words to write a complete sentence with a capital letter and a period.',
+    prompts:['dog / the / runs','I / pizza / like','sky / blue / is / the']}),
+  item({id:'g_w_time', tier:'growing', type:'worksheet', subject:'math', level:1, emoji:'🕐', title:'Time Worksheet',
+    summary:'Tell time to the hour and half hour.',
+    instructions:'Write the time shown on each clock.',
+    prompts:['3:00','6:30','9:00','12:30']}),
+  item({id:'g_w_money', tier:'growing', type:'worksheet', subject:'math', level:1, emoji:'💰', title:'Money Worksheet',
+    summary:'Count coins to find the total.',
+    instructions:'Add up the coins and write the total amount.',
+    prompts:['1 quarter + 2 dimes =','3 nickels + 4 pennies =','2 quarters + 1 dime =']}),
+  item({id:'g_w_vocab', tier:'growing', type:'worksheet', subject:'reading', level:1, emoji:'📚', title:'Vocabulary Worksheet',
+    summary:'Match new words to their meanings.',
+    instructions:'Draw a line from each word to its meaning.',
+    prompts:['enormous — very big','tiny — very small','swift — very fast','gentle — soft and kind']}),
+  item({id:'g_w_punct', tier:'growing', type:'worksheet', subject:'reading', level:1, emoji:'❓', title:'Punctuation Worksheet',
+    summary:'Add the correct end mark to each sentence.',
+    instructions:'Add a period, question mark, or exclamation point.',
+    prompts:['What is your name','I love recess','Watch out','Do you like dogs']}),
+  item({id:'g_w_caps', tier:'growing', type:'worksheet', subject:'reading', level:1, emoji:'🔠', title:'Capitalization Worksheet',
+    summary:'Fix the capital letters in each sentence.',
+    instructions:'Rewrite each sentence with correct capital letters.',
+    prompts:['my friend sam lives in texas.','we go to school on monday.','i read a book about mars.']}),
+  item({id:'g_w_directions', tier:'growing', type:'worksheet', subject:'reading', level:1, emoji:'🧭', title:'Following Directions Worksheet',
+    summary:'Read carefully and follow each step.',
+    instructions:'Read ALL directions before you begin!',
+    prompts:['Draw a sun in the top corner','Write your name in the box','Color the star yellow','Circle the biggest shape']}),
+  item({id:'g_w_wordsearch', tier:'growing', type:'worksheet', subject:'reading', level:1, emoji:'🔍', title:'Word Search Worksheet',
+    summary:'Find the hidden vocabulary words.',
+    instructions:'Find and circle each word in the puzzle grid.',
+    prompts:['READ','MATH','SCIENCE','FRIEND','LEARN']}),
+
+  /* ===== ADVANCED (4–5) ===== */
+  item({id:'a_empathy', tier:'advanced', type:'activity', subject:'sel', level:1, emoji:'💞', title:'Empathy & Perspective-Taking',
+    summary:'Analyze a scenario from multiple viewpoints.',
+    steps:['Read a conflict scenario.','List how each person feels and why.','Propose a fair resolution.'],
+    teaching:['Multiple perspectives','Fairness & compromise']}),
+  item({id:'a_wordprob', tier:'advanced', type:'activity', subject:'math', level:1, emoji:'🧮', title:'Word Problems Workshop',
+    summary:'Solve multi-step word problems with a strategy chart.',
+    steps:['Read & underline the question.','Identify needed operations.','Solve and check reasonableness.'],
+    teaching:['Multi-step reasoning','Estimate to check']}),
+  item({id:'a_mainidea', tier:'advanced', type:'activity', subject:'reading', level:1, emoji:'💡', title:'Main Idea & Details',
+    summary:'Find the central idea and supporting details.',
+    steps:['Read a paragraph.','State the main idea in one sentence.','List 3 supporting details.'],
+    teaching:['Main idea vs detail','Summarizing']}),
+  item({id:'a_fact', tier:'advanced', type:'activity', subject:'reading', level:1, emoji:'⚖️', title:'Fact vs Opinion',
+    summary:'Sort statements into fact or opinion.',
+    steps:['Read statements aloud.','Decide: can it be proven? → fact.','Find signal words for opinions ("best", "should").'],
+    teaching:['Evaluating sources','Signal words']}),
+  item({id:'a_habitat', tier:'advanced', type:'activity', subject:'science', level:1, emoji:'🦓', title:'Animals & Habitats Research',
+    summary:'Research an animal and its habitat needs.',
+    steps:['Choose an animal.','Find food, shelter, and adaptations.','Share a "habitat fact card".'],
+    teaching:['Adaptations','Organizing research']}),
+  item({id:'a_maps', tier:'advanced', type:'activity', subject:'social', level:1, emoji:'🗺️', title:'Maps & Geography',
+    summary:'Use a map key, compass rose, and grid.',
+    materials:['A simple map'],
+    steps:['Find the map key & compass rose.','Give directions using N/S/E/W.','Locate places on a grid.'],
+    teaching:['Map skills','Spatial reasoning']}),
+  item({id:'a_mindset', tier:'advanced', type:'activity', subject:'sel', level:2, emoji:'🌟', title:'Growth Mindset & Goal Setting',
+    summary:'Set a SMART learning goal and plan steps.',
+    steps:['Discuss "yet" — not failing, learning.','Write one goal.','List 2 steps to reach it.'],
+    teaching:['Effort & persistence','Goal setting']}),
+  item({id:'a_measure', tier:'advanced', type:'activity', subject:'math', level:2, emoji:'📏', title:'Measurement & Data',
+    summary:'Measure objects and graph the results.',
+    materials:['Rulers, objects'],
+    steps:['Measure 5 objects in cm.','Record in a table.','Make a bar graph of the data.'],
+    teaching:['Accurate measurement','Representing data']}),
+  item({id:'a_fractions', tier:'advanced', type:'activity', subject:'math', level:3, emoji:'🍕', title:'Fractions Foundations',
+    summary:'Model fractions and find equivalents.',
+    materials:['Fraction strips or paper folding'],
+    steps:['Fold paper to show 1/2, 1/4, 1/8.','Compare sizes.','Find equivalent fractions.'],
+    teaching:['Part–whole relationships','Equivalence']}),
+
+  item({id:'a_g_jeopardy', tier:'advanced', type:'game', subject:'reading', level:1, emoji:'🏆', title:'Jeopardy-Style Review',
+    summary:'Teams earn points answering category questions.', time:'20 min',
+    materials:['Board with categories & point values'],
+    steps:['Make 4 categories with 5 questions each.','Teams pick a category & value.','Correct answers earn the points.'],
+    teaching:['Cross-subject review','Teamwork & strategy']}),
+  item({id:'a_g_2truths', tier:'advanced', type:'game', subject:'sel', level:1, emoji:'🕵️', title:'Two Truths and a Lie',
+    summary:'Figure out which statement is false.', time:'10–15 min',
+    steps:['Each student shares 3 statements about themselves.','Class guesses the lie.','Reveal the answer.'],
+    teaching:['Community building','Listening for detail']}),
+  item({id:'a_g_wyr', tier:'advanced', type:'game', subject:'sel', level:1, emoji:'🤔', title:'Would You Rather (Debate)',
+    summary:'Choose between two options and explain why.', time:'10–15 min',
+    steps:['Pose a "would you rather" question.','Students pick a side of the room.','A few explain their reasoning.'],
+    teaching:['Justifying with reasons','Respecting different views']}),
+  item({id:'a_g_pict', tier:'advanced', type:'game', subject:'reading', level:1, emoji:'🎨', title:'Pictionary (Academic)',
+    summary:'Draw a vocabulary word so your team can guess it.', time:'15 min',
+    materials:['Whiteboard, vocab cards'],
+    steps:['A student draws a vocab word (no letters!).','Their team guesses before time runs out.','Rotate the drawer.'],
+    teaching:['Vocabulary recall','Non-verbal communication']}),
+  item({id:'a_g_headband', tier:'advanced', type:'game', subject:'reading', level:1, emoji:'🎩', title:'Headbands / Hedbanz',
+    summary:'Ask yes/no questions to guess the word on your head.', time:'15 min',
+    materials:['Word cards & headbands'],
+    steps:['Place a word card on each student\'s forehead (they can\'t see it).','Ask yes/no questions to figure it out.','Guess your word!'],
+    teaching:['Questioning strategies','Categorizing']}),
+  item({id:'a_g_20q', tier:'advanced', type:'game', subject:'science', level:1, emoji:'❓', title:'20 Questions',
+    summary:'Guess the mystery item in 20 questions or fewer.', time:'10 min',
+    steps:['Think of an object/animal/place.','Class asks up to 20 yes/no questions.','Guess before running out!'],
+    teaching:['Deductive reasoning','Narrowing categories']}),
+  item({id:'a_g_knot', tier:'advanced', type:'game', subject:'sel', level:2, emoji:'🪢', title:'Human Knot',
+    summary:'Untangle the group without letting go of hands.', time:'10–15 min',
+    steps:['Stand in a circle, grab two different hands.','Work together to untangle into a circle.','No letting go!'],
+    teaching:['Cooperation & communication','Problem solving under pressure']}),
+  item({id:'a_g_captain', tier:'advanced', type:'game', subject:'sel', level:2, emoji:'⚓', title:"Captain's Coming",
+    summary:'Follow the captain\'s orders quickly to stay in.', time:'10 min',
+    steps:['Assign actions to commands ("Swab the deck!").','Call commands faster and faster.','Last students following correctly win.'],
+    teaching:['Listening & memory','Focus under speed']}),
+  item({id:'a_g_zip', tier:'advanced', type:'game', subject:'sel', level:3, emoji:'⚡', title:'Zip Zap Zop',
+    summary:'Pass energy around without breaking the pattern.', time:'10 min',
+    steps:['Stand in a circle.','Pass "Zip", then "Zap", then "Zop" with claps/points.','Keep the rhythm — stay sharp!'],
+    teaching:['Focus & presence','Group rhythm']}),
+
+  item({id:'a_w_wordprob', tier:'advanced', type:'worksheet', subject:'math', level:1, emoji:'🧮', title:'Word Problems Worksheet',
+    summary:'Multi-step problems with money and time.',
+    instructions:'Solve each problem. Show your work and label your answer.',
+    prompts:['A pencil costs 25¢. How much for 4 pencils?','A movie is 95 min. It starts at 3:00. When does it end?','Maya read 18 pages Monday and 24 Tuesday. How many total?']}),
+  item({id:'a_w_mainidea', tier:'advanced', type:'worksheet', subject:'reading', level:1, emoji:'💡', title:'Main Idea Worksheet',
+    summary:'Read a paragraph; write the main idea & details.',
+    instructions:'Read the paragraph (provided by your teacher). Write the main idea and 3 supporting details.',
+    prompts:['Main idea:','Detail 1:','Detail 2:','Detail 3:']}),
+  item({id:'a_w_fact', tier:'advanced', type:'worksheet', subject:'reading', level:1, emoji:'⚖️', title:'Fact vs Opinion Worksheet',
+    summary:'Label each statement F or O.',
+    instructions:'Write F for fact or O for opinion next to each statement.',
+    prompts:['The sun is a star.','Summer is the best season.','Water boils at 100°C.','Everyone should like pizza.']}),
+  item({id:'a_w_measure', tier:'advanced', type:'worksheet', subject:'math', level:1, emoji:'📏', title:'Measurement Worksheet',
+    summary:'Measure and convert units.',
+    instructions:'Measure each line, then convert as shown.',
+    prompts:['2 m = ___ cm','500 cm = ___ m','1 ft = ___ in','3 ft = ___ in']}),
+  item({id:'a_w_graph', tier:'advanced', type:'worksheet', subject:'math', level:1, emoji:'📊', title:'Graphing Worksheet',
+    summary:'Read a bar graph and answer questions.',
+    instructions:'Use the bar graph (provided) to answer each question.',
+    prompts:['Which had the most?','Which had the least?','How many more than ___?','What is the total?']}),
+  item({id:'a_w_opposites', tier:'advanced', type:'worksheet', subject:'reading', level:1, emoji:'↔️', title:'Synonyms & Antonyms Worksheet',
+    summary:'Write a synonym and an antonym for each word.',
+    instructions:'For each word, write one synonym (same) and one antonym (opposite).',
+    prompts:['happy','big','fast','cold']}),
+  item({id:'a_w_maps', tier:'advanced', type:'worksheet', subject:'social', level:1, emoji:'🗺️', title:'Maps Worksheet',
+    summary:'Use the compass rose and map key.',
+    instructions:'Use the map (provided) and compass rose to answer.',
+    prompts:['What is north of the school?','Give directions from the park to the library.','What does the 🌳 symbol mean?']}),
+  item({id:'a_w_animals', tier:'advanced', type:'worksheet', subject:'science', level:1, emoji:'🦓', title:'Animals & Habitats Worksheet',
+    summary:'Match animals to their habitats and needs.',
+    instructions:'Draw a line from each animal to its habitat, then list one adaptation.',
+    prompts:['Polar bear — Arctic','Camel — Desert','Frog — Pond','Monkey — Rainforest']}),
+  item({id:'a_w_healthy', tier:'advanced', type:'worksheet', subject:'science', level:1, emoji:'🍎', title:'Healthy Habits Worksheet',
+    summary:'Plan a balanced day of healthy choices.',
+    instructions:'List healthy choices for each part of your day.',
+    prompts:['A healthy breakfast:','A way to exercise:','How much sleep I need:','A way to manage stress:']}),
+  item({id:'a_w_seasons', tier:'advanced', type:'worksheet', subject:'science', level:1, emoji:'🍂', title:'Seasons Worksheet',
+    summary:'Describe changes across the four seasons.',
+    instructions:'For each season, write one weather change and one thing people do.',
+    prompts:['Spring','Summer','Fall','Winter']}),
+];
+
+/* ---------- Storage ---------- */
+function loadDB(){ try{ return JSON.parse(localStorage.getItem(STORE_KEY)) || {teachers:{}}; }catch(e){ return {teachers:{}}; } }
+function saveDB(db){ localStorage.setItem(STORE_KEY, JSON.stringify(db)); }
+function setSession(id){ localStorage.setItem(SESSION_KEY, id); }
+function getSession(){ return localStorage.getItem(SESSION_KEY); }
+function clearSession(){ localStorage.removeItem(SESSION_KEY); }
+
+async function hashPassword(pass, salt){
+  const data = new TextEncoder().encode(salt + '::' + pass);
+  const buf = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+function randSalt(){ return Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b=>b.toString(16).padStart(2,'0')).join(''); }
+function normEmail(e){ return (e||'').trim().toLowerCase(); }
+
+let current = null;      // current teacher object
+let activeTier = 'early';
+
+/* ---------- Auth UI ---------- */
+function showAuth(which){
+  document.getElementById('loginForm').style.display  = which==='login'  ? 'block':'none';
+  document.getElementById('signupForm').style.display = which==='signup' ? 'block':'none';
+}
+function setMsg(id, text, ok){ const el=document.getElementById(id); el.textContent=text; el.className='msg '+(ok?'ok':'err'); }
+
+async function doSignup(){
+  const name=document.getElementById('suName').value.trim();
+  const school=document.getElementById('suSchool').value.trim();
+  const grade=document.getElementById('suGrade').value;
+  const email=normEmail(document.getElementById('suEmail').value);
+  const pass=document.getElementById('suPass').value;
+  if(!name||!email||!pass){ return setMsg('signupMsg','Please fill in name, email, and password.'); }
+  if(pass.length<6){ return setMsg('signupMsg','Password must be at least 6 characters.'); }
+  const db=loadDB();
+  if(db.teachers[email]){ return setMsg('signupMsg','An account with that email already exists.'); }
+  const salt=randSalt();
+  const passwordHash=await hashPassword(pass, salt);
+  db.teachers[email]={
+    email, name, school, grade, salt, passwordHash,
+    schoolYear:1, startYear:new Date().getFullYear(),
+    completed:{}, archive:[]
+  };
+  saveDB(db);
+  setSession(email);
+  setMsg('signupMsg','Account created! Loading…', true);
+  current=db.teachers[email];
+  enterApp();
+}
+
+async function doLogin(){
+  const email=normEmail(document.getElementById('loginEmail').value);
+  const pass=document.getElementById('loginPass').value;
+  const db=loadDB();
+  const t=db.teachers[email];
+  if(!t){ return setMsg('loginMsg','No account found for that email.'); }
+  const hash=await hashPassword(pass, t.salt);
+  if(hash!==t.passwordHash){ return setMsg('loginMsg','Incorrect password.'); }
+  setSession(email);
+  current=t;
+  enterApp();
+}
+
+function doLogout(){ clearSession(); current=null; location.reload(); }
+
+/* ---------- App ---------- */
+function persist(){ const db=loadDB(); db.teachers[current.email]=current; saveDB(db); }
+
+function enterApp(){
+  document.getElementById('authView').style.display='none';
+  document.getElementById('appView').style.display='block';
+  buildSubjectFilter();
+  buildTierTabs();
+  document.getElementById('whoBox').innerHTML =
+    `<b>${escapeHtml(current.name)}</b><br>${escapeHtml(current.school||'')} · ${escapeHtml(current.grade||'')}` +
+    `<br>📅 School Year ${current.schoolYear}`;
+  render();
+}
+
+function buildSubjectFilter(){
+  const sel=document.getElementById('fSubject');
+  sel.innerHTML='<option value="all">All Subjects</option>' +
+    Object.entries(SUBJECTS).map(([k,v])=>`<option value="${k}">${v.emoji} ${v.name}</option>`).join('');
+}
+
+function buildTierTabs(){
+  const wrap=document.getElementById('tierTabs');
+  wrap.innerHTML=TIERS.map(t=>`
+    <div class="tier-tab ${t.id===activeTier?'active':''}" style="--accent:${t.accent}" onclick="selectTier('${t.id}')">
+      <span class="te">${t.emoji}</span>
+      <b>${t.name}</b>
+      <span>${t.grades} · ${t.ages}</span>
+    </div>`).join('');
+}
+function selectTier(id){ activeTier=id; buildTierTabs(); render(); }
+
+function isUnlocked(it){ return it.level <= current.schoolYear; }
+function isDone(it){ return !!(current.completed && current.completed[it.id]); }
+
+function visibleItems(){
+  const fType=document.getElementById('fType').value;
+  const fSubject=document.getElementById('fSubject').value;
+  const q=document.getElementById('fSearch').value.trim().toLowerCase();
+  const hideDone=document.getElementById('fHideDone').checked;
+  return CONTENT.filter(it=>
+    it.tier===activeTier &&
+    isUnlocked(it) &&
+    (fType==='all'||it.type===fType) &&
+    (fSubject==='all'||it.subject===fSubject) &&
+    (!hideDone || !isDone(it)) &&
+    (!q || (it.title+' '+it.summary).toLowerCase().includes(q))
+  );
+}
+
+function render(){
+  const tierItems = CONTENT.filter(it=>it.tier===activeTier && isUnlocked(it));
+  const doneCount = tierItems.filter(isDone).length;
+  const total = tierItems.length;
+  const pct = total ? Math.round(doneCount/total*100) : 0;
+
+  document.getElementById('progressRow').innerHTML = `
+    <div class="stat"><div class="v">${total}</div><div class="l">Available this tier</div></div>
+    <div class="stat"><div class="v">${doneCount}</div><div class="l">✅ Completed</div></div>
+    <div class="stat"><div class="v">${total-doneCount}</div><div class="l">Still to do</div></div>
+    <div class="stat" style="flex:2">
+      <div class="v">${pct}%</div><div class="l">Tier progress (School Year ${current.schoolYear})</div>
+      <div class="bar"><i style="width:${pct}%"></i></div>
+    </div>`;
+
+  const items = visibleItems();
+  document.getElementById('countChip').textContent = `${items.length} shown`;
+  const grid=document.getElementById('grid');
+  const empty=document.getElementById('emptyState');
+
+  if(items.length===0){
+    grid.innerHTML='';
+    empty.innerHTML='<div class="empty">🔍 Nothing matches these filters. Try clearing the search or showing completed items.</div>';
+    return;
+  }
+  empty.innerHTML='';
+  grid.innerHTML=items.map(cardHtml).join('');
+}
+
+function cardHtml(it){
+  const subj=SUBJECTS[it.subject];
+  const done=isDone(it);
+  const isNew = it.level===current.schoolYear && it.level>1; // unlocked this very year
+  const detailBlocks=[];
+  if(it.materials && it.materials.length) detailBlocks.push(`<h4>📋 Materials</h4><ul>${it.materials.map(m=>`<li>${escapeHtml(m)}</li>`).join('')}</ul>`);
+  if(it.steps && it.steps.length) detailBlocks.push(`<h4>🎮 How to do it</h4><ol>${it.steps.map(s=>`<li>${escapeHtml(s)}</li>`).join('')}</ol>`);
+  if(it.teaching && it.teaching.length) detailBlocks.push(`<h4>💡 Teaching moments</h4><ul>${it.teaching.map(s=>`<li>${escapeHtml(s)}</li>`).join('')}</ul>`);
+  if(it.instructions) detailBlocks.push(`<h4>📝 Instructions</h4><p>${escapeHtml(it.instructions)}</p>`);
+
+  const typeLabel={activity:'🧩 Activity',game:'🎮 Class Game',worksheet:'📝 Worksheet'}[it.type];
+  const printBtn = it.type==='worksheet'
+    ? `<button class="btn small purple" onclick="printWorksheet('${it.id}')">🖨️ Print</button>` : '';
+
+  return `
+  <div class="card ${done?'done':''}">
+    <div class="card-top">
+      <span class="ico">${it.emoji}</span>
+      <div style="flex:1">
+        <h3>${escapeHtml(it.title)}</h3>
+        <div class="tags">
+          <span class="tag type">${typeLabel}</span>
+          <span class="tag subj">${subj.emoji} ${escapeHtml(subj.name)}</span>
+          <span class="tag time">⏱️ ${escapeHtml(it.time)}</span>
+          ${isNew?'<span class="tag new">✨ New!</span>':''}
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <p class="sum">${escapeHtml(it.summary)}</p>
+      <button class="btn small gray" onclick="toggleDetails(this)">▼ Details</button>
+      <div class="details">${detailBlocks.join('')}</div>
+    </div>
+    <div class="card-actions">
+      <label class="check">
+        <input type="checkbox" ${done?'checked':''} onchange="toggleDone('${it.id}', this.checked)">
+        Mark done
+      </label>
+      ${printBtn}
+      ${done?`<span class="done-stamp">✅ Done ${escapeHtml(current.completed[it.id].date)}</span>`:''}
+    </div>
+  </div>`;
+}
+
+function toggleDetails(btn){
+  const d=btn.nextElementSibling;
+  d.classList.toggle('open');
+  btn.textContent = d.classList.contains('open') ? '▲ Hide' : '▼ Details';
+}
+
+function toggleDone(id, checked){
+  if(!current.completed) current.completed={};
+  if(checked){
+    current.completed[id]={ date:new Date().toLocaleDateString() };
+  } else {
+    delete current.completed[id];
+  }
+  persist();
+  render();
+}
+
+/* ---------- Printable worksheets ---------- */
+function printWorksheet(id){
+  const it=CONTENT.find(x=>x.id===id);
+  if(!it) return;
+  const tier=TIERS.find(t=>t.id===it.tier);
+  let body='';
+  if(it.prompts && it.prompts.length){
+    body = it.prompts.map(p=>`<div class="ws-prob">${escapeHtml(p)} <span class="ws-line" style="display:inline-block;width:40%;height:0"></span></div>`).join('');
+  }
+  // Add some blank practice lines for any worksheet
+  const lines = Array.from({length:6}).map(()=>'<div class="ws-line"></div>').join('');
+  const area=document.getElementById('printArea');
+  area.innerHTML=`
+    <div style="display:flex;justify-content:space-between;border-bottom:3px solid #000;padding-bottom:8px;margin-bottom:14px">
+      <div><div style="font-size:1.6rem">${it.emoji} ${escapeHtml(it.title)}</div>
+      <div style="font-size:.9rem">${tier.name} · ${tier.grades}</div></div>
+      <div style="text-align:right;font-size:.95rem">Name: ____________<br>Date: __________</div>
+    </div>
+    <p style="font-size:1.05rem;margin-bottom:14px"><b>Directions:</b> ${escapeHtml(it.instructions||'Complete the activity below.')}</p>
+    ${body}
+    <div style="margin-top:18px">${lines}</div>
+    <p style="margin-top:24px;text-align:center;color:#555">Kids Learning Adventure · Great job! ⭐</p>`;
+  window.print();
+}
+
+/* ---------- New school year ---------- */
+function openNewYear(){
+  const nextYear=current.schoolYear+1;
+  const unlocks=CONTENT.filter(it=>it.level===nextYear);
+  const doneCount=Object.keys(current.completed||{}).length;
+  document.getElementById('ymBody').textContent =
+    `This will archive your ${doneCount} completed item(s), reset all check-marks, and advance to School Year ${nextYear}.`;
+  const ul=document.getElementById('ymUnlocks');
+  if(unlocks.length){
+    ul.innerHTML='<div style="font-weight:bold;margin-bottom:4px">✨ New advanced activities unlocking:</div>' +
+      unlocks.map(u=>`<div class="unlock-item">${u.emoji} <b>${escapeHtml(u.title)}</b> — ${tierName(u.tier)}</div>`).join('');
+  } else {
+    ul.innerHTML='<div class="unlock-item">You\'ve unlocked all shipped content — check-marks will still reset for your new class. 🌟</div>';
+  }
+  openModal('yearModal');
+}
+
+function confirmNewYear(){
+  const prevYear=current.schoolYear;
+  // archive
+  current.archive=current.archive||[];
+  current.archive.push({
+    schoolYear:prevYear,
+    completedCount:Object.keys(current.completed||{}).length,
+    completed:current.completed||{},
+    closedOn:new Date().toLocaleDateString()
+  });
+  current.schoolYear=prevYear+1;
+  current.completed={};
+  persist();
+  closeModal('yearModal');
+
+  // What's new
+  const unlocks=CONTENT.filter(it=>it.level===current.schoolYear);
+  document.getElementById('nmYear').textContent=current.schoolYear;
+  document.getElementById('nmUnlocks').innerHTML = unlocks.length
+    ? unlocks.map(u=>`<div class="unlock-item">${u.emoji} <b>${escapeHtml(u.title)}</b> — ${tierName(u.tier)} · ${SUBJECTS[u.subject].name}</div>`).join('')
+    : '<div class="unlock-item">All check-marks are reset and ready for your new students! 🌟</div>';
+  document.getElementById('whoBox').innerHTML =
+    `<b>${escapeHtml(current.name)}</b><br>${escapeHtml(current.school||'')} · ${escapeHtml(current.grade||'')}<br>📅 School Year ${current.schoolYear}`;
+  openModal('newsModal');
+  render();
+}
+
+function tierName(id){ const t=TIERS.find(x=>x.id===id); return t?t.name:id; }
+function openModal(id){ document.getElementById(id).classList.add('show'); }
+function closeModal(id){ document.getElementById(id).classList.remove('show'); }
+
+/* ---------- utils ---------- */
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+/* ---------- boot ---------- */
+(function init(){
+  const sid=getSession();
+  if(sid){
+    const db=loadDB();
+    if(db.teachers[sid]){ current=db.teachers[sid]; enterApp(); return; }
+    clearSession();
+  }
+  showAuth('login');
+})();
+
+// Allow Enter to submit on auth fields
+['loginPass','loginEmail'].forEach(id=>document.getElementById(id).addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();}));
+['suPass'].forEach(id=>document.getElementById(id).addEventListener('keydown',e=>{if(e.key==='Enter')doSignup();}));
+</script>
+</body>
+</html>

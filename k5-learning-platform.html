@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Kids Learning Adventure — Teacher Platform</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <style>
   :root{
     --pink:#ff8fab; --blue:#5bc0eb; --purple:#9b5de5; --green:#43aa8b;
@@ -209,8 +210,23 @@
         <div class="field"><label>Email</label><input id="loginEmail" type="email" placeholder="you@school.edu" autocomplete="username"></div>
         <div class="field"><label>Password</label><input id="loginPass" type="password" placeholder="••••••••" autocomplete="current-password"></div>
         <button class="btn purple" style="width:100%" onclick="doLogin()">Sign In</button>
-        <div class="auth-toggle">New teacher? <a onclick="showAuth('signup')">Create an account</a></div>
+        <div class="auth-toggle">New teacher? <a onclick="showAuth('signup')">Create an account</a><br>
+          <a onclick="showAuth('reset')" style="font-size:.85rem">Forgot password?</a></div>
         <div id="loginMsg" class="msg"></div>
+      </div>
+
+      <div id="resetForm" style="display:none">
+        <div class="field"><label>Email</label><input id="resetEmail" type="email" placeholder="you@school.edu" autocomplete="username"></div>
+        <button class="btn purple" style="width:100%" onclick="doResetRequest()">Send Reset Link</button>
+        <div class="auth-toggle"><a onclick="showAuth('login')">Back to sign in</a></div>
+        <div id="resetMsg" class="msg"></div>
+      </div>
+
+      <div id="recoveryForm" style="display:none">
+        <p class="sub">Choose a new password</p>
+        <div class="field"><label>New Password (min 8 chars)</label><input id="recoveryPass" type="password" autocomplete="new-password"></div>
+        <button class="btn green" style="width:100%" onclick="doSetNewPassword()">Save New Password</button>
+        <div id="recoveryMsg" class="msg"></div>
       </div>
 
       <div id="signupForm" style="display:none">
@@ -222,7 +238,7 @@
             <option>Grade 3</option><option>Grade 4</option><option>Grade 5</option><option>Mixed / Multiple</option>
           </select></div>
         <div class="field"><label>Email</label><input id="suEmail" type="email" placeholder="you@school.edu" autocomplete="username"></div>
-        <div class="field"><label>Password (min 6 chars)</label><input id="suPass" type="password" placeholder="••••••••" autocomplete="new-password"></div>
+        <div class="field"><label>Password (min 8 chars)</label><input id="suPass" type="password" placeholder="••••••••" autocomplete="new-password"></div>
         <button class="btn green" style="width:100%" onclick="doSignup()">Create Account</button>
         <div class="auth-toggle">Already have an account? <a onclick="showAuth('login')">Sign in</a></div>
         <div id="signupMsg" class="msg"></div>
@@ -262,8 +278,8 @@
     <div id="emptyState"></div>
 
     <footer class="note">
-      Progress is saved on this device for each teacher. Use <b>New School Year</b> to reset
-      check-marks and unlock more advanced activities. 🌟
+      🔒 Your account and progress are stored securely in the cloud — sign in from any device.
+      Use <b>New School Year</b> to reset check-marks and unlock more advanced activities. 🌟
     </footer>
   </div>
 </div>
@@ -296,13 +312,19 @@
 <script>
 /* ============================================================
    Kids Learning Adventure — Teacher Platform
-   Self-contained, offline-friendly. Per-teacher progress in
-   localStorage. Age-group sections, check-marks, yearly reset,
-   and progressive "content updates" via unlock levels.
+   Secure cloud backend: Supabase Auth (server-side password
+   hashing, email confirmation, rate limiting) + Postgres with
+   Row Level Security so each teacher can only ever access
+   their own data. The publishable key below is safe to embed:
+   all authorization is enforced server-side by RLS policies.
    ============================================================ */
 
-const STORE_KEY = 'k5_platform_v1';
-const SESSION_KEY = 'k5_session_v1';
+const SUPABASE_URL = 'https://klkcvenqjbgquiosjiej.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_yf-MELF2AVX-mBdcDY8T2Q_zXXVSbQQ';
+const sb = window.supabase
+  ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY)
+  : null;
+
 const MAX_LEVEL = 3; // highest unlock level shipped
 
 const TIERS = [
@@ -660,28 +682,17 @@ const CONTENT = [
     prompts:['Spring','Summer','Fall','Winter']}),
 ];
 
-/* ---------- Storage ---------- */
-function loadDB(){ try{ return JSON.parse(localStorage.getItem(STORE_KEY)) || {teachers:{}}; }catch(e){ return {teachers:{}}; } }
-function saveDB(db){ localStorage.setItem(STORE_KEY, JSON.stringify(db)); }
-function setSession(id){ localStorage.setItem(SESSION_KEY, id); }
-function getSession(){ return localStorage.getItem(SESSION_KEY); }
-function clearSession(){ localStorage.removeItem(SESSION_KEY); }
-
-async function hashPassword(pass, salt){
-  const data = new TextEncoder().encode(salt + '::' + pass);
-  const buf = await crypto.subtle.digest('SHA-256', data);
-  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
-}
-function randSalt(){ return Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b=>b.toString(16).padStart(2,'0')).join(''); }
 function normEmail(e){ return (e||'').trim().toLowerCase(); }
 
-let current = null;      // current teacher object
+let current = null;      // {name, school, grade, schoolYear, completed:{id:{date}}}
+let userId = null;       // authenticated teacher's uuid
 let activeTier = 'early';
 
 /* ---------- Auth UI ---------- */
 function showAuth(which){
-  document.getElementById('loginForm').style.display  = which==='login'  ? 'block':'none';
-  document.getElementById('signupForm').style.display = which==='signup' ? 'block':'none';
+  for(const [form,key] of [['loginForm','login'],['signupForm','signup'],['resetForm','reset'],['recoveryForm','recovery']]){
+    document.getElementById(form).style.display = which===key ? 'block':'none';
+  }
 }
 function setMsg(id, text, ok){ const el=document.getElementById(id); el.textContent=text; el.className='msg '+(ok?'ok':'err'); }
 
@@ -692,40 +703,80 @@ async function doSignup(){
   const email=normEmail(document.getElementById('suEmail').value);
   const pass=document.getElementById('suPass').value;
   if(!name||!email||!pass){ return setMsg('signupMsg','Please fill in name, email, and password.'); }
-  if(pass.length<6){ return setMsg('signupMsg','Password must be at least 6 characters.'); }
-  const db=loadDB();
-  if(db.teachers[email]){ return setMsg('signupMsg','An account with that email already exists.'); }
-  const salt=randSalt();
-  const passwordHash=await hashPassword(pass, salt);
-  db.teachers[email]={
-    email, name, school, grade, salt, passwordHash,
-    schoolYear:1, startYear:new Date().getFullYear(),
-    completed:{}, archive:[]
-  };
-  saveDB(db);
-  setSession(email);
-  setMsg('signupMsg','Account created! Loading…', true);
-  current=db.teachers[email];
-  enterApp();
+  if(pass.length<8){ return setMsg('signupMsg','Password must be at least 8 characters.'); }
+  setMsg('signupMsg','Creating account…', true);
+  const { data, error } = await sb.auth.signUp({
+    email, password: pass,
+    options: {
+      data: { full_name: name, school, grade },
+      emailRedirectTo: location.origin + location.pathname
+    }
+  });
+  if(error){ return setMsg('signupMsg', error.message); }
+  if(!data.session){
+    return setMsg('signupMsg','✅ Account created! Check your email and click the confirmation link, then come back and sign in.', true);
+  }
+  await loadTeacher(data.session.user);
 }
 
 async function doLogin(){
   const email=normEmail(document.getElementById('loginEmail').value);
   const pass=document.getElementById('loginPass').value;
-  const db=loadDB();
-  const t=db.teachers[email];
-  if(!t){ return setMsg('loginMsg','No account found for that email.'); }
-  const hash=await hashPassword(pass, t.salt);
-  if(hash!==t.passwordHash){ return setMsg('loginMsg','Incorrect password.'); }
-  setSession(email);
-  current=t;
+  if(!email||!pass){ return setMsg('loginMsg','Please enter your email and password.'); }
+  setMsg('loginMsg','Signing in…', true);
+  const { data, error } = await sb.auth.signInWithPassword({ email, password: pass });
+  if(error){ return setMsg('loginMsg', error.message); }
+  await loadTeacher(data.user);
+}
+
+async function doResetRequest(){
+  const email=normEmail(document.getElementById('resetEmail').value);
+  if(!email){ return setMsg('resetMsg','Please enter your email.'); }
+  const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname });
+  if(error){ return setMsg('resetMsg', error.message); }
+  setMsg('resetMsg','✅ If that email has an account, a reset link is on its way.', true);
+}
+
+async function doSetNewPassword(){
+  const pass=document.getElementById('recoveryPass').value;
+  if(pass.length<8){ return setMsg('recoveryMsg','Password must be at least 8 characters.'); }
+  const { error } = await sb.auth.updateUser({ password: pass });
+  if(error){ return setMsg('recoveryMsg', error.message); }
+  setMsg('recoveryMsg','✅ Password updated! Loading…', true);
+  const { data } = await sb.auth.getUser();
+  if(data.user) await loadTeacher(data.user);
+}
+
+async function doLogout(){ await sb.auth.signOut(); current=null; userId=null; location.reload(); }
+
+/* ---------- Data loading (RLS guarantees we only see our own rows) ---------- */
+async function loadTeacher(user){
+  userId = user.id;
+  const [{ data: profile, error: pErr }, { data: comps, error: cErr }] = await Promise.all([
+    sb.from('teacher_profiles').select('*').eq('id', userId).maybeSingle(),
+    sb.from('completions').select('item_id, completed_on').eq('teacher_id', userId)
+  ]);
+  if(pErr || cErr){ return setMsg('loginMsg', (pErr||cErr).message); }
+  let p = profile;
+  if(!p){
+    // Profile trigger should have created this; recover defensively.
+    const meta = user.user_metadata || {};
+    const ins = await sb.from('teacher_profiles')
+      .insert({ id:userId, full_name:meta.full_name||'', school:meta.school||'', grade:meta.grade||'' })
+      .select().single();
+    if(ins.error){ return setMsg('loginMsg', ins.error.message); }
+    p = ins.data;
+  }
+  const completed = {};
+  (comps||[]).forEach(r=>{ completed[r.item_id]={ date:new Date(r.completed_on+'T00:00:00').toLocaleDateString() }; });
+  current = { name:p.full_name, school:p.school, grade:p.grade, schoolYear:p.school_year, completed };
   enterApp();
 }
 
-function doLogout(){ clearSession(); current=null; location.reload(); }
-
 /* ---------- App ---------- */
-function persist(){ const db=loadDB(); db.teachers[current.email]=current; saveDB(db); }
+function syncError(message){
+  alert('⚠️ Could not save to the cloud: ' + message + '\nPlease check your connection and try again.');
+}
 
 function enterApp(){
   document.getElementById('authView').style.display='none';
@@ -852,15 +903,24 @@ function toggleDetails(btn){
   btn.textContent = d.classList.contains('open') ? '▲ Hide' : '▼ Details';
 }
 
-function toggleDone(id, checked){
+async function toggleDone(id, checked){
   if(!current.completed) current.completed={};
+  const prev = current.completed[id];
   if(checked){
     current.completed[id]={ date:new Date().toLocaleDateString() };
   } else {
     delete current.completed[id];
   }
-  persist();
-  render();
+  render(); // optimistic
+  const res = checked
+    ? await sb.from('completions').upsert({ teacher_id:userId, item_id:id })
+    : await sb.from('completions').delete().match({ teacher_id:userId, item_id:id });
+  if(res.error){
+    // roll back on failure
+    if(prev) current.completed[id]=prev; else delete current.completed[id];
+    render();
+    syncError(res.error.message);
+  }
 }
 
 /* ---------- Printable worksheets ---------- */
@@ -905,19 +965,22 @@ function openNewYear(){
   openModal('yearModal');
 }
 
-function confirmNewYear(){
+async function confirmNewYear(){
   const prevYear=current.schoolYear;
-  // archive
-  current.archive=current.archive||[];
-  current.archive.push({
-    schoolYear:prevYear,
-    completedCount:Object.keys(current.completed||{}).length,
-    completed:current.completed||{},
-    closedOn:new Date().toLocaleDateString()
+  const btn=document.getElementById('ymConfirm');
+  btn.disabled=true;
+  // 1) archive this year, 2) clear completions, 3) advance the year — all server-side
+  const arch = await sb.from('year_archives').insert({
+    teacher_id:userId, school_year:prevYear, completed:current.completed||{}
   });
+  if(arch.error){ btn.disabled=false; return syncError(arch.error.message); }
+  const del = await sb.from('completions').delete().eq('teacher_id', userId);
+  if(del.error){ btn.disabled=false; return syncError(del.error.message); }
+  const upd = await sb.from('teacher_profiles').update({ school_year:prevYear+1 }).eq('id', userId);
+  if(upd.error){ btn.disabled=false; return syncError(upd.error.message); }
+  btn.disabled=false;
   current.schoolYear=prevYear+1;
   current.completed={};
-  persist();
   closeModal('yearModal');
 
   // What's new
@@ -940,14 +1003,20 @@ function closeModal(id){ document.getElementById(id).classList.remove('show'); }
 function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 /* ---------- boot ---------- */
-(function init(){
-  const sid=getSession();
-  if(sid){
-    const db=loadDB();
-    if(db.teachers[sid]){ current=db.teachers[sid]; enterApp(); return; }
-    clearSession();
-  }
+(async function init(){
   showAuth('login');
+  if(!sb){
+    setMsg('loginMsg','⚠️ Could not reach the sign-in service. Please check your internet connection (or ask IT to allow cdn.jsdelivr.net) and reload.');
+    return;
+  }
+  // Password-recovery links land here with a recovery event
+  sb.auth.onAuthStateChange((event)=>{
+    if(event==='PASSWORD_RECOVERY'){ showAuth('recovery'); }
+  });
+  const { data } = await sb.auth.getSession();
+  if(data.session && !location.hash.includes('type=recovery')){
+    await loadTeacher(data.session.user);
+  }
 })();
 
 // Allow Enter to submit on auth fields

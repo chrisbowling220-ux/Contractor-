@@ -705,16 +705,16 @@ async function doSignup(){
   if(!name||!email||!pass){ return setMsg('signupMsg','Please fill in name, email, and password.'); }
   if(pass.length<8){ return setMsg('signupMsg','Password must be at least 8 characters.'); }
   setMsg('signupMsg','Creating account…', true);
-  const { data, error } = await sb.auth.signUp({
-    email, password: pass,
-    options: {
-      data: { full_name: name, school, grade },
-      emailRedirectTo: location.origin + location.pathname
-    }
-  });
+  // Only send an email-confirmation redirect when running on a real web
+  // address. Opened straight from disk (file://) there is no valid origin,
+  // so we omit it and let the backend use its configured Site URL.
+  const onWeb = location.protocol === 'http:' || location.protocol === 'https:';
+  const options = { data: { full_name: name, school, grade } };
+  if(onWeb) options.emailRedirectTo = location.origin + location.pathname;
+  const { data, error } = await sb.auth.signUp({ email, password: pass, options });
   if(error){ return setMsg('signupMsg', error.message); }
   if(!data.session){
-    return setMsg('signupMsg','✅ Account created! Check your email and click the confirmation link, then come back and sign in.', true);
+    return setMsg('signupMsg','✅ Account created! Check your email for a confirmation link, then sign in.', true);
   }
   await loadTeacher(data.session.user);
 }

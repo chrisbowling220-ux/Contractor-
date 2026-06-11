@@ -1,4 +1,8 @@
 {
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
   "functions": [
     {
       "source": "functions",
@@ -35,6 +39,7 @@
   "emulators": {
     "functions": { "port": 5001 },
     "hosting": { "port": 5000 },
+    "firestore": { "port": 8080 },
     "ui": { "enabled": true },
     "singleProjectMode": true
   }

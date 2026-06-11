@@ -1,0 +1,67 @@
+rules_version = '2';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Security model
+//
+// The app signs users in with Clerk. A small bridge (src/lib/useFirebaseAuth.ts)
+// exchanges the Clerk session for a Firebase custom token via Clerk's Firebase
+// integration. That token's uid is set to the Clerk user id — the exact value
+// we store in every document's `createdBy` field.
+//
+// So `request.auth.uid` here === the document's `createdBy`. Every record is
+// readable/writable ONLY by the user who created it. No user can see or touch
+// anyone else's customers, estimates, projects, change orders, or portfolio.
+// ─────────────────────────────────────────────────────────────────────────────
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // The existing document belongs to the caller.
+    function ownsExisting() {
+      return signedIn() && resource.data.createdBy == request.auth.uid;
+    }
+
+    // The incoming document is stamped with the caller's id (and can't be
+    // re-assigned to someone else on update).
+    function stampsSelf() {
+      return signedIn() && request.resource.data.createdBy == request.auth.uid;
+    }
+
+    // All app collections share the same owner-scoped policy.
+    match /customers/{id} {
+      allow read, delete: if ownsExisting();
+      allow create: if stampsSelf();
+      allow update: if ownsExisting() && stampsSelf();
+    }
+
+    match /estimates/{id} {
+      allow read, delete: if ownsExisting();
+      allow create: if stampsSelf();
+      allow update: if ownsExisting() && stampsSelf();
+    }
+
+    match /projects/{id} {
+      allow read, delete: if ownsExisting();
+      allow create: if stampsSelf();
+      allow update: if ownsExisting() && stampsSelf();
+    }
+
+    match /changeOrders/{id} {
+      allow read, delete: if ownsExisting();
+      allow create: if stampsSelf();
+      allow update: if ownsExisting() && stampsSelf();
+    }
+
+    match /portfolio/{id} {
+      allow read, delete: if ownsExisting();
+      allow create: if stampsSelf();
+      allow update: if ownsExisting() && stampsSelf();
+    }
+
+    // Anything not explicitly matched above is denied by default.
+  }
+}

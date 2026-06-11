@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
-import { db } from './firebase'
+import { db, functions } from './firebase'
 import { collection, addDoc, getDocs, query, orderBy, doc, updateDoc, where } from 'firebase/firestore'
+import { httpsCallable } from 'firebase/functions'
 import { useAuth, useUser } from '@clerk/clerk-react'
 import { JOB_CATALOG, JOB_CATEGORIES } from './data/jobCatalog'
 import { estimateMaterials, regionFromZip, ROOM_TYPES, DEFAULT_ZIP } from './data/materials'
@@ -9,6 +10,33 @@ import type { AIQuote, Estimate, MaterialLine, RentalLine } from './data/types'
 import { aiQuoteToScopeOfWork, generateAIQuote } from './lib/aiQuote'
 import { buildFallbackQuote } from './lib/fallbackQuote'
 import { toCustomerView } from './lib/customerView'
+
+// Emails a finished estimate to the customer. The backend (functions/src/index.ts
+// → sendEstimateEmail) verifies the Clerk token, renders the HTML email, and
+// sends it through Resend. The Anthropic/Resend keys never touch the browser.
+const sendEstimateEmailCallable = httpsCallable<
+  {
+    clerkToken: string
+    input: {
+      to: string
+      fromName?: string
+      replyTo?: string
+      estimate: {
+        customerName: string
+        jobTypeName: string
+        jobLocationZip?: string
+        total: number
+        rateType?: 'flat' | 'hourly'
+        hourlyRate?: number
+        estimatedHours?: number
+        flatAmount?: number
+        scopeOfWork?: string
+        aiQuote?: AIQuote
+      }
+    }
+  },
+  { ok: boolean; emailId?: string }
+>(functions, 'sendEstimateEmail')
 
 export default function Estimates() {
   const { user } = useUser()
@@ -20,7 +48,13 @@ export default function Estimates() {
 
   const [customerName, setCustomerName] = useState('')
   const [customerId, setCustomerId] = useState('')
-  const [customers, setCustomers] = useState<{ id: string; name: string }[]>([])
+  const [customers, setCustomers] = useState<{ id: string; name: string; email: string }[]>([])
+
+  // Email-to-customer state (for the detail view).
+  const [emailOpen, setEmailOpen] = useState(false)
+  const [emailTo, setEmailTo] = useState('')
+  const [emailSending, setEmailSending] = useState(false)
+  const [emailResult, setEmailResult] = useState<{ ok: boolean; msg: string } | null>(null)
   const [jobTypeId, setJobTypeId] = useState(JOB_CATALOG[0].id)
   const [description, setDescription] = useState('')
   const [jobLocationZip, setJobLocationZip] = useState(DEFAULT_ZIP)
@@ -76,10 +110,13 @@ export default function Estimates() {
           where('createdBy', '==', user.id),
           orderBy('createdAt', 'desc'),
         ))
-        setCustomers(snap.docs.map(d => ({ id: d.id, name: (d.data().name as string) || '' })))
+        setCustomers(snap.docs.map(d => ({ id: d.id, name: (d.data().name as string) || '', email: (d.data().email as string) || '' })))
       } catch {}
     })()
   }, [user?.id])
+
+  // Close the email form when a different estimate is opened/closed.
+  useEffect(() => { setEmailOpen(false); setEmailResult(null) }, [selectedId])
 
   const selectedJob = useMemo(() => JOB_CATALOG.find(j => j.id === jobTypeId) ?? JOB_CATALOG[0], [jobTypeId])
   const { multiplier, region } = useMemo(() => regionFromZip(jobLocationZip), [jobLocationZip])
@@ -275,6 +312,51 @@ export default function Estimates() {
       <div class="total">Total: $${(e.total || 0).toFixed(2)}</div>
       <script>window.print()</script></body></html>`)
     w.document.close()
+  }
+
+  const openEmail = (e: Estimate) => {
+    const match = customers.find(c => (e.customerId && c.id === e.customerId) || c.name.toLowerCase() === e.customerName.toLowerCase())
+    setEmailTo(match?.email || '')
+    setEmailResult(null)
+    setEmailOpen(true)
+  }
+
+  const sendEmail = async (e: Estimate) => {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailTo)) {
+      setEmailResult({ ok: false, msg: 'Enter a valid email address.' })
+      return
+    }
+    setEmailSending(true)
+    setEmailResult(null)
+    try {
+      const clerkToken = await getToken()
+      if (!clerkToken) throw new Error('Not signed in')
+      await sendEstimateEmailCallable({
+        clerkToken,
+        input: {
+          to: emailTo.trim(),
+          fromName: user?.fullName || undefined,
+          replyTo: user?.primaryEmailAddress?.emailAddress || undefined,
+          estimate: {
+            customerName: e.customerName,
+            jobTypeName: e.jobTypeName,
+            jobLocationZip: e.jobLocationZip,
+            total: e.total,
+            rateType: e.rateType,
+            hourlyRate: e.hourlyRate,
+            estimatedHours: e.estimatedHours,
+            flatAmount: e.flatAmount,
+            scopeOfWork: e.scopeOfWork,
+            aiQuote: e.aiQuote,
+          },
+        },
+      })
+      setEmailResult({ ok: true, msg: `Sent to ${emailTo.trim()}.` })
+    } catch (err) {
+      setEmailResult({ ok: false, msg: err instanceof Error ? err.message : 'Email failed to send.' })
+    } finally {
+      setEmailSending(false)
+    }
   }
 
   const selectedEstimate = estimates.find(e => e.id === selectedId)
@@ -631,10 +713,39 @@ export default function Estimates() {
               style={{ background: selectedEstimate.status === 'pending' ? '#ea580c' : '#fff7ed', color: selectedEstimate.status === 'pending' ? 'white' : '#ea580c', border: '1px solid #ea580c', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
               ↻ Reset to Pending
             </button>
-            <button onClick={() => printEstimate(selectedEstimate)} style={{ background: '#1a1f2e', color: 'white', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, marginLeft: 'auto' }}>
+            <button onClick={() => emailOpen ? setEmailOpen(false) : openEmail(selectedEstimate)} style={{ background: '#7c3aed', color: 'white', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, marginLeft: 'auto' }}>
+              ✉️ Email to Customer
+            </button>
+            <button onClick={() => printEstimate(selectedEstimate)} style={{ background: '#1a1f2e', color: 'white', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
               🖨️ Print / PDF
             </button>
           </div>
+
+          {emailOpen && (
+            <div style={{ background: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: '8px', padding: '16px', marginBottom: '16px' }}>
+              <label style={label}>Send this estimate to</label>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                <input
+                  type="email"
+                  value={emailTo}
+                  onChange={e => setEmailTo(e.target.value)}
+                  placeholder="customer@email.com"
+                  style={{ ...input, flex: '1 1 220px' }}
+                />
+                <button onClick={() => sendEmail(selectedEstimate)} disabled={emailSending} style={{ background: '#7c3aed', color: 'white', border: 'none', padding: '10px 20px', borderRadius: '6px', cursor: emailSending ? 'not-allowed' : 'pointer', fontWeight: 700 }}>
+                  {emailSending ? 'Sending…' : 'Send'}
+                </button>
+              </div>
+              <p style={{ fontSize: '12px', color: '#7c3aed', marginTop: '8px' }}>
+                The customer sees a clean, branded estimate — internal contractor notes are never included. Replies go to {user?.primaryEmailAddress?.emailAddress || 'your account email'}.
+              </p>
+              {emailResult && (
+                <p style={{ fontSize: '13px', fontWeight: 600, marginTop: '8px', color: emailResult.ok ? '#16a34a' : '#dc2626' }}>
+                  {emailResult.ok ? '✓ ' : '⚠ '}{emailResult.msg}
+                </p>
+              )}
+            </div>
+          )}
 
           {selectedEstimate.aiQuote ? (
             <div style={{ display: 'grid', gap: '16px' }}>

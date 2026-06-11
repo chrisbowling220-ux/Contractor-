@@ -8,6 +8,7 @@ import ScanRoom from './ScanRoom'
 import MaterialsPricing from './MaterialsPricing'
 import Rentals from './Rentals'
 import Projects from './Projects'
+import { useFirebaseAuth } from './lib/useFirebaseAuth'
 
 const ORANGE = '#f97316'
 const NAVY = '#1a1f2e'
@@ -228,6 +229,47 @@ function Dashboard() {
   )
 }
 
+function FullScreen({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', background: NAVY, padding: '20px' }}>
+      <div style={{ textAlign: 'center', color: 'white', maxWidth: '460px' }}>{children}</div>
+    </div>
+  )
+}
+
+// Holds the app until the Clerk→Firebase bridge has established a Firebase
+// identity. Every page reads Firestore on mount, and the security rules require
+// that identity, so we must not render the dashboard until it's ready.
+function AuthGate() {
+  const { status, error } = useFirebaseAuth()
+
+  if (status === 'loading') {
+    return (
+      <FullScreen>
+        <div style={{ width: '32px', height: '32px', margin: '0 auto 16px', border: '3px solid rgba(255,255,255,0.2)', borderTopColor: ORANGE, borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+        <p style={{ color: '#94a3b8' }}>Connecting to your workspace…</p>
+      </FullScreen>
+    )
+  }
+
+  if (status === 'error') {
+    return (
+      <FullScreen>
+        <h1 style={{ fontSize: '24px', color: ORANGE, marginBottom: '12px' }}>One setup step left</h1>
+        <p style={{ color: '#cbd5e1', fontSize: '15px', lineHeight: 1.5, marginBottom: '16px' }}>
+          Couldn't connect to the database. This usually means the <strong>Firebase integration</strong> isn't
+          enabled yet in your Clerk dashboard (Integrations → Firebase). Once it's on, refresh this page.
+        </p>
+        <p style={{ color: '#64748b', fontSize: '13px', background: 'rgba(0,0,0,0.25)', padding: '12px', borderRadius: '8px', wordBreak: 'break-word' }}>
+          {error}
+        </p>
+      </FullScreen>
+    )
+  }
+
+  return <Dashboard />
+}
+
 function App() {
   return (
     <div>
@@ -245,7 +287,7 @@ function App() {
         </div>
       </SignedOut>
       <SignedIn>
-        <Dashboard />
+        <AuthGate />
       </SignedIn>
     </div>
   )

@@ -233,7 +233,13 @@ export default function Estimates() {
     }
     try {
       await addDoc(collection(db, 'estimates'), payload)
-    } catch {}
+    } catch (err) {
+      // Don't lose the user's work silently — surface the failure and keep the
+      // form open so they can retry.
+      setLoading(false)
+      window.alert(`Could not save estimate: ${err instanceof Error ? err.message : String(err)}`)
+      return
+    }
     resetForm()
     setShowForm(false)
     setLoading(false)

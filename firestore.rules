@@ -25,11 +25,51 @@ service cloud.firestore {
       return request.resource.data.diff(resource.data).affectedKeys().hasOnly(allowed);
     }
 
+    // ── 2-YEAR LEGAL RETENTION LOCK ──
+    // E-signed documents (and paid invoices) are the contractor's proof in a
+    // dispute, so they CANNOT be deleted until 2 years after the signing/payment.
+    // `anchorMs` is the epoch-ms the clock starts from (signedAtMs / paidAtMs).
+    // 2 years = 730 days = 63,072,000,000 ms.
+    function withinRetention(anchorMs) {
+      return anchorMs is int && request.time.toMillis() < (anchorMs + 63072000000);
+    }
+    // A signed estimate/change order is locked while within retention.
+    function signedDocLocked(d) {
+      return ('signedAtMs' in d) && withinRetention(d.signedAtMs);
+    }
+    // A paid invoice is locked while within retention.
+    function paidInvoiceLocked(d) {
+      return ('paidAtMs' in d) && withinRetention(d.paidAtMs);
+    }
+
     // ── users/{userId}: the owner's profile/tier. Public read so share pages
     //    can show business branding (name, logo, license). No public write. ──
+    //
+    // The client may ONLY write its own profile fields. Billing/entitlement
+    // fields (tier, stripe*, subscriptionStatus, cancelAtPeriodEnd, aiQuotesUsed,
+    // lastAiAt) are SERVER-ONLY — written exclusively by the Stripe webhook and
+    // the AI-quota functions via the Admin SDK (which bypasses these rules).
+    // This is an ALLOW-LIST: any field not listed here is rejected, so a client
+    // can never grant itself Pro or reset its free-quote counter from the browser.
+    // Allowed client-writable profile fields. Anything else (tier, stripe*,
+    // subscriptionStatus, cancelAtPeriodEnd, aiQuotesUsed, lastAiAt, and the
+    // Connect fields stripeConnectId / connectPayoutsEnabled / connectDetailsSubmitted)
+    // is rejected — those are server-only, written via the Admin SDK / webhook.
+    function isUserProfileKeys(keys) {
+      return keys.hasOnly([
+        'businessName', 'businessPhone', 'businessEmail', 'licenseNumber',
+        'logoUrl', 'logoStoragePath', 'onboardedAt', 'updatedAt'
+      ]);
+    }
     match /users/{userId} {
       allow read: if true;
-      allow write: if isSignedIn() && request.auth.uid == userId;
+      // Create: the whole new doc may contain only profile fields.
+      allow create: if isSignedIn() && request.auth.uid == userId
+        && isUserProfileKeys(request.resource.data.keys());
+      // Update: only profile fields may CHANGE; billing fields stay untouchable
+      // (a merge write that doesn't alter them won't list them in affectedKeys).
+      allow update: if isSignedIn() && request.auth.uid == userId
+        && isUserProfileKeys(request.resource.data.diff(resource.data).affectedKeys());
     }
 
     // ── estimates: owner full access. Public read (view shared estimate).
@@ -37,23 +77,30 @@ service cloud.firestore {
     match /estimates/{id} {
       allow read: if true;
       allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
-      // Owner: full update. Anonymous customer: ONLY the two response fields,
-      // and ONLY for setting status to a final 'approved' or 'declined' value.
-      // Cannot reset an approved estimate, cannot forge an arbitrary status.
+      // Owner: full update. Anonymous customer may ONLY:
+      //  - approve/decline (customerResponse + status + signedAtMs on approval), or
+      //  - respond to the proposed start date (startDateResponse only).
+      // Cannot touch amounts, totals, deposit, or forge other status values.
       allow update: if isOwner(resource.data)
-        || (onlyChanges(['customerResponse', 'status'])
-            && request.resource.data.status in ['approved', 'declined']);
-      allow delete: if isOwner(resource.data);
+        || (onlyChanges(['customerResponse', 'status', 'signedAtMs'])
+            && request.resource.data.status in ['approved', 'declined'])
+        // Customer may respond to the proposed start date ONCE — only if no
+        // response exists yet. Prevents an anonymous actor overwriting a prior
+        // confirmation. (Owner can always overwrite via the isOwner branch.)
+        || (onlyChanges(['startDateResponse']) && !('startDateResponse' in resource.data));
+      // Owner may delete UNLESS the document is e-signed and still within the
+      // 2-year legal-retention window.
+      allow delete: if isOwner(resource.data) && !signedDocLocked(resource.data);
     }
 
-    // ── changeOrders: same pattern as estimates. ──
+    // ── changeOrders: same pattern as estimates (incl. 2-year retention lock). ──
     match /changeOrders/{id} {
       allow read: if true;
       allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
       allow update: if isOwner(resource.data)
-        || (onlyChanges(['customerResponse', 'status'])
+        || (onlyChanges(['customerResponse', 'status', 'signedAtMs'])
             && request.resource.data.status in ['approved', 'declined']);
-      allow delete: if isOwner(resource.data);
+      allow delete: if isOwner(resource.data) && !signedDocLocked(resource.data);
     }
 
     // ── invoices & thankYouPackages: public read (customer views/pays),
@@ -67,7 +114,9 @@ service cloud.firestore {
       // their intent). They cannot change amounts, line items, or status.
       allow update: if isOwner(resource.data)
         || onlyChanges(['customerCashChoice', 'customerCashAt']);
-      allow delete: if isOwner(resource.data);
+      // Owner may delete UNLESS this is a PAID invoice still within the 2-year
+      // legal-retention window (proof of what was owed and that it was paid).
+      allow delete: if isOwner(resource.data) && !paidInvoiceLocked(resource.data);
     }
     match /thankYouPackages/{id} {
       allow read: if true;
@@ -110,6 +159,13 @@ service cloud.firestore {
     // function reads it via the Admin SDK, which bypasses these rules.)
     match /userMaterialPrices/{userId} {
       allow read, write: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    // calendarEvents: the contractor's own calendar entries. Owner-only.
+    match /calendarEvents/{id} {
+      allow read: if isOwner(resource.data);
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
+      allow update, delete: if isOwner(resource.data);
     }
 
     // Everything else: denied.

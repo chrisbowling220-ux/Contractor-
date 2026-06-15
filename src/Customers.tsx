@@ -89,7 +89,7 @@ export default function Customers() {
       </div>
 
       {showForm && (
-        <div style={{ background: 'white', padding: '24px', borderRadius: '12px', marginBottom: '24px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
+        <div style={{ background: 'white', padding: '24px', borderRadius: '12px', marginBottom: '24px', boxShadow: '0 1px 2px rgba(15,23,42,0.04), 0 8px 24px rgba(15,23,42,0.06)' }}>
           <h3 style={{ marginBottom: '16px' }}>New Customer</h3>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '16px' }}>
             <input placeholder="Full Name *" value={form.name} onChange={e => setForm({...form, name: e.target.value})} style={{ padding: '10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '14px' }} />
@@ -111,7 +111,7 @@ export default function Customers() {
       <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
         {customers.length === 0 && <p style={{ color: '#94a3b8', textAlign: 'center', marginTop: '48px' }}>No customers yet. Add your first one!</p>}
         {customers.map(c => (
-          <div key={c.id} onClick={() => setActiveId(c.id)} style={{ background: 'white', padding: '20px', borderRadius: '12px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', cursor: 'pointer', border: '2px solid transparent', transition: 'border-color 0.1s' }}
+          <div key={c.id} onClick={() => setActiveId(c.id)} style={{ background: 'white', padding: '20px', borderRadius: '12px', boxShadow: '0 1px 2px rgba(15,23,42,0.04), 0 8px 24px rgba(15,23,42,0.06)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', cursor: 'pointer', border: '2px solid transparent', transition: 'border-color 0.1s' }}
             onMouseOver={e => (e.currentTarget.style.borderColor = '#f97316')}
             onMouseOut={e => (e.currentTarget.style.borderColor = 'transparent')}
           >

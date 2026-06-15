@@ -5,22 +5,27 @@ import { db } from './firebase'
 import { toCustomerView } from './lib/customerView'
 import { copyShareLink, shareLinkFor, smsHref, mailtoHref, nativeShare, isPhone } from './lib/shareEstimate'
 import { rememberMaterialPrices } from './lib/learnedPrices'
-import type { Estimate, AIQuote, AIMaterialLine } from './data/types'
+import { generateProposalLetter, buildProposalFallback } from './lib/proposal'
+import { fetchBusinessProfile } from './Settings'
+import MaterialsListModal from './MaterialsListModal'
+import ProposalEditor from './ProposalEditor'
+import type { Estimate, AIQuote, AIMaterialLine, ProposalLetter } from './data/types'
 
 interface Props {
   estimate: Estimate
   onClose: () => void
   onSaved: (updated: Estimate) => void
   onPrint: (e: Estimate) => void
+  // Business name for the materials-list letterhead. Optional.
+  businessName?: string
 }
 
 // Editable customer-facing preview of an estimate. Edits are saved back to
 // Firestore on Save; the public share view, print, SMS link, and Copy link all
 // pull from the saved version.
-export default function EstimatePreview({ estimate, onClose, onSaved, onPrint }: Props) {
+export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, businessName }: Props) {
   const { user } = useUser()
-  const { getToken: _getToken } = useAuth()
-  void _getToken
+  const { getToken } = useAuth()
 
   // Always work from a customer-view shaped quote so markup is baked in.
   const initialAi: AIQuote | null = estimate.aiQuote ? toCustomerView(estimate.aiQuote) : null
@@ -39,13 +44,20 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint }:
   const [saving, setSaving] = useState(false)
   const [saveStatus, setSaveStatus] = useState('')
   const [linkCopied, setLinkCopied] = useState(false)
+  const [materialsModalOpen, setMaterialsModalOpen] = useState(false)
+  // Professional proposal letter — the customer's first paperwork. Generated
+  // once (AI, with a template fallback) and saved on the estimate; the
+  // contractor can edit it before sending.
+  const [proposal, setProposal] = useState<ProposalLetter | null>(estimate.proposal || null)
+  const [proposalEdited, setProposalEdited] = useState(!!estimate.proposalEdited)
+  const [proposalBusy, setProposalBusy] = useState(false)
+  const [proposalOpen, setProposalOpen] = useState(false)
   const [dirty, setDirty] = useState(false)
 
   useEffect(() => {
     // Mark dirty when any field changes after first render. Initial sync is
     // not a change.
     setDirty(true)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customerName, customerSummary, workScope, materials, hourlyRate, estimatedHours, rentalsTotal, contractorNotes, depositRequested, depositAmount])
 
   // Reset dirty on mount.
@@ -164,10 +176,75 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint }:
       if (!confirm('You have unsaved edits. Save before sharing?')) return
       await saveEdits()
     }
+    // The proposal is the customer's first paperwork — make sure it exists
+    // before any share/copy/print so the customer always receives it.
+    await ensureProposal()
     await action()
   }
 
   const fromName = user?.fullName || user?.firstName || undefined
+
+  // Build the proposal context (brand + signer) from the business profile and
+  // the signed-in contractor's name. businessName prop is the brand; the
+  // license # comes from the saved profile.
+  const proposalCtx = async () => {
+    let licenseNumber = ''
+    let bizName = businessName || ''
+    try {
+      if (user?.id) {
+        const p = await fetchBusinessProfile(user.id)
+        licenseNumber = p.licenseNumber || ''
+        bizName = bizName || p.businessName || ''
+      }
+    } catch { /* non-fatal — proposal still generates without it */ }
+    return { businessName: bizName || undefined, contractorName: fromName, licenseNumber: licenseNumber || undefined }
+  }
+
+  // Persist a proposal letter onto the estimate doc (and local state). `edited`
+  // marks a hand-edited version so a future regenerate won't silently clobber it.
+  const persistProposal = async (p: ProposalLetter, edited: boolean) => {
+    setProposal(p)
+    setProposalEdited(edited)
+    try {
+      await updateDoc(doc(db, 'estimates', estimate.id), { proposal: p, proposalEdited: edited })
+      onSaved({ ...estimate, proposal: p, proposalEdited: edited } as Estimate)
+    } catch (err) {
+      console.error('Failed to save proposal', err)
+    }
+  }
+
+  // Generate the proposal via AI (template fallback on failure) and save it.
+  // Called on first send/open and on an explicit "regenerate". Returns the
+  // proposal so the send flow can proceed regardless of AI success.
+  const generateAndSaveProposal = async (): Promise<ProposalLetter> => {
+    setProposalBusy(true)
+    try {
+      const ctx = await proposalCtx()
+      const edited = { ...estimate, aiQuote: buildEditedQuote(), customerName, total: computed.total } as Estimate
+      let letter: ProposalLetter
+      try {
+        const token = await getToken()
+        if (!token) throw new Error('Not signed in')
+        letter = await generateProposalLetter(token, edited, ctx)
+      } catch (err) {
+        // AI unavailable — never block the customer's paperwork. Use the
+        // clean professional template instead.
+        console.warn('Proposal AI failed, using template fallback:', err)
+        letter = buildProposalFallback(edited, ctx)
+      }
+      await persistProposal(letter, false)
+      return letter
+    } finally {
+      setProposalBusy(false)
+    }
+  }
+
+  // Ensure a proposal exists before sending. If one is already saved, keep it
+  // (never overwrite the contractor's edited copy); otherwise generate one.
+  const ensureProposal = async (): Promise<void> => {
+    if (proposal) return
+    await generateAndSaveProposal()
+  }
 
   const doShare = requireSaveBeforeSend(async () => {
     const ok = await nativeShare(estimate, fromName)
@@ -187,11 +264,36 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint }:
     onPrint({ ...estimate, aiQuote: buildEditedQuote(), customerName, total: computed.total } as Estimate)
   })
 
+  // The materials shopping list is the contractor's OWN list, not sent to the
+  // customer — so it's always available, even on an unsaved draft. It reflects
+  // the current edits (buildEditedQuote), no save required. Opens in an in-app
+  // modal (NOT a popup window) so closing it returns here instead of stranding
+  // the user with no back button.
+  const editedEstimateForMaterials = (): Estimate =>
+    ({ ...estimate, aiQuote: buildEditedQuote(), customerName } as Estimate)
+
   const input: React.CSSProperties = { padding: '8px 10px', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '14px', boxSizing: 'border-box', width: '100%' }
   const label: React.CSSProperties = { display: 'block', fontSize: '11px', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '4px' }
   const card: React.CSSProperties = { background: 'white', padding: '16px', borderRadius: '8px', marginBottom: '12px', border: '1px solid #e2e8f0' }
 
   return (
+   <>
+    {materialsModalOpen && (
+      <MaterialsListModal
+        estimate={editedEstimateForMaterials()}
+        businessName={businessName}
+        onClose={() => setMaterialsModalOpen(false)}
+      />
+    )}
+    {proposalOpen && proposal && (
+      <ProposalEditor
+        proposal={proposal}
+        busy={proposalBusy}
+        onSave={(p, edited) => persistProposal(p, edited)}
+        onRegenerate={async () => { await generateAndSaveProposal() }}
+        onClose={() => setProposalOpen(false)}
+      />
+    )}
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.6)', zIndex: 200, padding: '16px', overflowY: 'auto' }}>
       <div onClick={e => e.stopPropagation()} style={{ maxWidth: '780px', margin: '24px auto', background: '#f8fafc', borderRadius: '12px', overflow: 'hidden' }}>
         <div style={{ background: '#1a1f2e', color: 'white', padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
@@ -368,8 +470,48 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint }:
             </p>
             {saveStatus && <p style={{ margin: '8px 0 0', fontSize: '13px', color: saveStatus.startsWith('✓') ? '#16a34a' : '#dc2626' }}>{saveStatus}</p>}
           </div>
+
+          {/* Proposal letter — the customer's FIRST paperwork. Auto-generated
+              on send; the contractor can review/edit/regenerate it here. */}
+          <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '8px', padding: '14px', marginTop: '12px' }}>
+            <div style={{ fontWeight: 800, color: '#1e3a8a', fontSize: '14px', marginBottom: '2px' }}>📄 Professional Proposal</div>
+            <p style={{ margin: '0 0 10px', fontSize: '12px', color: '#1e40af', lineHeight: 1.5 }}>
+              {proposal
+                ? 'This polished proposal letter is what your customer sees first, above the estimate. Review or tweak it before sending.'
+                : 'A professional proposal letter is written automatically when you send — it frames your estimate for the customer. You can preview and edit it now.'}
+            </p>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+              {proposal ? (
+                <button onClick={() => setProposalOpen(true)} style={{ background: '#1d4ed8', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 700 }}>
+                  📄 View / Edit Proposal
+                </button>
+              ) : (
+                <button onClick={async () => { await generateAndSaveProposal(); setProposalOpen(true) }} disabled={proposalBusy} style={{ background: '#1d4ed8', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '6px', cursor: proposalBusy ? 'not-allowed' : 'pointer', fontWeight: 700 }}>
+                  {proposalBusy ? 'Writing…' : '✍️ Preview Proposal'}
+                </button>
+              )}
+              {proposalEdited && <span style={{ fontSize: '12px', color: '#16a34a', fontWeight: 700 }}>✓ Edited by you</span>}
+            </div>
+          </div>
+
+          {/* Materials shopping list — contractor-facing, NOT sent to the
+              customer. Always available (even before the quote is sent or
+              accepted) so they can take it to the store. Only shown when the
+              quote actually has materials to buy. */}
+          {materials.length > 0 && (
+            <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: '8px', padding: '14px', marginTop: '12px' }}>
+              <div style={{ fontWeight: 800, color: '#9a3412', fontSize: '14px', marginBottom: '2px' }}>🧰 Materials Shopping List</div>
+              <p style={{ margin: '0 0 10px', fontSize: '12px', color: '#7c2d12', lineHeight: 1.5 }}>
+                Your pickup/ordering list — just the items and quantities, no prices. Open it to print or text it to yourself or the store’s pro desk.
+              </p>
+              <button onClick={() => setMaterialsModalOpen(true)} style={{ background: '#1a1f2e', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 700 }}>
+                🛒 View Materials List
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>
+   </>
   )
 }

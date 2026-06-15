@@ -6,6 +6,7 @@ import { useUser } from '@clerk/clerk-react'
 import { copyShareLink, isPhone } from './lib/shareEstimate'
 import type { CustomerPhoto } from './data/types'
 import { PUBLIC_HOST } from './lib/config'
+import { fetchCustomerDocuments, type CustomerDocument } from './lib/customerDocuments'
 
 interface Customer {
   id: string
@@ -54,6 +55,10 @@ export default function CustomerDetail({ customer, onBack }: Props) {
   const [photos, setPhotos] = useState<CustomerPhoto[]>([])
   const [uploading, setUploading] = useState(false)
   const [linkCopied, setLinkCopied] = useState(false)
+  // Signed-document folder (estimates / change orders / invoices) for legal protection.
+  const [documents, setDocuments] = useState<CustomerDocument[]>([])
+  const [docsLoading, setDocsLoading] = useState(true)
+  const [docCopiedId, setDocCopiedId] = useState<string | null>(null)
   const cameraRef = useRef<HTMLInputElement>(null)
   const uploadRef = useRef<HTMLInputElement>(null)
 
@@ -74,6 +79,31 @@ export default function CustomerDetail({ customer, onBack }: Props) {
   }
 
   useEffect(() => { fetchPhotos() }, [customer.id, user?.id])
+
+  // Load this customer's signed documents (the legal paper trail).
+  useEffect(() => {
+    if (!user?.id) return
+    let cancelled = false
+    setDocsLoading(true)
+    fetchCustomerDocuments(user.id, { id: customer.id, name: customer.name })
+      .then(docs => { if (!cancelled) setDocuments(docs) })
+      .catch(err => console.error('Customer documents fetch failed:', err))
+      .finally(() => { if (!cancelled) setDocsLoading(false) })
+    return () => { cancelled = true }
+  }, [customer.id, customer.name, user?.id])
+
+  // Open a document's live page (shows the signature; printable from there).
+  const openDoc = (d: CustomerDocument) => window.open(d.printUrl || d.publicUrl, '_blank')
+  // Copy the document's own public link (each doc type has its own URL path).
+  const shareDoc = async (d: CustomerDocument) => {
+    try {
+      await navigator.clipboard.writeText(d.publicUrl)
+      setDocCopiedId(d.id); setTimeout(() => setDocCopiedId(null), 1800)
+    } catch {
+      // Fallback for browsers without clipboard access — show the link to copy.
+      prompt('Copy this link:', d.publicUrl)
+    }
+  }
 
   const uploadFiles = async (files: FileList | null) => {
     if (!files || files.length === 0 || !user?.id) return
@@ -203,7 +233,7 @@ export default function CustomerDetail({ customer, onBack }: Props) {
   }
 
   const input: React.CSSProperties = { padding: '8px 10px', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '14px', boxSizing: 'border-box', width: '100%' }
-  const card: React.CSSProperties = { background: 'white', padding: '16px', borderRadius: '8px', marginBottom: '12px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)' }
+  const card: React.CSSProperties = { background: 'white', padding: '16px', borderRadius: '8px', marginBottom: '12px', boxShadow: '0 1px 2px rgba(15,23,42,0.04), 0 8px 24px rgba(15,23,42,0.06)' }
 
   return (
     <div style={{ padding: 'clamp(16px, 4vw, 32px)' }}>
@@ -214,6 +244,58 @@ export default function CustomerDetail({ customer, onBack }: Props) {
         <p style={{ margin: 0, color: '#64748b', fontSize: '14px' }}>
           {customer.phone}{customer.email && ` · ${customer.email}`}{customer.address && ` · ${customer.address}`}
         </p>
+      </div>
+
+      {/* ── Records & Signed Documents — the legal paper trail for this customer.
+            Every estimate, change order, and invoice, with the customer's
+            e-signature where it applies. View / Print / Share any of them if a
+            dispute ever comes up. ── */}
+      <div style={card}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px', flexWrap: 'wrap', gap: '8px' }}>
+          <h3 style={{ margin: 0, fontSize: '16px' }}>📁 Records &amp; Signed Documents ({documents.length})</h3>
+        </div>
+        <p style={{ fontSize: '12px', color: '#64748b', margin: '0 0 14px' }}>
+          Every estimate, change order, and invoice for {customer.name.split(' ')[0]} — with their signature on file. Open to view or print, or copy the link to share. Your protection if anything's ever disputed.
+        </p>
+
+        {docsLoading ? (
+          <p style={{ color: '#94a3b8', textAlign: 'center', padding: '20px 0', fontSize: '14px' }}>Loading records…</p>
+        ) : documents.length === 0 ? (
+          <p style={{ color: '#94a3b8', textAlign: 'center', padding: '20px 0', fontSize: '14px' }}>No documents yet. Estimates, change orders, and invoices for this customer will be filed here automatically.</p>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {documents.map(d => {
+              const icon = d.kind === 'estimate' ? '📝' : d.kind === 'change_order' ? '🔄' : '🧾'
+              const sigBadge = d.kind === 'invoice'
+                ? (d.status === 'paid'
+                    ? { text: '✓ Paid', bg: '#f0fdf4', color: '#16a34a' }
+                    : { text: d.status === 'overdue' ? 'Overdue' : 'Unpaid', bg: '#fef3c7', color: '#92400e' })
+                : (d.signed
+                    ? { text: `✍️ Signed by ${d.signedName}${d.signedAction === 'declined' ? ' (declined)' : ''}`, bg: d.signedAction === 'declined' ? '#fef2f2' : '#f0fdf4', color: d.signedAction === 'declined' ? '#dc2626' : '#16a34a' }
+                    : { text: 'Not signed yet', bg: '#f1f5f9', color: '#64748b' })
+              return (
+                <div key={`${d.kind}-${d.id}`} style={{ border: '1px solid #e2e8f0', borderRadius: '8px', padding: '12px', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: '22px', flex: '0 0 auto' }}>{icon}</span>
+                  <div style={{ flex: '1 1 200px', minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: '14px', color: '#1a1f2e' }}>{d.title}</div>
+                    <div style={{ fontSize: '12px', color: '#64748b' }}>
+                      ${d.amount.toLocaleString()} · {d.createdAt ? new Date(d.createdAt).toLocaleDateString() : ''}
+                      {d.signedAt && <> · signed {new Date(d.signedAt).toLocaleDateString()}</>}
+                    </div>
+                    <span style={{ display: 'inline-block', marginTop: '4px', fontSize: '11px', fontWeight: 700, padding: '2px 8px', borderRadius: '999px', background: sigBadge.bg, color: sigBadge.color }}>{sigBadge.text}</span>
+                    {d.retentionLocked && d.lockedUntil && (
+                      <div style={{ marginTop: '4px', fontSize: '11px', color: '#7c3aed', fontWeight: 600 }} title="Protected for your legal records — can't be deleted until this date.">🔒 Protected until {d.lockedUntil}</div>
+                    )}
+                  </div>
+                  <div style={{ display: 'flex', gap: '6px', flex: '0 0 auto' }}>
+                    <button onClick={() => openDoc(d)} style={{ background: '#1a1f2e', color: 'white', border: 'none', padding: '8px 12px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '12px' }}>View / Print</button>
+                    <button onClick={() => shareDoc(d)} style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '8px 12px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '12px' }}>{docCopiedId === d.id ? '✓ Copied' : 'Share'}</button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
 
       <div style={card}>

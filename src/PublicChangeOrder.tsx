@@ -71,13 +71,18 @@ export default function PublicChangeOrder({ changeOrderId }: { changeOrderId: st
     if (action === 'declined' && !showDeclineBox) { setShowDeclineBox(true); return }
     setSubmitting(true); setSubmitError('')
     try {
+      const now = new Date()
       const customerResponse = {
         action,
         signedName: signedName.trim(),
         ...(action === 'declined' && declineReason.trim() ? { reason: declineReason.trim() } : {}),
-        respondedAt: new Date().toISOString(),
+        respondedAt: now.toISOString(),
       }
-      await updateDoc(doc(db, 'changeOrders', co.id), { customerResponse, status: action })
+      await updateDoc(doc(db, 'changeOrders', co.id), {
+        customerResponse, status: action,
+        // Epoch-ms anchor for the 2-year retention lock (numeric for rules).
+        ...(action === 'approved' ? { signedAtMs: now.getTime() } : {}),
+      })
       setCo({ ...co, customerResponse, status: action })
     } catch (err) {
       setSubmitError('Could not submit. ' + (err instanceof Error ? err.message : String(err)))
@@ -99,7 +104,7 @@ export default function PublicChangeOrder({ changeOrderId }: { changeOrderId: st
 
   return (
     <div style={{ minHeight: '100vh', background: '#f8fafc', padding: 'clamp(16px, 4vw, 32px)' }}>
-      <div style={{ maxWidth: '720px', margin: '0 auto', background: 'white', borderRadius: '12px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', overflow: 'hidden' }}>
+      <div style={{ maxWidth: '720px', margin: '0 auto', background: 'white', borderRadius: '12px', boxShadow: '0 1px 2px rgba(15,23,42,0.04), 0 8px 24px rgba(15,23,42,0.06)', overflow: 'hidden' }}>
         <BrandHeader
           title="Change Order"
           subtitle={`For ${co.customerName} · ${CHANGE_ORDER_REASON_LABEL[co.reason]} · ${new Date(co.createdAt).toLocaleDateString()}`}

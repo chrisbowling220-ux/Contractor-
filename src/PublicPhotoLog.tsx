@@ -93,7 +93,7 @@ export default function PublicPhotoLog({ customerId }: { customerId: string }) {
 
   return (
     <div style={{ minHeight: '100vh', background: '#f8fafc', padding: 'clamp(16px, 4vw, 32px)' }}>
-      <div style={{ maxWidth: '780px', margin: '0 auto', background: 'white', borderRadius: '12px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', overflow: 'hidden' }}>
+      <div style={{ maxWidth: '780px', margin: '0 auto', background: 'white', borderRadius: '12px', boxShadow: '0 1px 2px rgba(15,23,42,0.04), 0 8px 24px rgba(15,23,42,0.06)', overflow: 'hidden' }}>
         <BrandHeader
           title="📸 Project Photo Log"
           subtitle={`${customer?.name || 'Customer'}${customer?.address ? ` · ${customer.address}` : ''} · ${photos.length} photo${photos.length === 1 ? '' : 's'}`}

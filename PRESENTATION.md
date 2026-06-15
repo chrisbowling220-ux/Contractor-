@@ -1,5 +1,5 @@
 # BuildPro+
-### The all-in-one job tool that hands contractors their evenings back.
+### The all-in-one job tool that gives contractors their nights back.
 
 ---
 
@@ -9,153 +9,153 @@ You already worked a full day. Your back hurts, your hands are raw, and you got 
 
 Now the *real* work starts.
 
-You sit down at the kitchen table with a notepad and your phone and you start writing quotes. You're trying to remember what a sheet of drywall costs this week. You're doing math on a napkin. You're typing the same "thank you for the opportunity" message you've sent a hundred times. You're chasing down who paid and who didn't. You're digging through your camera roll for that one before-photo.
+You sit down at the kitchen table with a notepad and your phone, and you start writing quotes. You're trying to remember what a sheet of drywall costs this week. You're doing math on a napkin. You're typing that same "thanks for the chance to bid" message you've sent a hundred times. You're trying to figure out who paid and who didn't. You're digging through your phone for that one before-picture.
 
-The kids go to bed without you. Your spouse gives you that look. The weekend disappears into paperwork.
+The kids go to bed without you. Your wife gives you that look. The weekend disappears into paperwork.
 
-**The job you love is stealing the life you're working for.**
+**The job you love is taking the life you're working for.**
 
-That's the problem BuildPro+ was built to solve.
+That's the problem BuildPro+ fixes.
 
 ---
 
-## What BuildPro+ Actually Does
+## What BuildPro+ Does
 
-BuildPro+ takes the entire "office side" of contracting — the part that eats your nights and weekends — and does it for you in seconds, right from your phone, while you're still standing on the job site.
+BuildPro+ takes all the office work — the part that eats your nights and weekends — and does it for you in seconds, right from your phone, while you're still standing on the job.
 
-**You do the work you're great at. The app does everything else.**
+**You do the work you're good at. The app does the rest.**
 
 Here's the difference, side by side:
 
-| The Task | Doing It By Hand | With BuildPro+ |
+| The Job | By Hand | With BuildPro+ |
 |---|---|---|
-| Build a detailed material list + quote | 45–90 minutes at the kitchen table | **30 seconds** — snap a photo, talk through it |
-| Price the materials for your area | Guessing or driving to the store | **Automatic** — priced for your ZIP code |
-| Send the estimate to the customer | Retype it, find their email, hope they reply | **One tap** — text or share, they sign on their phone |
-| Know when they accept | Call and bug them | **Instant notification** the moment they sign |
-| Take a deposit | Awkward conversation, drive to get a check | **Customer pays by card right in the estimate** |
-| Track the job | Sticky notes, memory, a whiteboard | **Automatic** — it moves itself through every stage |
-| Handle a change order | Argue about it later, lose money | **30 seconds** — generate, send, get it signed |
-| Send the invoice | Another late night, another template | **One tap** — branded, professional, pay-by-card |
-| Get paid | Wait, wonder, follow up | **Card payment hits your account** automatically |
-| Send a thank-you | Never get around to it | **Auto-written** with job photos, sent in a tap |
+| Build a material list and quote | 45–90 minutes at the kitchen table | **30 seconds** — take a photo, talk it through |
+| Price the materials for your area | Guessing, or driving to the store | **Done for you** — priced for your ZIP code |
+| Send the quote to the customer | Retype it, find their email, hope they answer | **One tap** — text it, they sign on their phone |
+| Know when they say yes | Call and bug them | **You get a text alert** the second they sign |
+| Take a deposit | Awkward talk, drive to get a check | **They pay by card right in the quote** |
+| Track the job | Sticky notes, your memory, a whiteboard | **Done for you** — it moves itself along |
+| Handle a change | Argue about it later, lose money | **30 seconds** — make it, send it, get it signed |
+| Send the invoice | Another late night, another template | **One tap** — looks pro, pay by card |
+| Get paid | Wait, wonder, follow up | **The card payment hits your account** |
+| Send a thank-you | Never get around to it | **Written for you** with job photos, sent in a tap |
 
-**The math is simple:** what used to cost you 2–3 hours a night now takes a few minutes during the job. That's 10–15 hours a week — **back in your pocket.**
+**Here's the math:** what used to take you 2–3 hours a night now takes a few minutes during the job. That's 10–15 hours a week — **back in your pocket.**
 
 That's dinner with your family. That's your kid's game. That's a Saturday off. That's the whole point.
 
 ---
 
-## How It Was Built — and Why
+## Why It Was Built
 
-BuildPro+ wasn't built by a tech company guessing at what contractors need. It was built around one belief:
+BuildPro+ wasn't built by some tech company guessing at what contractors need. It was built on one simple idea:
 
-> **A contractor's time is worth more on the job and at home than buried in paperwork.**
+> **A contractor's time is worth more on the job and at home than stuck doing paperwork.**
 
-Every feature was designed to remove a task that steals your personal time — not to add complexity, but to *delete* the busywork entirely. If a feature didn't give time back, it didn't make it in.
+Every part of it was made to take away a job that steals your time at home — not to add more steps, but to get rid of the busywork for good. If a feature didn't give you time back, it didn't make the cut.
 
-The result is a tool that works the way you actually work: from your phone, on site, in plain language — no training, no manuals, no IT department.
+What you get is a tool that works the way you already work: from your phone, on the job, in plain words — no training, no manual, no IT guy.
 
 ---
 
-## Everything It Includes — Feature by Feature
+## Everything It Does — One by One
 
-### ⚡ Quick Quote — A full estimate in 30 seconds
-Snap a photo of the job and talk through it like you're explaining it to a helper. BuildPro+ listens, looks, and builds a complete, itemized estimate:
-- **A full material list** — every item the job needs, with quantities and prices
-- **Priced for your area** — it uses the job's ZIP code to estimate realistic local Home Depot / Lowe's pricing (costs differ across the country — your quote reflects yours)
-- **Labor hours and rates** calculated for you
-- **A professional written scope of work** the customer can actually understand
-- **Smart, lean quantities** — it bills for what the job uses, not padded numbers that lose you the bid
-- **Fully editable** — every line, price, and quantity is yours to adjust with one tap before it goes out
+### ⚡ Quick Quote — A full quote in 30 seconds
+Take a photo of the job and talk through it like you're telling a helper what to do. BuildPro+ listens, looks, and builds a full quote with everything spelled out:
+- **A full material list** — every item the job needs, with amounts and prices
+- **Priced for your area** — it uses the job's ZIP code to figure realistic local Home Depot / Lowe's prices (prices are different all over the country — your quote matches yours)
+- **Labor hours and rates** worked out for you
+- **A clean, written scope of work** the customer can actually understand
+- **Smart amounts** — it charges for what the job uses, not padded numbers that lose you the bid
+- **You can change anything** — every line, price, and amount is yours to fix with one tap before it goes out
 
-Prefer to build it by hand? There's a **manual estimate builder** with a materials catalog, too. Your choice, every time.
+Want to build it by hand instead? There's a manual builder with a materials list, too. Your call, every time.
 
-### ✍️ Customer Sign-Off — They approve right from their phone
-Send the estimate by text or share link. The customer opens it on their phone, sees a clean professional document with your logo and business info, and **signs electronically** — typing their name to accept or decline.
-- The signature is **consent to your terms and pricing**
-- If they decline, they can leave a reason — so you know whether to adjust and re-send
-- The moment they decide, **you get a notification** — no more chasing
+### ✍️ Customer Sign-Off — They say yes right from their phone
+Send the quote by text or a link. The customer opens it on their phone, sees a clean, professional page with your logo and business info, and **signs it right there** — typing their name to accept or turn it down.
+- The signature means they **agree to your price and terms**
+- If they say no, they can tell you why — so you know whether to change it and send it back
+- The second they decide, **you get an alert** — no more chasing
 
 ### 💵 Deposits & Payment — Get paid before you even start
-Choose to request an upfront deposit (10–50%, or none) right in the Quick Quote. When the customer approves:
-- They can **pay the deposit by card immediately** — right inside the estimate
-- Or **pay the full job upfront** if they'd rather
-- Or **pay cash** at their convenience
-- A deposit invoice is generated automatically with the work order and terms spelled out
-- **Secure payments through Stripe** — card details never touch the app
+Choose to ask for a deposit (10–50%, or none) right in the Quick Quote. When the customer says yes:
+- They can **pay the deposit by card right away** — right inside the quote
+- Or **pay the whole job up front** if they'd rather
+- Or **pay cash** whenever works for them
+- A deposit invoice gets made for you, with the work order and terms spelled out
+- **Payments run through Stripe** — card numbers never touch the app
 
-### 🗂️ Projects — The job manages itself
-Once a customer approves, the job becomes a project that **moves itself through every stage** automatically: Lead → In Progress → Completed → Closed. No more sticky notes or whiteboards. Each project rolls up everything in one place:
-- The estimate and any change orders
+### 🗂️ Projects — The job runs itself
+Once a customer says yes, the job becomes a project that **moves itself along** on its own: Lead → In Progress → Done → Closed. No more sticky notes or whiteboards. Each project keeps everything in one place:
+- The quote and any changes
 - Every photo from the job
-- The invoice and payment status
+- The invoice and whether it's paid
 - The customer's info and history
 
-You just tap "Mark Job Complete" when the work is done — the app handles the rest.
+You just tap "Mark Job Done" when the work's finished — the app takes care of the rest.
 
 ### 🔄 Change Orders — Never eat a cost again
-The customer wants to add subway tile mid-job? Describe the change in plain words and BuildPro+ generates a professional change order with line-item pricing — using the same smart pricing brain as Quick Quote. Send it, get it signed, and it **automatically updates the contract total.** No more "I thought that was included" arguments. No more lost money on scope creep.
+Customer wants to add tile in the middle of the job? Just say what changed in plain words and BuildPro+ writes up a professional change order with the price spelled out — using the same smart pricing as Quick Quote. Send it, get it signed, and it **updates the contract total for you.** No more "I thought that was included." No more losing money when the job grows.
 
 ### 🧾 Invoices — Professional, branded, paid by card
-When the job's done, generate a final invoice in one tap:
+When the job's done, make a final invoice in one tap:
 - **Your logo and business info** on every invoice
-- **AI-written cover note and payment terms** — fully editable
-- **Rolls up the estimate + approved change orders** automatically
-- **Credits any deposit already paid** — the customer only owes the balance
+- **A written note and payment terms** — change them however you want
+- **Adds up the quote plus any approved changes** for you
+- **Takes off any deposit they already paid** — they only owe what's left
 - The customer **pays by card or cash** from a link you text them
-- Payment hits your account, and the project closes itself
+- The money hits your account, and the project closes itself
 
 ### 🎁 Thank-You Letters — Win the next job while you sleep
-Here's the secret weapon most contractors never have time for: the follow-up that turns a customer into a repeat customer and a referral machine.
-- BuildPro+ **auto-writes a warm, professional thank-you letter** — with a personal touch and even a little humor
-- It pulls **every photo from the job** (from the first Quick Quote pic to completion) and lets you **pick which ones to feature**
-- Includes a satisfaction promise — "if anything bothers you, just call"
-- Sent in a tap, with a beautiful photo slideshow the customer can keep
+Here's the thing most contractors never have time for: the follow-up that turns a customer into a repeat customer and a referral machine.
+- BuildPro+ **writes a warm, professional thank-you letter for you** — with a personal touch and even a little humor
+- It pulls **every photo from the job** (from the first quote pic to the finish) and lets you **pick which ones to show off**
+- It adds a promise — "if anything bugs you, just call"
+- Sent in a tap, with a nice photo slideshow the customer gets to keep
 
-Customers remember the contractor who said thank you. This does it for you, every time.
+People remember the contractor who said thank you. This does it for you, every time.
 
-### 📸 Job Photos — Captured once, used everywhere
-Every photo you take flows through the entire job automatically — from the quote, through the work, to the thank-you letter. Snap photos right from the dashboard, assign them to a job, and they're saved and organized. No more digging through your camera roll. A shareable photo log for each customer, too.
+### 📸 Job Photos — Take them once, used everywhere
+Every photo you take follows the whole job on its own — from the quote, through the work, to the thank-you letter. Snap photos right from the home screen, put them with a job, and they're saved and sorted. No more digging through your phone. Each customer gets a photo log you can share, too.
 
 ### 👥 Customers — Everyone in one place
-Profiles, contact info, job history, and a shareable photo log for every customer. Search and find anyone in seconds.
+Names, contact info, job history, and a photo log you can share for every customer. Find anybody in seconds.
 
 ### 📊 Your Business at a Glance
-The dashboard shows you the scoreboard the moment you open it:
+The home screen shows you the score the second you open it:
 - **Money paid this month**
 - **Jobs won vs. lost, and your win rate**
 - **Average job size**
-- **A "needs attention" list** — overdue invoices and estimates the customer hasn't answered, so nothing slips through the cracks
+- **A "needs attention" list** — overdue invoices and quotes the customer hasn't answered, so nothing slips by
 
 ### 🔎 Find Anything Fast
-Search across customers, projects, and estimates instantly. Duplicate a past estimate ("same as the last bathroom") to save even more time on repeat work.
+Search across customers, projects, and quotes in a second. Copy an old quote ("same as the last bathroom") to save even more time on repeat work.
 
 ---
 
 ## What Makes BuildPro+ Different
 
-- **Built for the phone, for the job site** — not a desktop program you'll never open.
-- **No learning curve** — if you can take a photo and talk, you can use it.
-- **It removes work, it doesn't add it** — every feature gives you time back.
-- **It makes you look professional** — branded estimates, invoices, and thank-yous that win trust and referrals.
-- **It gets you paid faster** — card payments, deposits up front, automatic follow-up.
+- **Made for the phone, for the job** — not some desktop program you'll never open.
+- **Nothing to learn** — if you can take a photo and talk, you can use it.
+- **It takes away work, it doesn't add it** — every part gives you time back.
+- **It makes you look professional** — quotes, invoices, and thank-yous that win trust and referrals.
+- **It gets you paid faster** — card payments, deposits up front, follow-up done for you.
 
 ---
 
 ## The Bottom Line
 
-BuildPro+ does the office work of a full-time admin assistant — for less than the cost of one hour of your labor a month.
+BuildPro+ does the office work of a full-time helper — for less than what one hour of your work costs in a month.
 
-But the real value isn't measured in dollars. It's measured in the evenings you get back. The weekends. The dinners you don't miss. The game you get to coach. The life you're actually working for.
+But the real value isn't about dollars. It's about the nights you get back. The weekends. The dinners you don't miss. The game you get to coach. The life you're actually working for.
 
-**You became a contractor to build things and provide for the people you love — not to spend your nights buried in paperwork.**
+**You became a contractor to build things and take care of the people you love — not to spend your nights buried in paperwork.**
 
 BuildPro+ gives you back the time to do exactly that.
 
 ---
 
 ### Try it free.
-5 free quotes, no card required. See for yourself how much time you've been giving away.
+10 free quotes, no card needed. See for yourself how much time you've been giving away.
 
 **BuildPro+ — Less paperwork. More life.**

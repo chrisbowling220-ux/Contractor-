@@ -49,6 +49,16 @@ export default function Estimates({ initialTab = 'pending' }: { initialTab?: Tab
   }, [estimates])
 
   const deleteEstimate = async (e: Estimate) => {
+    // 2-YEAR LEGAL RETENTION: a customer-signed estimate can't be deleted until
+    // 2 years after signing — it's the contractor's proof. Block it up front
+    // with a clear message (the server enforces this too).
+    if (e.signedAtMs) {
+      const until = new Date(e.signedAtMs + 63072000000)
+      if (Date.now() < until.getTime()) {
+        alert(`🔒 This estimate is signed by ${e.customerResponse?.signedName || e.customerName} and is protected as a legal record. It can't be deleted until ${until.toLocaleDateString()} (2 years after signing).`)
+        return
+      }
+    }
     // Stronger warning when deleting an APPROVED estimate — it's tied to an
     // in-flight project. The project itself stays, but the customer-facing link
     // and signed copy go away.
@@ -105,7 +115,7 @@ export default function Estimates({ initialTab = 'pending' }: { initialTab?: Tab
     }
   }
 
-  const card: React.CSSProperties = { background: 'white', borderRadius: '12px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', padding: '16px', marginBottom: '12px' }
+  const card: React.CSSProperties = { background: 'white', borderRadius: '12px', boxShadow: '0 1px 2px rgba(15,23,42,0.04), 0 8px 24px rgba(15,23,42,0.06)', padding: '16px', marginBottom: '12px' }
   const list = buckets[tab]
 
   const tabBtn = (key: Tab, label: string, count: number, color: string) => (
@@ -192,6 +202,7 @@ export default function Estimates({ initialTab = 'pending' }: { initialTab?: Tab
           onClose={() => setPreview(null)}
           onSaved={(updated) => setPreview(updated)}
           onPrint={(est) => openEstimatePrintWindow(est, profile)}
+          businessName={profile.businessName}
         />
       )}
     </div>

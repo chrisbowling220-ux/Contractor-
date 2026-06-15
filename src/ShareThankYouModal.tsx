@@ -61,7 +61,7 @@ export default function ShareThankYouModal({ pkg, fromName, onClose }: Props) {
 
   return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.65)', zIndex: 300, padding: '16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <div onClick={e => e.stopPropagation()} style={{ maxWidth: '480px', width: '100%', background: 'white', borderRadius: '12px', overflow: 'hidden', boxShadow: '0 12px 40px rgba(0,0,0,0.3)' }}>
+      <div onClick={e => e.stopPropagation()} style={{ maxWidth: '480px', width: '100%', background: 'white', borderRadius: '12px', overflow: 'hidden', boxShadow: '0 24px 60px rgba(15,23,42,0.18)' }}>
         <div style={{ background: 'linear-gradient(135deg, #1a1f2e 0%, #0f172a 100%)', color: 'white', padding: '20px 24px' }}>
           <h2 style={{ margin: '0 0 4px', fontSize: '20px', fontWeight: 800, color: '#f97316' }}>🎁 Thank-You Package Ready</h2>
           <p style={{ margin: 0, fontSize: '13px', color: '#94a3b8' }}>Letter + slideshow saved. Send the link to {pkg.customerName} — they tap and see it in their browser. They can save it as a PDF themselves if they want.</p>

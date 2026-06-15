@@ -17,6 +17,11 @@ import { autoConvertApprovedEstimates } from './lib/autoConvertEstimates'
 import { useFirebaseBridge } from './lib/useFirebaseBridge'
 import BusinessOnboarding from './BusinessOnboarding'
 import QuickPhotoCapture from './QuickPhotoCapture'
+import QuickAddVoice from './QuickAddVoice'
+import WelcomeTour from './WelcomeTour'
+import { TermsPage, PrivacyPage } from './LegalPages'
+import { fireDueReminders, fireMorningAgenda, requestNotificationPermission, alertsEnabled, setAlertsEnabled, playAlertCue } from './lib/reminders'
+import { tipOfTheDay } from './data/contractorTips'
 import type { ProjectStatus } from './data/types'
 
 const ORANGE = '#f97316'
@@ -38,30 +43,84 @@ interface DashboardData {
   customers: number
   // Stats
   revenueThisMonth: number      // sum of paid invoices this calendar month
+  revenueThisWeek: number       // sum of paid invoices since Monday this week
+  weeklyRevenue: { label: string; amount: number }[] // last 4 weeks (oldest→newest)
   estimatesWon: number          // approved estimates (all time)
   estimatesLost: number         // declined estimates (all time)
   avgJobSize: number            // avg approved estimate total
-  // Needs attention
-  attention: { id: string; kind: 'overdue_invoice' | 'stale_estimate' | 'starting_soon'; label: string; projectId?: string }[]
+  // Needs attention — a unified reminder feed covering everything the
+  // contractor might need to act on or be reminded about.
+  attention: AttentionItem[]
 }
 
-function useDashboardCounts(userId: string | undefined) {
+type AttentionKind =
+  | 'overdue_invoice'        // unpaid invoice past due date
+  | 'unsent_invoice'         // invoice still in draft, never sent
+  | 'cash_to_confirm'        // customer chose "pay cash" — confirm you got it
+  | 'stale_estimate'         // estimate sent, no response in 3+ days
+  | 'starting_soon'          // job start date is today/tomorrow
+  | 'needs_completion'       // in-progress job started a while ago — likely done, nudge to mark complete
+  | 'completed_no_invoice'   // project marked completed but no invoice created
+  | 'date_change_requested'  // customer asked for a different start date
+  | 'new_approval'           // estimate approved but no project/deposit action yet
+  | 'calendar_event'         // a custom calendar event/reminder coming up
+// Lower number = higher priority (sorts to top of the list).
+const ATTENTION_PRIORITY: Record<AttentionKind, number> = {
+  date_change_requested: 0,
+  cash_to_confirm: 1,
+  starting_soon: 2,
+  calendar_event: 3,
+  overdue_invoice: 4,
+  completed_no_invoice: 5,
+  needs_completion: 6,
+  unsent_invoice: 7,
+  stale_estimate: 8,
+  new_approval: 9,
+}
+const ATTENTION_ICON: Record<AttentionKind, string> = {
+  date_change_requested: '🗓️',
+  cash_to_confirm: '💵',
+  starting_soon: '📅',
+  calendar_event: '🔔',
+  overdue_invoice: '💸',
+  completed_no_invoice: '🧾',
+  needs_completion: '🏁',
+  unsent_invoice: '📤',
+  stale_estimate: '⏳',
+  new_approval: '✅',
+}
+interface AttentionItem {
+  id: string
+  kind: AttentionKind
+  label: string
+  projectId?: string
+  // Where tapping this reminder should take the contractor.
+  goto?: 'projects' | 'estimates' | 'schedule'
+  // For sorting time-sensitive items (yyyy-mm-dd of the relevant date).
+  when?: string
+}
+
+// `refreshKey` lets the caller force a re-count when underlying data changes
+// (the Dashboard bumps it from live onSnapshot listeners) so the tiles and the
+// reminders feed stay current without a page reload.
+function useDashboardCounts(userId: string | undefined, refreshKey = 0) {
   const [counts, setCounts] = useState<DashboardData>({
     activeJobs: 0, pendingEstimates: 0, customers: 0,
-    revenueThisMonth: 0, estimatesWon: 0, estimatesLost: 0, avgJobSize: 0, attention: [],
+    revenueThisMonth: 0, revenueThisWeek: 0, weeklyRevenue: [], estimatesWon: 0, estimatesLost: 0, avgJobSize: 0, attention: [],
   })
   useEffect(() => {
     if (!userId) {
-      setCounts({ activeJobs: 0, pendingEstimates: 0, customers: 0, revenueThisMonth: 0, estimatesWon: 0, estimatesLost: 0, avgJobSize: 0, attention: [] })
+      setCounts({ activeJobs: 0, pendingEstimates: 0, customers: 0, revenueThisMonth: 0, revenueThisWeek: 0, weeklyRevenue: [], estimatesWon: 0, estimatesLost: 0, avgJobSize: 0, attention: [] })
       return
     }
     (async () => {
       try {
-        const [projects, estimates, customers, invoices] = await Promise.all([
+        const [projects, estimates, customers, invoices, calEvents] = await Promise.all([
           getDocs(query(collection(db, 'projects'), where('createdBy', '==', userId))),
           getDocs(query(collection(db, 'estimates'), where('createdBy', '==', userId))),
           getDocs(query(collection(db, 'customers'), where('createdBy', '==', userId))),
           getDocs(query(collection(db, 'invoices'), where('createdBy', '==', userId))),
+          getDocs(query(collection(db, 'calendarEvents'), where('createdBy', '==', userId))),
         ])
         const activeStatuses = new Set(['estimated', 'contracted', 'in_progress'])
         const activeJobs = projects.docs.filter(d => activeStatuses.has(d.data().status as string)).length
@@ -75,54 +134,176 @@ function useDashboardCounts(userId: string | undefined) {
         const now = new Date()
         const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime()
         const invDocs = invoices.docs.map(d => ({ id: d.id, ...d.data() } as Record<string, unknown> & { id: string }))
-        const revenueThisMonth = +invDocs
-          .filter(i => i.status === 'paid' && i.paidAt && new Date(i.paidAt as string).getTime() >= monthStart)
-          .reduce((s, i) => s + ((i.subtotal as number) || 0), 0).toFixed(2)
+        const paidInvoices = invDocs.filter(i => i.status === 'paid' && i.paidAt)
+        const paidAtMs = (i: typeof invDocs[number]) => new Date(i.paidAt as string).getTime()
+        const amountOf = (i: typeof invDocs[number]) => (i.subtotal as number) || 0
+        const revenueThisMonth = +paidInvoices
+          .filter(i => paidAtMs(i) >= monthStart)
+          .reduce((s, i) => s + amountOf(i), 0).toFixed(2)
 
-        // Needs attention:
-        const attention: DashboardData['attention'] = []
+        // ── Weekly money: this week + the last 4 weeks (Monday-anchored). Helps
+        //    the contractor see at a glance if cash is keeping up week to week. ──
+        // Find the Monday 00:00 of the current week.
+        const startOfWeek = (d: Date) => {
+          const x = new Date(d.getFullYear(), d.getMonth(), d.getDate())
+          const dow = (x.getDay() + 6) % 7   // 0 = Monday … 6 = Sunday
+          x.setDate(x.getDate() - dow)
+          return x
+        }
+        const thisMonday = startOfWeek(now)
+        const revenueThisWeek = +paidInvoices
+          .filter(i => paidAtMs(i) >= thisMonday.getTime())
+          .reduce((s, i) => s + amountOf(i), 0).toFixed(2)
+        // Build 4 buckets: 3 weeks ago → this week (oldest first).
+        const weeklyRevenue: { label: string; amount: number }[] = []
+        for (let w = 3; w >= 0; w--) {
+          const weekStart = new Date(thisMonday); weekStart.setDate(weekStart.getDate() - w * 7)
+          const weekEnd = new Date(weekStart); weekEnd.setDate(weekEnd.getDate() + 7)
+          const amount = +paidInvoices
+            .filter(i => { const t = paidAtMs(i); return t >= weekStart.getTime() && t < weekEnd.getTime() })
+            .reduce((s, i) => s + amountOf(i), 0).toFixed(2)
+          const label = w === 0 ? 'This wk' : weekStart.toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' })
+          weeklyRevenue.push({ label, amount })
+        }
+
+        // ── Needs attention: a unified reminder feed. Surfaces anything the
+        //    contractor should act on so nothing slips through the cracks. ──
+        const attention: AttentionItem[] = []
         const DAY = 86400000
+        const todayStr = new Date().toISOString().slice(0, 10)
+        const tomorrowStr = new Date(now.getTime() + DAY).toISOString().slice(0, 10)
+        const projDocs = projects.docs.map(d => ({ id: d.id, ...d.data() } as Record<string, unknown> & { id: string }))
+        // Which projects already have an invoice? (so we can flag the ones that don't)
+        const projectsWithInvoice = new Set(invDocs.map(i => i.projectId as string).filter(Boolean))
+
         // 1) Unpaid invoices past their due date.
-        invDocs.filter(i => i.status !== 'paid' && i.dueDate && new Date(i.dueDate as string).getTime() < now.getTime())
+        invDocs.filter(i => i.status !== 'paid' && !i.customerCashChoice && i.dueDate && new Date(i.dueDate as string).getTime() < now.getTime())
           .forEach(i => attention.push({
-            id: `inv-${i.id}`,
-            kind: 'overdue_invoice',
+            id: `inv-${i.id}`, kind: 'overdue_invoice', goto: 'projects',
             label: `Invoice ${i.invoiceNumber || ''} for ${i.customerName || 'customer'} is past due ($${((i.amountDue as number) || 0).toFixed(2)})`,
             projectId: i.projectId as string | undefined,
+            when: (i.dueDate as string)?.slice(0, 10),
           }))
-        // 2) Estimates sent 3+ days ago with no customer response yet.
+        // 2) Customer chose "Pay Cash / In Person" — remind to confirm receipt.
+        invDocs.filter(i => i.customerCashChoice && i.status !== 'paid')
+          .forEach(i => attention.push({
+            id: `cash-${i.id}`, kind: 'cash_to_confirm', goto: 'projects',
+            label: `${i.customerName || 'A customer'} chose to pay cash for invoice ${i.invoiceNumber || ''} — confirm once you've collected $${((i.amountDue as number) || 0).toFixed(2)}`,
+            projectId: i.projectId as string | undefined,
+          }))
+        // 3) Invoices created but never sent (still draft).
+        invDocs.filter(i => i.status === 'draft')
+          .forEach(i => attention.push({
+            id: `draft-${i.id}`, kind: 'unsent_invoice', goto: 'projects',
+            label: `Invoice ${i.invoiceNumber || ''} for ${i.customerName || 'customer'} is ready but hasn't been sent yet`,
+            projectId: i.projectId as string | undefined,
+          }))
+        // 4) Estimates sent 3+ days ago with no customer response yet.
         estDocs.filter(e => e.status === 'pending' && e.createdAt && (now.getTime() - new Date(e.createdAt as string).getTime()) > 3 * DAY)
           .forEach(e => attention.push({
-            id: `est-${e.id}`,
-            kind: 'stale_estimate',
+            id: `est-${e.id}`, kind: 'stale_estimate', goto: 'estimates',
             label: `${e.customerName || 'A customer'} hasn't responded to their estimate in ${Math.floor((now.getTime() - new Date(e.createdAt as string).getTime()) / DAY)} days`,
             projectId: e.projectId as string | undefined,
           }))
-        // 3) Jobs scheduled to start today or tomorrow.
-        const todayStr = new Date().toISOString().slice(0, 10)
-        const tomorrowStr = new Date(now.getTime() + DAY).toISOString().slice(0, 10)
-        projects.docs.map(d => ({ id: d.id, ...d.data() } as Record<string, unknown> & { id: string }))
-          .filter(p => !p.archived && !p.declined && p.status !== 'closed' && typeof p.startDate === 'string'
+        // 5) Customer asked for a DIFFERENT start date — needs your decision.
+        estDocs.filter(e => (e as { startDateResponse?: { action?: string; requestedDate?: string } }).startDateResponse?.action === 'requested_change')
+          .forEach(e => {
+            const sr = (e as { startDateResponse?: { requestedDate?: string } }).startDateResponse
+            attention.push({
+              id: `daterq-${e.id}`, kind: 'date_change_requested', goto: 'estimates',
+              label: `${e.customerName || 'A customer'} requested a different start date${sr?.requestedDate ? ` (${new Date(sr.requestedDate + 'T12:00:00').toLocaleDateString()})` : ''} — review it`,
+              projectId: e.projectId as string | undefined,
+            })
+          })
+        // 6) Jobs scheduled to start today or tomorrow.
+        projDocs.filter(p => !p.archived && !p.declined && p.status !== 'closed' && typeof p.startDate === 'string'
             && ((p.startDate as string).slice(0, 10) === todayStr || (p.startDate as string).slice(0, 10) === tomorrowStr))
           .forEach(p => {
             const when = (p.startDate as string).slice(0, 10) === todayStr ? 'today' : 'tomorrow'
             attention.push({
-              id: `start-${p.id}`,
-              kind: 'starting_soon',
+              id: `start-${p.id}`, kind: 'starting_soon', goto: 'schedule',
               label: `${p.jobTypeName || 'Job'} for ${p.customerName || 'customer'} starts ${when}`,
-              projectId: p.id,
+              projectId: p.id, when: (p.startDate as string).slice(0, 10),
             })
           })
+        // 7) Project marked COMPLETED but no invoice has been created — remind to bill.
+        projDocs.filter(p => p.status === 'completed' && !p.archived && !projectsWithInvoice.has(p.id))
+          .forEach(p => attention.push({
+            id: `noinv-${p.id}`, kind: 'completed_no_invoice', goto: 'projects',
+            label: `${p.jobTypeName || 'Job'} for ${p.customerName || 'customer'} is marked complete — create the final invoice to get paid`,
+            projectId: p.id,
+          }))
+        // 8) In-progress job whose start date passed 7+ days ago — likely done.
+        //    Nudge to MARK IT COMPLETE (which unlocks the final invoice +
+        //    thank-you), backing up the in-project "Mark Job Complete" banner so
+        //    a finished job never quietly sits in progress and goes un-billed.
+        projDocs.filter(p => p.status === 'in_progress' && !p.archived && typeof p.startDate === 'string'
+            && (now.getTime() - new Date(p.startDate as string).getTime()) > 7 * DAY)
+          .forEach(p => {
+            const days = Math.floor((now.getTime() - new Date(p.startDate as string).getTime()) / DAY)
+            attention.push({
+              id: `done-${p.id}`, kind: 'needs_completion', goto: 'projects',
+              label: `${p.jobTypeName || 'Job'} for ${p.customerName || 'customer'} started ${days} days ago — is it finished? Mark it complete to send the final invoice & thank-you`,
+              projectId: p.id, when: (p.startDate as string).slice(0, 10),
+            })
+          })
+        // 9) Custom calendar events/reminders that are due today or within their
+        //    reminder window (or already today/overdue if no window set).
+        calEvents.docs.map(d => ({ id: d.id, ...d.data() } as Record<string, unknown> & { id: string }))
+          .forEach(ev => {
+            const evDate = ev.date as string
+            if (!evDate) return
+            const daysUntil = Math.round((new Date(evDate + 'T12:00:00').getTime() - new Date(todayStr + 'T12:00:00').getTime()) / DAY)
+            const window = typeof ev.remindDaysBefore === 'number' ? (ev.remindDaysBefore as number) : 0
+            // Show it if it's today, inside its reminder lead time, OR overdue —
+            // overdue items KEEP showing (up to 30 days back) so nothing the
+            // contractor hasn't dealt with silently disappears.
+            if (daysUntil <= window && daysUntil >= -30) {
+              const whenTxt = daysUntil === 0 ? 'today' : daysUntil === 1 ? 'tomorrow'
+                : daysUntil === -1 ? 'was yesterday' : daysUntil < -1 ? `${-daysUntil} days ago` : `in ${daysUntil} days`
+              attention.push({
+                id: `cal-${ev.id}`, kind: 'calendar_event', goto: 'schedule',
+                label: `${(ev.kind === 'reminder') ? '🔔 ' : ''}${ev.title || 'Event'} — ${whenTxt}${ev.time ? ` at ${ev.time}` : ''}`,
+                when: evDate,
+              })
+            }
+          })
+
+        // Sort: priority first, then soonest date.
+        attention.sort((a, b) => {
+          const pa = ATTENTION_PRIORITY[a.kind], pb = ATTENTION_PRIORITY[b.kind]
+          if (pa !== pb) return pa - pb
+          return (a.when || '9999').localeCompare(b.when || '9999')
+        })
+
+        // Pop browser notifications for the most time-sensitive reminders (once
+        // per day each). Quiet no-op if the user hasn't enabled notifications.
+        const NOTIFY_KINDS = new Set<AttentionKind>(['calendar_event', 'starting_soon', 'overdue_invoice', 'date_change_requested', 'cash_to_confirm'])
+        fireDueReminders(attention.filter(a => NOTIFY_KINDS.has(a.kind)).map(a => ({ id: a.id, label: a.label })))
+
+        // The in-app "6am morning-of" agenda: one consolidated pop-up listing
+        // everything scheduled for TODAY (jobs starting today + today's calendar
+        // events), fired once when the app is open at/after 6am. The 6am email
+        // (morningAgendaAlert Cloud Function) covers the app-closed case.
+        const todaysAgenda = [
+          ...projDocs.filter(p => !p.archived && !p.declined && p.status !== 'closed'
+              && typeof p.startDate === 'string' && (p.startDate as string).slice(0, 10) === todayStr)
+            .map(p => `🔨 ${p.jobTypeName || 'Job'} for ${p.customerName || 'customer'}`),
+          ...calEvents.docs.map(d => d.data() as { date?: string; title?: string; time?: string; kind?: string })
+            .filter(e => e.date === todayStr)
+            .map(e => `${e.kind === 'reminder' ? '🔔' : '📌'} ${e.title || 'Event'}${e.time ? ` at ${e.time}` : ''}`),
+        ]
+        fireMorningAgenda(todaysAgenda)
 
         setCounts({
           activeJobs, pendingEstimates, customers: customers.size,
-          revenueThisMonth, estimatesWon: won.length, estimatesLost: lost, avgJobSize, attention,
+          revenueThisMonth, revenueThisWeek, weeklyRevenue, estimatesWon: won.length, estimatesLost: lost, avgJobSize, attention,
         })
       } catch (err) {
         console.error('Dashboard counts failed:', err)
       }
     })()
-  }, [userId])
+  }, [userId, refreshKey])
   return counts
 }
 
@@ -156,40 +337,149 @@ const TITLE_MAP: Record<string, string> = {
   ...Object.fromEntries(TILES.map(t => [t.key, t.label])),
 }
 
-function DashboardHome({ counts, onPick, onBox, onPhotos, userName }: { counts: ReturnType<typeof useDashboardCounts>; onPick: (key: string) => void; onBox: (key: string, filter: ProjectStatus | 'all') => void; onPhotos: () => void; userName?: string }) {
+function DashboardHome({ counts, onPick, onBox, onPhotos, onQuickAdd, userName }: { counts: ReturnType<typeof useDashboardCounts>; onPick: (key: string) => void; onBox: (key: string, filter: ProjectStatus | 'all') => void; onPhotos: () => void; onQuickAdd: () => void; userName?: string }) {
   const isMobile = useIsMobile()
+  // Browser-notification permission, tracked as state so the UI updates the
+  // moment the user responds to the prompt (granted → hide button + show "on";
+  // denied → show "blocked"; dismissed → keep the button so they can retry).
+  const [notifyBusy, setNotifyBusy] = useState(false)
+  // The user's ON/OFF switch for alert sound/vibration/pop-ups (separate from
+  // browser permission — they can keep permission but silence alerts).
+  const [alertsOn, setAlertsOn] = useState(alertsEnabled())
+  // Collapse/expand for the whole reminders table. Persisted so it stays the
+  // way the user left it.
+  const [tableCollapsed, setTableCollapsed] = useState(() => {
+    try { return localStorage.getItem('bp_reminders_collapsed') === 'true' } catch { return false }
+  })
+  const toggleTableCollapsed = () => {
+    setTableCollapsed(c => { const next = !c; try { localStorage.setItem('bp_reminders_collapsed', next ? 'true' : 'false') } catch { /* ignore */ } return next })
+  }
+  const toggleAlerts = () => {
+    const next = !alertsOn
+    setAlertsOn(next)
+    setAlertsEnabled(next)
+    if (next) playAlertCue()   // confirming chirp so they hear it's on
+  }
+  // Reminders the user has tapped/cleared. Persisted per-DAY in localStorage so
+  // a cleared item stays gone for the rest of today, then naturally returns
+  // tomorrow if it's still relevant ("clears itself, pops back when necessary").
+  const dismissKey = `bp_dismissed_reminders_${new Date().toISOString().slice(0, 10)}`
+  const [dismissed, setDismissed] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem(dismissKey) || '[]') as string[]) } catch { return new Set() }
+  })
+  const dismissReminder = (id: string) => {
+    setDismissed(prev => {
+      const next = new Set(prev); next.add(id)
+      try { localStorage.setItem(dismissKey, JSON.stringify([...next])) } catch { /* ignore quota */ }
+      return next
+    })
+  }
+
+  // Turn alerts ON. The sound + vibration work WITHOUT browser permission, so we
+  // enable them immediately. We ALSO quietly try to get pop-up permission as a
+  // bonus — but never block on it or show a scolding loop if the browser ignores
+  // the request (common on phones / iOS Safari).
+  const enableReminders = async () => {
+    setNotifyBusy(true)
+    try {
+      setAlertsEnabled(true); setAlertsOn(true)
+      playAlertCue()   // immediate confirming ping so the user knows it worked
+      // Best-effort pop-up permission (won't loop / won't scold).
+      try { await requestNotificationPermission() } catch { /* ignore */ }
+    } finally {
+      setNotifyBusy(false)
+    }
+  }
+
   const hour = new Date().getHours()
   const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'
+  const todaysTip = tipOfTheDay()  // rotates daily at 2 AM Eastern
   const counterRow: React.CSSProperties = {
     display: 'grid',
     gridTemplateColumns: isMobile ? 'repeat(3, 1fr)' : 'repeat(3, 1fr)',
-    gap: isMobile ? '8px' : '16px',
-    marginBottom: isMobile ? '20px' : '32px',
+    gap: isMobile ? '12px' : '20px',
+    marginBottom: isMobile ? '28px' : '40px',
   }
   const counterCard: React.CSSProperties = {
-    background: 'white',
-    padding: isMobile ? '12px' : '20px',
-    borderRadius: '12px',
-    boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
+    // Subtle top-down sheen on a near-white card — keeps it from reading flat.
+    background: 'linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%)',
+    padding: isMobile ? '16px 12px' : '24px',
+    borderRadius: '14px',
+    border: '1px solid #eef1f5',
+    // Layered shadow: a tight contact shadow + a soft wide ambient one = depth.
+    boxShadow: '0 1px 2px rgba(15,23,42,0.05), 0 10px 30px -8px rgba(15,23,42,0.10)',
     textAlign: 'center',
+    transition: 'transform 0.25s cubic-bezier(0.22,1,0.36,1), box-shadow 0.25s cubic-bezier(0.22,1,0.36,1), border-color 0.2s',
   }
   const counterValue: React.CSSProperties = { fontSize: isMobile ? '24px' : '32px', fontWeight: 700, color: ORANGE, lineHeight: 1.1 }
   const counterLabel: React.CSSProperties = { color: '#64748b', fontSize: isMobile ? '11px' : '13px', marginTop: '4px' }
 
   return (
-    <div style={{ padding: isMobile ? '16px' : '32px', maxWidth: '1100px', margin: '0 auto' }}>
-      <div style={{ marginBottom: isMobile ? '20px' : '28px' }}>
+    <div style={{ padding: isMobile ? '20px' : '40px', maxWidth: '1100px', margin: '0 auto' }}>
+      <div className="bp-rise" style={{ marginBottom: isMobile ? '26px' : '36px', animationDelay: '0.02s' }}>
         <h1 style={{ fontSize: isMobile ? '22px' : '28px', fontWeight: 800, margin: '0 0 4px', color: NAVY, letterSpacing: '-0.5px' }}>
           {greeting}{userName ? `, ${userName}` : ''}.
         </h1>
         <p style={{ margin: 0, color: '#64748b', fontSize: isMobile ? '14px' : '15px' }}>Here's where things stand today.</p>
       </div>
-      <div style={counterRow}>
+
+      {/* Quick actions — Quick Add (voice) + Schedule, as two slim secondary
+          bars. Kept visually QUIET (no heavy gradients) so the orange Quick
+          Quote hero further down stays the single primary anchor on the page. */}
+      <div className="bp-rise" style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: isMobile ? '12px' : '16px', marginBottom: isMobile ? '28px' : '36px', animationDelay: '0.09s' }}>
+        {/* Voice Quick-Add — tap, talk, and it lands on the calendar. */}
+        <button
+          onClick={onQuickAdd}
+          style={{
+            width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            gap: '12px', background: 'white', color: NAVY,
+            border: '1px solid #e8ecf1', borderRadius: '12px', padding: isMobile ? '14px 16px' : '16px 18px',
+            cursor: 'pointer', boxShadow: '0 1px 2px rgba(15,23,42,0.04), 0 8px 24px rgba(15,23,42,0.06)',
+            transition: 'transform 0.1s, border-color 0.1s',
+          }}
+          onMouseOver={e => { e.currentTarget.style.borderColor = ORANGE; e.currentTarget.style.transform = 'translateY(-1px)' }}
+          onMouseOut={e => { e.currentTarget.style.borderColor = '#e8ecf1'; e.currentTarget.style.transform = 'translateY(0)' }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', textAlign: 'left' }}>
+            <span style={{ fontSize: isMobile ? '24px' : '28px' }}>🎙️</span>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: isMobile ? '15px' : '16px', color: NAVY }}>Quick Add — just say it</div>
+              <div style={{ fontSize: isMobile ? '12px' : '13px', color: '#64748b' }}>Tap & talk to add a job, event, or reminder</div>
+            </div>
+          </div>
+          <span style={{ color: ORANGE, fontWeight: 800, fontSize: '18px' }}>›</span>
+        </button>
+
+        {/* Quick-access schedule box — fast way to open the Schedule view. */}
+        <button
+          onClick={() => onPick('schedule')}
+          style={{
+            width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            gap: '12px', background: 'white', color: NAVY,
+            border: '1px solid #e8ecf1', borderRadius: '12px', padding: isMobile ? '14px 16px' : '16px 18px',
+            cursor: 'pointer', boxShadow: '0 1px 2px rgba(15,23,42,0.04), 0 8px 24px rgba(15,23,42,0.06)',
+            transition: 'transform 0.1s, border-color 0.1s',
+          }}
+          onMouseOver={e => { e.currentTarget.style.borderColor = ORANGE; e.currentTarget.style.transform = 'translateY(-1px)' }}
+          onMouseOut={e => { e.currentTarget.style.borderColor = '#e8ecf1'; e.currentTarget.style.transform = 'translateY(0)' }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', textAlign: 'left' }}>
+            <span style={{ fontSize: isMobile ? '24px' : '28px' }}>📅</span>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: isMobile ? '15px' : '16px', color: NAVY }}>Schedule</div>
+              <div style={{ fontSize: isMobile ? '12px' : '13px', color: '#64748b' }}>See & set your upcoming job dates</div>
+            </div>
+          </div>
+          <span style={{ color: ORANGE, fontWeight: 800, fontSize: '18px' }}>›</span>
+        </button>
+      </div>
+
+      <div className="bp-rise" style={{ ...counterRow, animationDelay: '0.16s' }}>
         <button
           onClick={() => onBox('projects', 'in_progress')}
-          style={{ ...counterCard, border: '2px solid transparent', cursor: 'pointer' }}
-          onMouseOver={e => { e.currentTarget.style.borderColor = ORANGE }}
-          onMouseOut={e => { e.currentTarget.style.borderColor = 'transparent' }}
+          style={{ ...counterCard, cursor: 'pointer' }}
+          onMouseOver={e => { e.currentTarget.style.borderColor = ORANGE; e.currentTarget.style.transform = 'translateY(-3px)'; e.currentTarget.style.boxShadow = '0 1px 2px rgba(15,23,42,0.05), 0 18px 40px -10px rgba(249,115,22,0.28)' }}
+          onMouseOut={e => { e.currentTarget.style.borderColor = '#eef1f5'; e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = '0 1px 2px rgba(15,23,42,0.05), 0 10px 30px -8px rgba(15,23,42,0.10)' }}
           title="View active jobs"
         >
           <div style={counterValue}>{counts.activeJobs}</div>
@@ -197,9 +487,9 @@ function DashboardHome({ counts, onPick, onBox, onPhotos, userName }: { counts: 
         </button>
         <button
           onClick={() => onPick('estimates')}
-          style={{ ...counterCard, border: '2px solid transparent', cursor: 'pointer' }}
-          onMouseOver={e => { e.currentTarget.style.borderColor = ORANGE }}
-          onMouseOut={e => { e.currentTarget.style.borderColor = 'transparent' }}
+          style={{ ...counterCard, cursor: 'pointer' }}
+          onMouseOver={e => { e.currentTarget.style.borderColor = ORANGE; e.currentTarget.style.transform = 'translateY(-3px)'; e.currentTarget.style.boxShadow = '0 1px 2px rgba(15,23,42,0.05), 0 18px 40px -10px rgba(249,115,22,0.28)' }}
+          onMouseOut={e => { e.currentTarget.style.borderColor = '#eef1f5'; e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = '0 1px 2px rgba(15,23,42,0.05), 0 10px 30px -8px rgba(15,23,42,0.10)' }}
           title="View pending estimates"
         >
           <div style={counterValue}>{counts.pendingEstimates}</div>
@@ -207,9 +497,9 @@ function DashboardHome({ counts, onPick, onBox, onPhotos, userName }: { counts: 
         </button>
         <button
           onClick={() => onPick('customers')}
-          style={{ ...counterCard, border: '2px solid transparent', cursor: 'pointer' }}
-          onMouseOver={e => { e.currentTarget.style.borderColor = ORANGE }}
-          onMouseOut={e => { e.currentTarget.style.borderColor = 'transparent' }}
+          style={{ ...counterCard, cursor: 'pointer' }}
+          onMouseOver={e => { e.currentTarget.style.borderColor = ORANGE; e.currentTarget.style.transform = 'translateY(-3px)'; e.currentTarget.style.boxShadow = '0 1px 2px rgba(15,23,42,0.05), 0 18px 40px -10px rgba(249,115,22,0.28)' }}
+          onMouseOut={e => { e.currentTarget.style.borderColor = '#eef1f5'; e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = '0 1px 2px rgba(15,23,42,0.05), 0 10px 30px -8px rgba(15,23,42,0.10)' }}
           title="View customers"
         >
           <div style={counterValue}>{counts.customers}</div>
@@ -217,76 +507,203 @@ function DashboardHome({ counts, onPick, onBox, onPhotos, userName }: { counts: 
         </button>
       </div>
 
-      {/* Needs attention — overdue invoices + stale estimates so nothing slips */}
-      {counts.attention.length > 0 && (
-        <div style={{ background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: '12px', padding: isMobile ? '14px' : '18px', marginBottom: isMobile ? '20px' : '28px' }}>
-          <h2 style={{ fontSize: isMobile ? '14px' : '15px', fontWeight: 800, margin: '0 0 10px', color: '#92400e', textTransform: 'uppercase', letterSpacing: '0.5px' }}>⚠️ Needs your attention ({counts.attention.length})</h2>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            {counts.attention.map(a => (
-              <button key={a.id} onClick={() => onPick(a.kind === 'stale_estimate' ? 'estimates' : a.kind === 'starting_soon' ? 'schedule' : 'projects')} style={{ textAlign: 'left', background: 'white', border: '1px solid #fde68a', borderRadius: '8px', padding: '10px 12px', cursor: 'pointer', fontSize: '13px', color: '#1a1f2e', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span>{a.kind === 'overdue_invoice' ? '💸' : a.kind === 'starting_soon' ? '📅' : '⏳'}</span>
-                <span style={{ flex: 1 }}>{a.label}</span>
-                <span style={{ color: '#94a3b8' }}>›</span>
-              </button>
-            ))}
+      {/* Needs attention — a unified reminder feed so nothing slips through.
+          Shown whenever there are to-dos, OR (when empty) as a one-time prompt
+          to turn on browser reminders. Tapped items are filtered out for the day. */}
+      {(() => {
+      const visibleAttention = counts.attention.filter(a => !dismissed.has(a.id))
+      return (visibleAttention.length > 0 || !alertsOn) && (
+        <div style={{ background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: '12px', padding: isMobile ? '16px' : '20px', marginBottom: isMobile ? '28px' : '40px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', marginBottom: tableCollapsed ? 0 : '10px', flexWrap: 'wrap' }}>
+            <button onClick={toggleTableCollapsed} title={tableCollapsed ? 'Show reminders' : 'Hide reminders'} style={{ background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span style={{ color: '#92400e', fontSize: '12px', transform: tableCollapsed ? 'rotate(-90deg)' : 'none', transition: 'transform 0.15s', display: 'inline-block' }}>▾</span>
+              <h2 style={{ fontSize: isMobile ? '14px' : '15px', fontWeight: 800, margin: 0, color: '#92400e', textTransform: 'uppercase', letterSpacing: '0.5px' }}>🔔 Reminders &amp; to-dos{visibleAttention.length > 0 ? ` (${visibleAttention.length})` : ''}</h2>
+            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              {/* A single, ALWAYS-available ON/OFF toggle. Alerts (sound+vibration)
+                  don't need browser permission, so the user can always turn them
+                  on or off here. First tap also quietly asks for pop-up permission. */}
+              {!alertsOn ? (
+                <button
+                  onClick={enableReminders}
+                  disabled={notifyBusy}
+                  style={{ background: notifyBusy ? '#cbd5e1' : '#92400e', color: 'white', border: 'none', borderRadius: '8px', padding: '6px 12px', cursor: notifyBusy ? 'default' : 'pointer', fontSize: '12px', fontWeight: 700, whiteSpace: 'nowrap' }}
+                >{notifyBusy ? '…' : '🔕 Alerts OFF — tap to turn on'}</button>
+              ) : (
+                <button
+                  onClick={toggleAlerts}
+                  title="Alerts on — sound & vibration. Tap to turn OFF."
+                  style={{ background: '#16a34a', color: 'white', border: 'none', borderRadius: '8px', padding: '6px 12px', cursor: 'pointer', fontSize: '12px', fontWeight: 700, whiteSpace: 'nowrap' }}
+                >🔔 Alerts ON — tap to turn off</button>
+              )}
+            </div>
           </div>
+
+          {/* Collapsible body */}
+          {!tableCollapsed && (
+            visibleAttention.length === 0 ? (
+              <p style={{ margin: 0, fontSize: '13px', color: '#92400e' }}>You're all caught up — nothing needs attention right now. Turn on reminders and we'll alert you about upcoming jobs, overdue payments, and anything else while the app is open.</p>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {visibleAttention.map(a => (
+                  // Tap → go to where it's about AND clear it from the list. It
+                  // stays cleared for the day, then returns tomorrow if still due.
+                  <button key={a.id} onClick={() => { dismissReminder(a.id); onPick(a.goto || 'projects') }} style={{ textAlign: 'left', background: 'white', border: '1px solid #fde68a', borderRadius: '8px', padding: '10px 12px', cursor: 'pointer', fontSize: '13px', color: '#1a1f2e', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span>{ATTENTION_ICON[a.kind] || '•'}</span>
+                    <span style={{ flex: 1 }}>{a.label}</span>
+                    <span style={{ color: '#94a3b8' }}>›</span>
+                  </button>
+                ))}
+              </div>
+            )
+          )}
+        </div>
+      )})()}
+
+      {/* Business stats — the scoreboard. "Paid this week" sits next to "Paid this
+          month" so the contractor can see if the money's actually coming in. */}
+      {(counts.revenueThisMonth > 0 || counts.revenueThisWeek > 0 || counts.estimatesWon > 0 || counts.estimatesLost > 0) && (
+        <div style={{ marginBottom: isMobile ? '20px' : '28px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: isMobile ? '8px' : '16px', marginBottom: isMobile ? '8px' : '16px' }}>
+            <div style={{ ...counterCard, textAlign: 'left' }}>
+              <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Paid this week</div>
+              <div style={{ fontSize: isMobile ? '20px' : '26px', fontWeight: 800, color: '#16a34a' }}>${counts.revenueThisWeek.toLocaleString()}</div>
+            </div>
+            <div style={{ ...counterCard, textAlign: 'left' }}>
+              <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Paid this month</div>
+              <div style={{ fontSize: isMobile ? '20px' : '26px', fontWeight: 800, color: '#16a34a' }}>${counts.revenueThisMonth.toLocaleString()}</div>
+            </div>
+            <div style={{ ...counterCard, textAlign: 'left' }}>
+              <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Jobs won</div>
+              <div style={{ fontSize: isMobile ? '20px' : '26px', fontWeight: 800, color: '#1a1f2e' }}>{counts.estimatesWon}<span style={{ fontSize: '13px', color: '#94a3b8', fontWeight: 600 }}> won · {counts.estimatesLost} lost</span></div>
+            </div>
+            <div style={{ ...counterCard, textAlign: 'left' }}>
+              <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Avg job size</div>
+              <div style={{ fontSize: isMobile ? '20px' : '26px', fontWeight: 800, color: '#1a1f2e' }}>${counts.avgJobSize.toLocaleString()}</div>
+            </div>
+          </div>
+
+          {/* Last 4 weeks — bar chart, so a slow week jumps right out. */}
+          {counts.weeklyRevenue.some(w => w.amount > 0) && (() => {
+            const maxW = Math.max(...counts.weeklyRevenue.map(w => w.amount), 1)
+            return (
+              <div style={{ ...counterCard, textAlign: 'left', padding: isMobile ? '14px' : '18px' }}>
+                <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '12px' }}>Money in — last 4 weeks</div>
+                <div style={{ display: 'flex', alignItems: 'flex-end', gap: isMobile ? '10px' : '18px', height: '120px' }}>
+                  {counts.weeklyRevenue.map((w, idx) => {
+                    const isThis = idx === counts.weeklyRevenue.length - 1
+                    const h = Math.max(4, Math.round((w.amount / maxW) * 92))
+                    return (
+                      <div key={idx} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', height: '100%' }}>
+                        <div style={{ fontSize: isMobile ? '11px' : '12px', fontWeight: 700, color: w.amount > 0 ? '#16a34a' : '#cbd5e1', marginBottom: '4px', whiteSpace: 'nowrap' }}>${w.amount.toLocaleString()}</div>
+                        <div title={`$${w.amount.toLocaleString()}`} style={{ width: '100%', maxWidth: '64px', height: `${h}px`, borderRadius: '6px 6px 0 0', background: isThis ? ORANGE : '#86efac', transition: 'height 0.3s' }} />
+                        <div style={{ fontSize: isMobile ? '10px' : '12px', color: isThis ? NAVY : '#94a3b8', fontWeight: isThis ? 700 : 500, marginTop: '6px' }}>{w.label}</div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })()}
         </div>
       )}
 
-      {/* Business stats — the scoreboard */}
-      {(counts.revenueThisMonth > 0 || counts.estimatesWon > 0 || counts.estimatesLost > 0) && (
-        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: isMobile ? '8px' : '16px', marginBottom: isMobile ? '20px' : '28px' }}>
-          <div style={{ ...counterCard, textAlign: 'left' }}>
-            <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Paid this month</div>
-            <div style={{ fontSize: isMobile ? '20px' : '26px', fontWeight: 800, color: '#16a34a' }}>${counts.revenueThisMonth.toLocaleString()}</div>
-          </div>
-          <div style={{ ...counterCard, textAlign: 'left' }}>
-            <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Jobs won</div>
-            <div style={{ fontSize: isMobile ? '20px' : '26px', fontWeight: 800, color: '#1a1f2e' }}>{counts.estimatesWon}<span style={{ fontSize: '13px', color: '#94a3b8', fontWeight: 600 }}> won · {counts.estimatesLost} lost</span></div>
-          </div>
-          <div style={{ ...counterCard, textAlign: 'left' }}>
-            <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Win rate</div>
-            <div style={{ fontSize: isMobile ? '20px' : '26px', fontWeight: 800, color: '#1a1f2e' }}>{counts.estimatesWon + counts.estimatesLost > 0 ? Math.round((counts.estimatesWon / (counts.estimatesWon + counts.estimatesLost)) * 100) : 0}%</div>
-          </div>
-          <div style={{ ...counterCard, textAlign: 'left' }}>
-            <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Avg job size</div>
-            <div style={{ fontSize: isMobile ? '20px' : '26px', fontWeight: 800, color: '#1a1f2e' }}>${counts.avgJobSize.toLocaleString()}</div>
-          </div>
-        </div>
-      )}
-
-      <h2 style={{ fontSize: isMobile ? '16px' : '18px', fontWeight: 700, marginBottom: '12px', color: NAVY, textTransform: 'uppercase', letterSpacing: '1px' }}>What do you want to do?</h2>
-      <div style={{
+      <h2 style={{ fontSize: isMobile ? '16px' : '18px', fontWeight: 700, marginTop: isMobile ? '32px' : '44px', marginBottom: isMobile ? '16px' : '20px', color: NAVY, textTransform: 'uppercase', letterSpacing: '1px' }}>What do you want to do?</h2>
+      {/* Quick Quote is the START of the whole process, so it's a big hero box on
+          the LEFT; the other three actions stack in a column to its RIGHT and
+          together match the hero's height. On mobile everything stacks. */}
+      <div className="bp-rise" style={{
         display: 'grid',
-        gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(3, 1fr)',
+        gridTemplateColumns: isMobile ? '1fr' : '1.15fr 1fr',
         gap: isMobile ? '12px' : '20px',
+        alignItems: 'stretch',
+        animationDelay: '0.23s',
       }}>
-        {[...TILES, { key: 'photo-capture', label: 'Job Photos', icon: '📸', blurb: 'Snap photos on site — saved to the job & thank-you letter' }].map(t => (
-          <button
-            key={t.key}
-            onClick={() => t.key === 'photo-capture' ? onPhotos() : onPick(t.key)}
-            style={{
-              background: 'white',
-              border: '2px solid transparent',
-              borderRadius: '14px',
-              padding: isMobile ? '20px 12px' : '28px 20px',
-              cursor: 'pointer',
-              textAlign: 'left',
-              boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
-              transition: 'transform 0.1s, border-color 0.1s',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '8px',
-              minHeight: isMobile ? '120px' : '140px',
-            }}
-            onMouseOver={e => { e.currentTarget.style.borderColor = ORANGE; e.currentTarget.style.transform = 'translateY(-2px)' }}
-            onMouseOut={e => { e.currentTarget.style.borderColor = 'transparent'; e.currentTarget.style.transform = 'translateY(0)' }}
-          >
-            <div style={{ fontSize: isMobile ? '32px' : '40px', lineHeight: 1 }}>{t.icon}</div>
-            <div style={{ fontWeight: 700, fontSize: isMobile ? '15px' : '17px', color: NAVY }}>{t.label}</div>
-            <div style={{ fontSize: isMobile ? '12px' : '13px', color: '#64748b', lineHeight: 1.3 }}>{t.blurb}</div>
-          </button>
-        ))}
+        {/* LEFT — big Quick Quote hero */}
+        <button
+          onClick={() => onPick('scan-room')}
+          style={{
+            // Richer 3-stop gradient + a faint inner top highlight = more depth
+            // than a flat 2-color fill.
+            background: `linear-gradient(140deg, #fb923c 0%, ${ORANGE} 45%, #ea580c 100%)`,
+            border: 'none', borderRadius: '20px',
+            padding: isMobile ? '24px 20px' : '36px 32px',
+            cursor: 'pointer', textAlign: 'left', color: 'white',
+            boxShadow: '0 10px 30px -6px rgba(249,115,22,0.45), inset 0 1px 0 rgba(255,255,255,0.25)',
+            transition: 'transform 0.3s cubic-bezier(0.22,1,0.36,1), box-shadow 0.3s cubic-bezier(0.22,1,0.36,1)',
+            display: 'flex', flexDirection: 'column', justifyContent: 'center',
+            gap: isMobile ? '8px' : '12px',
+            minHeight: isMobile ? '160px' : '300px',
+          }}
+          onMouseOver={e => { e.currentTarget.style.transform = 'translateY(-4px)'; e.currentTarget.style.boxShadow = '0 22px 50px -8px rgba(249,115,22,0.55), inset 0 1px 0 rgba(255,255,255,0.3)' }}
+          onMouseOut={e => { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = '0 10px 30px -6px rgba(249,115,22,0.45), inset 0 1px 0 rgba(255,255,255,0.25)' }}
+        >
+          <span style={{ display: 'inline-block', background: 'rgba(255,255,255,0.22)', borderRadius: '999px', padding: '4px 12px', fontSize: '11px', fontWeight: 800, letterSpacing: '1px', textTransform: 'uppercase', alignSelf: 'flex-start' }}>Start here</span>
+          <div style={{ fontSize: isMobile ? '48px' : '64px', lineHeight: 1 }}>⚡</div>
+          <div style={{ fontWeight: 800, fontSize: isMobile ? '26px' : '34px', letterSpacing: '-0.5px' }}>Quick Quote</div>
+          <div style={{ fontSize: isMobile ? '14px' : '16px', color: 'rgba(255,255,255,0.9)', lineHeight: 1.4, maxWidth: '320px' }}>
+            Snap photos, talk through the job, and get a full priced estimate in seconds. This is where every job begins.
+          </div>
+          <span style={{ marginTop: '6px', display: 'inline-flex', alignItems: 'center', gap: '8px', background: 'white', color: ORANGE, borderRadius: '10px', padding: isMobile ? '10px 16px' : '12px 20px', fontWeight: 800, fontSize: isMobile ? '14px' : '15px', alignSelf: 'flex-start' }}>
+            Start a quote →
+          </span>
+        </button>
+
+        {/* RIGHT — the other three actions, stacked, sharing the hero's height */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: isMobile ? '12px' : '20px' }}>
+          {[
+            { key: 'projects', label: 'Projects', icon: '🗂️', blurb: 'Quotes, change orders, photos — all in one place' },
+            { key: 'customers', label: 'Customers', icon: '👥', blurb: 'Profiles, photos, history' },
+            { key: 'photo-capture', label: 'Job Photos', icon: '📸', blurb: 'Snap photos on site — saved to the job & thank-you letter' },
+          ].map(t => (
+            <button
+              key={t.key}
+              onClick={() => t.key === 'photo-capture' ? onPhotos() : onPick(t.key)}
+              style={{
+                flex: isMobile ? 'none' : 1,
+                background: 'linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%)',
+                border: '1px solid #eef1f5',
+                borderRadius: '16px',
+                padding: isMobile ? '16px 14px' : '18px 20px',
+                cursor: 'pointer',
+                textAlign: 'left',
+                boxShadow: '0 1px 2px rgba(15,23,42,0.05), 0 10px 30px -8px rgba(15,23,42,0.10)',
+                transition: 'transform 0.25s cubic-bezier(0.22,1,0.36,1), box-shadow 0.25s cubic-bezier(0.22,1,0.36,1), border-color 0.2s',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '14px',
+                minHeight: isMobile ? '0' : '0',
+              }}
+              onMouseOver={e => { e.currentTarget.style.borderColor = ORANGE; e.currentTarget.style.transform = 'translateY(-3px)'; e.currentTarget.style.boxShadow = '0 1px 2px rgba(15,23,42,0.05), 0 18px 40px -10px rgba(249,115,22,0.25)' }}
+              onMouseOut={e => { e.currentTarget.style.borderColor = '#eef1f5'; e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = '0 1px 2px rgba(15,23,42,0.05), 0 10px 30px -8px rgba(15,23,42,0.10)' }}
+            >
+              <div style={{ fontSize: isMobile ? '30px' : '36px', lineHeight: 1, flex: '0 0 auto' }}>{t.icon}</div>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: isMobile ? '15px' : '17px', color: NAVY }}>{t.label}</div>
+                <div style={{ fontSize: isMobile ? '12px' : '13px', color: '#64748b', lineHeight: 1.3 }}>{t.blurb}</div>
+              </div>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Tip of the Day — ambient, lowest-priority content, so it sits at the
+          BOTTOM with a calm light treatment (was a heavy dark bar up top). A
+          fresh piece of contractor wisdom each day; renews at 2 AM Eastern. */}
+      <div style={{
+        background: '#fff7ed', color: NAVY,
+        border: '1px solid #fed7aa',
+        borderRadius: '14px', padding: isMobile ? '16px 18px' : '18px 22px',
+        marginTop: isMobile ? '28px' : '40px', display: 'flex', gap: '14px', alignItems: 'flex-start',
+        borderLeft: `4px solid ${ORANGE}`,
+      }}>
+        <span style={{ fontSize: isMobile ? '22px' : '26px', lineHeight: 1, flex: '0 0 auto' }}>💡</span>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: '11px', fontWeight: 800, letterSpacing: '1.5px', textTransform: 'uppercase', color: '#ea580c', marginBottom: '4px' }}>
+            Tip of the Day · {todaysTip.tag}
+          </div>
+          <p style={{ margin: 0, fontSize: isMobile ? '14px' : '15px', lineHeight: 1.5, color: '#7c2d12' }}>{todaysTip.tip}</p>
+        </div>
       </div>
     </div>
   )
@@ -343,10 +760,14 @@ function Dashboard() {
   const [menuOpen, setMenuOpen] = useState(false)
   // When the dashboard boxes deep-link into Projects, this seeds its status filter.
   const [projectsFilter, setProjectsFilter] = useState<ProjectStatus | 'all'>('all')
-  const counts = useDashboardCounts(user?.id)
+  // Bumped by the live listeners below so the count tiles + reminders feed
+  // recompute whenever the underlying data changes (no page reload needed).
+  const [countsRefresh, setCountsRefresh] = useState(0)
+  const counts = useDashboardCounts(user?.id, countsRefresh)
   const isMobile = useIsMobile()
   const [conversionToast, setConversionToast] = useState<string | null>(null)
   const [photoCaptureOpen, setPhotoCaptureOpen] = useState(false)
+  const [quickAddOpen, setQuickAddOpen] = useState(false)
   const [businessNameBannerDismissed, setBusinessNameBannerDismissed] = useState(false)
   const [showBusinessNameBanner, setShowBusinessNameBanner] = useState(false)
 
@@ -384,11 +805,27 @@ function Dashboard() {
     // toast pops, with no refresh needed. Also covers the initial load.
     const unsub = onSnapshot(
       query(collection(db, 'estimates'), where('createdBy', '==', user.id)),
-      () => runSweep(),
+      () => { runSweep(); setCountsRefresh(k => k + 1) },
       err => console.error('Estimate listener failed:', err),
     )
 
     return () => { cancelled = true; unsub() }
+  }, [user?.id])
+
+  // Keep the dashboard count tiles + reminders feed live: any change to the
+  // contractor's projects, invoices, change orders, or calendar events bumps a
+  // refresh key that re-runs useDashboardCounts. (Estimates are covered by the
+  // sweep listener above.)
+  useEffect(() => {
+    if (!user?.id) return
+    const bump = () => setCountsRefresh(k => k + 1)
+    const unsubs = [
+      onSnapshot(query(collection(db, 'projects'), where('createdBy', '==', user.id)), bump, err => console.error('Projects count listener failed:', err)),
+      onSnapshot(query(collection(db, 'invoices'), where('createdBy', '==', user.id)), bump, err => console.error('Invoices count listener failed:', err)),
+      onSnapshot(query(collection(db, 'changeOrders'), where('createdBy', '==', user.id)), bump, err => console.error('ChangeOrders count listener failed:', err)),
+      onSnapshot(query(collection(db, 'calendarEvents'), where('createdBy', '==', user.id)), bump, err => console.error('Calendar count listener failed:', err)),
+    ]
+    return () => unsubs.forEach(u => u())
   }, [user?.id])
 
   // Notify the contractor when a customer approves/declines a CHANGE ORDER.
@@ -555,8 +992,17 @@ function Dashboard() {
     setMenuOpen(false)
   }
 
+  // Let deep child components (e.g. the Pro-locked thank-you card in Projects)
+  // jump to Settings/billing via a simple document event, without threading a
+  // nav callback through every layer.
+  useEffect(() => {
+    const handler = () => { setPage('settings'); setMenuOpen(false) }
+    document.addEventListener('bp-go-settings', handler)
+    return () => document.removeEventListener('bp-go-settings', handler)
+  }, [])
+
   const navItem = (label: string, icon: string, key: string) => (
-    <a onClick={() => go(key)} style={{
+    <a key={key} onClick={() => go(key)} style={{
       color: page === key ? ORANGE : 'white',
       textDecoration: 'none',
       cursor: 'pointer',
@@ -644,6 +1090,7 @@ function Dashboard() {
         </div>
 
         {photoCaptureOpen && <QuickPhotoCapture onClose={() => setPhotoCaptureOpen(false)} />}
+        {quickAddOpen && <QuickAddVoice onClose={() => setQuickAddOpen(false)} />}
 
         {conversionToast && (
           <div
@@ -658,7 +1105,7 @@ function Dashboard() {
               color: 'white',
               padding: '14px 18px',
               borderRadius: '10px',
-              boxShadow: '0 8px 24px rgba(0,0,0,0.25)',
+              boxShadow: '0 24px 60px rgba(15,23,42,0.18)',
               borderLeft: `4px solid ${ORANGE}`,
               fontSize: '14px',
               fontWeight: 600,
@@ -695,7 +1142,7 @@ function Dashboard() {
                 </div>
               </div>
             )}
-            <DashboardHome counts={counts} onPick={go} onBox={goWithFilter} onPhotos={() => setPhotoCaptureOpen(true)} userName={user?.firstName || undefined} />
+            <DashboardHome counts={counts} onPick={go} onBox={goWithFilter} onPhotos={() => setPhotoCaptureOpen(true)} onQuickAdd={() => setQuickAddOpen(true)} userName={user?.firstName || undefined} />
           </>
         )}
         {page === 'projects' && <Projects key={projectsFilter} initialStatusFilter={projectsFilter} />}
@@ -737,6 +1184,15 @@ function publicThankYouIdFromUrl(): string | null {
   return m ? m[1] : null
 }
 
+// Public legal pages — /terms and /privacy (no sign-in).
+function legalPageFromUrl(): 'terms' | 'privacy' | null {
+  if (typeof window === 'undefined') return null
+  const p = window.location.pathname.replace(/\/$/, '')
+  if (p === '/terms') return 'terms'
+  if (p === '/privacy') return 'privacy'
+  return null
+}
+
 // Match /inv/<id> — public invoice viewer.
 function publicInvoiceIdFromUrl(): string | null {
   if (typeof window === 'undefined') return null
@@ -745,6 +1201,13 @@ function publicInvoiceIdFromUrl(): string | null {
 }
 
 function App() {
+  // Welcome tour for brand-new visitors who tap "Sign Up". Declared before the
+  // early returns below so the hook order stays stable (Rules of Hooks).
+  const [tourOpen, setTourOpen] = useState(false)
+  // Drives the signed-out landing layout (asymmetric 2-col on desktop, single
+  // column on mobile). Must run before the early returns below (Rules of Hooks).
+  const isMobile = useIsMobile()
+
   const publicEstimateId = publicEstimateIdFromUrl()
   if (publicEstimateId) return <PublicEstimate estimateId={publicEstimateId} />
 
@@ -760,33 +1223,95 @@ function App() {
   const publicInvId = publicInvoiceIdFromUrl()
   if (publicInvId) return <PublicInvoice invoiceId={publicInvId} />
 
+  const legal = legalPageFromUrl()
+  if (legal === 'terms') return <TermsPage />
+  if (legal === 'privacy') return <PrivacyPage />
+
   return (
     <div>
       <SignedOut>
         <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', background: `linear-gradient(135deg, ${NAVY} 0%, #0f172a 100%)`, padding: '24px' }}>
-          <div style={{ textAlign: 'center', color: 'white', maxWidth: '480px' }}>
-            <div style={{ width: '72px', height: '72px', background: ORANGE, borderRadius: '16px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: '36px', fontWeight: 800, color: 'white', marginBottom: '20px', boxShadow: '0 8px 24px rgba(249,115,22,0.4)' }}>B</div>
-            <h1 style={{ fontSize: '48px', marginBottom: '8px', lineHeight: 1.1, fontWeight: 800, letterSpacing: '-1px' }}>
-              BuildPro<span style={{ color: ORANGE }}>+</span>
-            </h1>
-            <p style={{ margin: '0 0 8px', color: ORANGE, fontSize: '14px', letterSpacing: '2px', textTransform: 'uppercase', fontWeight: 700 }}>Contractor Suite</p>
-            <p style={{ marginBottom: '36px', color: '#94a3b8', fontSize: '16px', lineHeight: 1.5 }}>Quick instant quotes, customer e-sign, change orders, and photo project tracking — built for working contractors.</p>
-            <SignInButton mode="modal">
-              <button style={{ background: ORANGE, color: 'white', border: 'none', padding: '16px 36px', borderRadius: '10px', fontSize: '16px', cursor: 'pointer', fontWeight: 700, boxShadow: '0 4px 12px rgba(249,115,22,0.3)' }}>
-                Sign In to Get Started →
-              </button>
-            </SignInButton>
-            <div style={{ marginTop: '40px', display: 'flex', justifyContent: 'center', gap: '24px', color: '#64748b', fontSize: '12px', flexWrap: 'wrap' }}>
-              <span>⚡ Quick Quote</span>
-              <span>🗂️ Projects</span>
-              <span>🔄 Change Orders</span>
-              <span>📸 Photo Logs</span>
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: isMobile ? '1fr' : '1.05fr 0.95fr',
+            gap: isMobile ? '32px' : '56px',
+            alignItems: 'center',
+            maxWidth: '960px',
+            width: '100%',
+            color: 'white',
+          }}>
+            {/* LEFT — brand eyebrow, benefit headline, value prop, CTAs, legal */}
+            <div style={{ textAlign: isMobile ? 'center' : 'left' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', justifyContent: isMobile ? 'center' : 'flex-start', marginBottom: '24px' }}>
+                <div style={{ width: '44px', height: '44px', background: ORANGE, borderRadius: '12px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: '24px', fontWeight: 800, color: 'white', boxShadow: '0 8px 24px rgba(249,115,22,0.4)' }}>B</div>
+                <span style={{ color: ORANGE, fontSize: '13px', letterSpacing: '2px', textTransform: 'uppercase', fontWeight: 700 }}>BuildPro+ · Contractor Suite</span>
+              </div>
+
+              <h1 style={{ fontSize: isMobile ? '34px' : '46px', margin: '0 0 16px', lineHeight: 1.08, fontWeight: 800, letterSpacing: '-1px' }}>
+                Quote the job before<br />you leave the driveway.
+              </h1>
+
+              <p style={{ margin: '0 0 32px', color: '#cbd5e1', fontSize: '17px', lineHeight: 1.55, maxWidth: '440px', marginLeft: isMobile ? 'auto' : 0, marginRight: isMobile ? 'auto' : 0 }}>
+                Instant quotes, customer e-sign, change orders, and photo project tracking — built for working contractors.
+              </p>
+
+              {/* New here? "See how it works" walks through a quick tour first, then
+                  creates the account. Already have a login? Sign In goes straight in. */}
+              <div style={{ display: 'flex', gap: '12px', justifyContent: isMobile ? 'center' : 'flex-start', flexWrap: 'wrap' }}>
+                <button onClick={() => setTourOpen(true)} style={{ background: ORANGE, color: 'white', border: 'none', padding: '16px 32px', borderRadius: '10px', fontSize: '16px', cursor: 'pointer', fontWeight: 700, boxShadow: '0 6px 18px rgba(249,115,22,0.35)' }}>
+                  See how it works →
+                </button>
+                <SignInButton mode="modal">
+                  <button style={{ background: 'transparent', color: '#e2e8f0', border: '1.5px solid rgba(255,255,255,0.25)', padding: '16px 28px', borderRadius: '10px', fontSize: '16px', cursor: 'pointer', fontWeight: 600 }}>
+                    Sign In
+                  </button>
+                </SignInButton>
+              </div>
+
+              {/* Agreement notice — by signing up/in, users accept the Terms &
+                  Privacy Policy. This is what creates the binding agreement. */}
+              <p style={{ marginTop: '40px', fontSize: '12px', color: '#94a3b8', lineHeight: 1.5, maxWidth: '420px', marginLeft: isMobile ? 'auto' : 0, marginRight: isMobile ? 'auto' : 0 }}>
+                By creating an account or signing in, you agree to our{' '}
+                <a href="/terms" style={{ color: ORANGE, textDecoration: 'underline' }}>Terms of Service</a>{' '}and{' '}
+                <a href="/privacy" style={{ color: ORANGE, textDecoration: 'underline' }}>Privacy Policy</a>.
+              </p>
             </div>
-            <p style={{ marginTop: '32px', fontSize: '11px', color: '#475569' }}>
-              📱 Tip: Add this app to your home screen for one-tap access — Safari Share → Add to Home Screen, or Chrome menu → Install app.
-            </p>
+
+            {/* RIGHT — value-prop card. Balances the copy column (asymmetric
+                balance) and gives the eye a clear figure to land on. */}
+            <div style={{
+              background: 'rgba(255,255,255,0.04)',
+              border: '1px solid rgba(255,255,255,0.10)',
+              borderRadius: '20px',
+              padding: '28px',
+              boxShadow: '0 24px 60px rgba(0,0,0,0.25)',
+              backdropFilter: 'blur(4px)',
+            }}>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', background: 'rgba(249,115,22,0.15)', color: ORANGE, borderRadius: '999px', padding: '6px 14px', fontSize: '12px', fontWeight: 800, letterSpacing: '0.5px', textTransform: 'uppercase' }}>
+                ⚡ Quick Quote
+              </div>
+              <p style={{ margin: '16px 0 20px', fontSize: '18px', lineHeight: 1.4, fontWeight: 700, color: 'white' }}>
+                Snap photos, talk through the job, and get a full priced estimate in seconds.
+              </p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                {[
+                  { icon: '✍️', text: 'Customer e-sign on every estimate' },
+                  { icon: '🔄', text: 'Change orders that update the contract total' },
+                  { icon: '📸', text: 'Photo logs sent with the thank-you' },
+                ].map(f => (
+                  <div key={f.text} style={{ display: 'flex', alignItems: 'center', gap: '12px', color: '#e2e8f0', fontSize: '14px' }}>
+                    <span style={{ fontSize: '18px', flex: '0 0 auto' }}>{f.icon}</span>
+                    <span>{f.text}</span>
+                  </div>
+                ))}
+              </div>
+              <p style={{ margin: '24px 0 0', fontSize: '11px', color: '#94a3b8', lineHeight: 1.5 }}>
+                📱 Add to your home screen for one-tap access — Safari Share → Add to Home Screen, or Chrome menu → Install app.
+              </p>
+            </div>
           </div>
         </div>
+        {tourOpen && <WelcomeTour onClose={() => setTourOpen(false)} />}
       </SignedOut>
       <SignedIn>
         <FirebaseGate />

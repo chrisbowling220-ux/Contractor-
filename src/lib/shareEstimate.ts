@@ -48,7 +48,7 @@ export function shareLinkFor(estimateId: string): string {
 export function smsHref(estimate: Estimate, fromName?: string): string {
   const link = shareLinkFor(estimate.id)
   // Short, link-first body. Stays under 160 chars to fit a single SMS segment.
-  const body = `${link}\n\nYour estimate from ${fromName || 'your contractor'} for ${estimate.customerName}.`
+  const body = `${link}\n\nYour proposal from ${fromName || 'your contractor'} for ${estimate.customerName}.`
   const encoded = encodeURIComponent(body)
   if (typeof navigator !== 'undefined' && /iPhone|iPad|iPod/i.test(navigator.userAgent)) {
     return `sms:&body=${encoded}`
@@ -61,10 +61,10 @@ export function smsHref(estimate: Estimate, fromName?: string): string {
 // laptop, desktop. Customer types in the recipient address themselves.
 export function mailtoHref(estimate: Estimate, fromName?: string): string {
   const link = shareLinkFor(estimate.id)
-  const subject = `Your estimate for ${estimate.jobTypeName}`
+  const subject = `Your proposal for ${estimate.jobTypeName}`
   const body = `Hi ${estimate.customerName},
 
-Here's your estimate from ${fromName || 'your contractor'}:
+Here's your proposal from ${fromName || 'your contractor'}:
 
 ${link}
 
@@ -131,10 +131,10 @@ export async function nativeShare(estimate: Estimate, fromName?: string): Promis
   if (typeof navigator === 'undefined' || !navigator.share) return false
   const link = shareLinkFor(estimate.id)
   // Link first, short context after. Survives SMS truncation.
-  const text = `${link}\n\nYour estimate from ${fromName || 'your contractor'} for ${estimate.customerName}.`
+  const text = `${link}\n\nYour proposal from ${fromName || 'your contractor'} for ${estimate.customerName}.`
   try {
     await navigator.share({
-      title: `Estimate for ${estimate.customerName}`,
+      title: `Proposal for ${estimate.customerName}`,
       text,
       // Keeping `url` too lets apps that support rich previews (WhatsApp, Mail)
       // pick it up cleanly; messaging apps that strip it still get the text body.

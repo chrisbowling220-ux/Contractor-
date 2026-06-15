@@ -1,0 +1,17 @@
+# BuildPro+ (builderspro.cc)
+# Only the public marketing + legal pages should be indexed by search engines.
+#
+# Customer document links — signed estimates (/q/), change orders (/co/),
+# invoices (/inv/), thank-you pages (/thanks/), and photo logs (/log/) — must
+# NEVER be indexed. They contain private customer and job data and are shared
+# by direct link only. Disallowing them keeps them out of Google.
+
+User-agent: *
+Allow: /
+Disallow: /q/
+Disallow: /co/
+Disallow: /inv/
+Disallow: /thanks/
+Disallow: /log/
+
+Sitemap: https://builderspro.cc/sitemap.xml

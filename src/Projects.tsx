@@ -18,6 +18,7 @@ import type { Invoice } from './data/types'
 import EstimatePreview from './EstimatePreview'
 import { openEstimatePrintWindow } from './lib/printEstimate'
 import { PUBLIC_HOST } from './lib/config'
+import { useTier } from './lib/useTier'
 import { fetchBusinessProfile } from './Settings'
 import type { BusinessProfile } from './Settings'
 import type { ThankYouPackage } from './data/types'
@@ -38,6 +39,7 @@ const STATUS_COLOR: Record<ProjectStatus, { bg: string; text: string }> = {
 export default function Projects({ initialStatusFilter }: { initialStatusFilter?: ProjectStatus | 'all' } = {}) {
   const { user } = useUser()
   const { getToken } = useAuth()
+  const { tier } = useTier()  // 'pro' unlocks the thank-you letter feature
   const [projects, setProjects] = useState<Project[]>([])
   const [customers, setCustomers] = useState<Customer[]>([])
   const [estimates, setEstimates] = useState<Estimate[]>([])
@@ -402,6 +404,14 @@ export default function Projects({ initialStatusFilter }: { initialStatusFilter?
   }
 
   const deleteChangeOrder = async (co: ChangeOrder) => {
+    // 2-YEAR LEGAL RETENTION: a signed change order is locked as proof.
+    if (co.signedAtMs) {
+      const until = new Date(co.signedAtMs + 63072000000)
+      if (Date.now() < until.getTime()) {
+        alert(`🔒 This change order is signed by ${co.customerResponse?.signedName || co.customerName} and is protected as a legal record. It can't be deleted until ${until.toLocaleDateString()} (2 years after signing).`)
+        return
+      }
+    }
     if (!confirm(`Delete this change order? This cannot be undone.`)) return
     try {
       await deleteDoc(doc(db, 'changeOrders', co.id))
@@ -495,7 +505,7 @@ ${link}
 
   const input: React.CSSProperties = { padding: '10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '14px', boxSizing: 'border-box', width: '100%' }
   const label: React.CSSProperties = { display: 'block', fontSize: '12px', fontWeight: 600, color: '#64748b', marginBottom: '4px' }
-  const card: React.CSSProperties = { background: 'white', padding: '20px', borderRadius: '12px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', marginBottom: '16px' }
+  const card: React.CSSProperties = { background: 'white', padding: '20px', borderRadius: '12px', boxShadow: '0 1px 2px rgba(15,23,42,0.04), 0 8px 24px rgba(15,23,42,0.06)', marginBottom: '16px' }
 
   if (activeProject && activeAgg) {
     const sc = STATUS_COLOR[activeProject.status]
@@ -536,17 +546,12 @@ ${link}
               <span style={{ background: sc.bg, color: sc.text, padding: '6px 14px', borderRadius: '999px', fontSize: '12px', fontWeight: 700, textTransform: 'uppercase' }}>{PROJECT_STATUS_LABEL[activeProject.status]}</span>
               {/* Status now advances automatically:
                   lead → in_progress  on customer approval (no button)
-                  in_progress → completed  via the one button below
+                  in_progress → completed  via the prominent banner below the header
                   completed → closed  automatically when the invoice is paid */}
               {(activeProject.status === 'lead' || activeProject.status === 'estimated' || activeProject.status === 'contracted') && (
                 <p style={{ marginTop: '10px', fontSize: '11px', color: '#94a3b8', maxWidth: '180px' }}>
                   ⏳ Auto-advances to <strong>In Progress</strong> when the customer approves the estimate.
                 </p>
-              )}
-              {activeProject.status === 'in_progress' && (
-                <button onClick={() => markComplete(activeProject)} style={{ display: 'block', marginTop: '12px', background: '#16a34a', color: 'white', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 700, fontSize: '13px' }}>
-                  ✓ Mark Job Complete
-                </button>
               )}
               {activeProject.status === 'completed' && (
                 <>
@@ -572,6 +577,25 @@ ${link}
             ))}
           </div>
         </div>
+
+        {/* PROMINENT completion call-to-action — the one manual milestone. Shown
+            big and full-width so contractors don't miss that they must mark the
+            job complete to unlock the final stages (thank-you + final invoice). */}
+        {activeProject.status === 'in_progress' && (
+          <div style={{ background: 'linear-gradient(135deg, #16a34a 0%, #15803d 100%)', color: 'white', borderRadius: '12px', padding: 'clamp(16px, 4vw, 22px)', marginBottom: '16px', boxShadow: '0 8px 24px rgba(22,163,74,0.28)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '16px', flexWrap: 'wrap', justifyContent: 'space-between' }}>
+              <div style={{ flex: '1 1 280px' }}>
+                <p style={{ margin: 0, fontSize: '17px', fontWeight: 800 }}>🏗️ Job In Progress</p>
+                <p style={{ margin: '6px 0 0', fontSize: '14px', lineHeight: 1.5, color: '#dcfce7' }}>
+                  Work finished? <strong>Mark it complete</strong> to unlock the customer <strong>Thank-You letter</strong> and the <strong>Final Invoice</strong> — the last steps of the job.
+                </p>
+              </div>
+              <button onClick={() => markComplete(activeProject)} style={{ flex: '0 0 auto', background: 'white', color: '#15803d', border: 'none', padding: '16px 28px', borderRadius: '10px', cursor: 'pointer', fontWeight: 800, fontSize: '16px', boxShadow: '0 2px 8px rgba(0,0,0,0.18)', whiteSpace: 'nowrap' }}>
+                ✓ Mark Job Complete
+              </button>
+            </div>
+          </div>
+        )}
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px', marginBottom: '16px' }}>
           <div style={card}><p style={{ color: '#64748b', fontSize: '12px' }}>Contract Total</p><p style={{ fontSize: '22px', fontWeight: 700, color: '#f97316' }}>${activeAgg.contractTotal.toFixed(2)}</p></div>
@@ -715,12 +739,26 @@ ${link}
                   💳 Invoice paid — now's the perfect time to send {activeProject.customerName.split(' ')[0]} a thank-you with photos from the job.
                 </div>
               )}
-              <h3 style={{ margin: '0 0 4px', fontSize: '16px' }}>🎁 Customer Thank-You Package</h3>
+              <h3 style={{ margin: '0 0 4px', fontSize: '16px' }}>🎁 Customer Thank-You Package <span style={{ fontSize: '11px', fontWeight: 800, color: '#7c3aed', background: '#f3e8ff', padding: '2px 8px', borderRadius: '999px', verticalAlign: 'middle' }}>PRO</span></h3>
               <p style={{ margin: '0 0 12px', fontSize: '13px', color: '#64748b' }}>
                 A warm, professionally written thank-you letter (with photos you choose from the whole job) — shareable via SMS, email, or a copy link. Customer can save it as a PDF.
               </p>
 
-              {!thankYouPanelOpen ? (
+              {tier !== 'pro' ? (
+                // Pro-locked: the thank-you letter is a paid perk. Show an
+                // upgrade prompt instead of the build button for free users.
+                <div style={{ background: 'white', border: '1px solid #e9d5ff', borderRadius: '8px', padding: '14px' }}>
+                  <p style={{ margin: '0 0 10px', fontSize: '13px', color: '#1a1f2e' }}>
+                    ✨ Sending a personalized thank-you with job photos is a <strong>BuildPro+ Pro</strong> feature — a memorable touch that wins repeat business and referrals.
+                  </p>
+                  <button
+                    onClick={() => document.dispatchEvent(new CustomEvent('bp-go-settings'))}
+                    style={{ background: '#7c3aed', color: 'white', border: 'none', padding: '10px 18px', borderRadius: '6px', cursor: 'pointer', fontWeight: 700, fontSize: '14px', boxShadow: '0 2px 8px rgba(124,58,237,0.25)' }}
+                  >
+                    ⚡ Upgrade to Pro to unlock
+                  </button>
+                </div>
+              ) : !thankYouPanelOpen ? (
                 <button
                   onClick={() => openThankYouPanel(activeProject)}
                   style={{ background: '#f97316', color: 'white', border: 'none', padding: '10px 18px', borderRadius: '6px', cursor: 'pointer', fontWeight: 700, fontSize: '14px', boxShadow: '0 2px 8px rgba(249,115,22,0.25)' }}
@@ -1012,6 +1050,7 @@ ${link}
               setEstimatePreview(updated)
             }}
             onPrint={(est) => openEstimatePrintWindow(est, profile)}
+            businessName={profile.businessName}
           />
         )}
       </div>
@@ -1139,7 +1178,7 @@ ${link}
           const agg = aggregateForProject(p)
           const sc = STATUS_COLOR[p.status]
           return (
-            <div key={p.id} onClick={() => setActiveId(p.id)} style={{ background: 'white', padding: '20px', borderRadius: '12px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', cursor: 'pointer', borderLeft: `4px solid ${sc.text}` }}>
+            <div key={p.id} onClick={() => setActiveId(p.id)} style={{ background: 'white', padding: '20px', borderRadius: '12px', boxShadow: '0 1px 2px rgba(15,23,42,0.04), 0 8px 24px rgba(15,23,42,0.06)', cursor: 'pointer', borderLeft: `4px solid ${sc.text}` }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
                 <div>
                   <h3 style={{ fontWeight: 700, fontSize: '16px' }}>{p.customerName}</h3>

@@ -90,6 +90,22 @@ export function openEstimatePrintWindow(e: Estimate, profileOrName?: string | Pr
     ${e.jobLocationZip ? `<strong>Location:</strong> ZIP ${esc(e.jobLocationZip)}<br/>` : ''}
     <strong>Date:</strong> ${esc(new Date(e.createdAt).toLocaleDateString())}</p>
 
+    ${e.proposal ? `
+      <div style="border:1px solid #e2e8f0;border-radius:8px;padding:16px 18px;margin:0 0 20px;line-height:1.6;">
+        <p style="margin:0 0 10px;font-weight:600;">${esc(e.proposal.greeting)}</p>
+        <p style="margin:0 0 12px;">${esc(e.proposal.intro)}</p>
+        <h2 style="margin:14px 0 4px;">Our Approach</h2>
+        <p style="margin:0 0 12px;">${esc(e.proposal.approach)}</p>
+        <pre style="white-space:pre-wrap;font-family:inherit;background:transparent;padding:0;margin:0 0 12px;">${esc(e.proposal.included)}</pre>
+        <pre style="white-space:pre-wrap;font-family:inherit;background:transparent;padding:0;margin:0 0 12px;color:#475569;">${esc(e.proposal.not_included)}</pre>
+        <h2 style="margin:14px 0 4px;">Timeline</h2>
+        <p style="margin:0 0 12px;">${esc(e.proposal.timeline)}</p>
+        <h2 style="margin:14px 0 4px;">Our Guarantee</h2>
+        <p style="margin:0 0 12px;">${esc(e.proposal.warranty)}</p>
+        <pre style="white-space:pre-wrap;font-family:inherit;background:transparent;padding:0;margin:8px 0 0;font-weight:600;">${esc(e.proposal.closing)}</pre>
+      </div>
+    ` : ''}
+
     <p style="background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;padding:10px 12px;font-size:12px;color:#92400e;line-height:1.5;">This is a <strong>rough estimate</strong>, not a guaranteed price. Final cost may change based on actual site conditions, material prices, and any changes to the scope of work.</p>
 
     ${ai ? `

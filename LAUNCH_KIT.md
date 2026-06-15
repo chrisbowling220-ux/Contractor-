@@ -1,11 +1,13 @@
 # BuildPro+ Launch Kit
 
-Your app: **https://contractors-office-96731.web.app**
-(Swap in your real domain here once you buy it.)
+Your app: **https://builderspro.cc** (live, branded domain — use this everywhere)
+
+**The hook:** **10 free quotes, no card needed** — lead with it everywhere.
 
 Golden rule for all of these: **lead with the time saved and the "look professional"
 angle, not the tech.** Contractors don't care that it's AI — they care that it
-saves them 2 hours a night and wins them jobs.
+saves them 2 hours a night and wins them jobs. The "10 free, no card" offer is what
+gets them to tap the link; the time-saved story is what makes them stay.
 
 ---
 
@@ -21,7 +23,7 @@ saves them 2 hours a night and wins them jobs.
 > with job photos at the end.
 >
 > I'm a contractor too and got sick of spending my nights writing quotes. It's
-> free to try (5 quotes, no card needed). If you want in, comment "ME" or shoot
+> free to try (10 quotes, no card needed). If you want in, comment "ME" or shoot
 > me a message and I'll send the link.
 >
 > Not trying to spam the group — genuinely want honest feedback from people who
@@ -48,8 +50,8 @@ over coffee) or after 6pm.
 Built BY a contractor, FOR contractors.
 Stop losing your nights writing estimates.
 
-  TRY IT FREE — 5 quotes, no card needed:
-  contractors-office-96731.web.app
+  TRY IT FREE — 10 quotes, no card needed:
+  builderspro.cc
 
   Questions? [your phone or email]
 ─────────────────────────────────────────
@@ -111,19 +113,40 @@ happy ones become fifty.
 
 ## 5. Honest pre-launch checklist
 
-- [ ] Refund yourself the $1 test charge (Stripe → Payments → Refund)
-- [ ] Tell early users to share quotes by TEXT or copy-link (email only reaches
-      you until a real domain is verified in Resend)
-- [ ] Buy usebuildpro.com (~$10 at Cloudflare) before any big push — pro links +
-      working email matter once strangers are involved
+- [ ] **#1 MOST IMPORTANT — turn ON Anthropic auto-reload** (console.anthropic.com
+      → Billing). If credits hit $0, EVERY quote fails for EVERY user. A failed
+      first quote = a lost user forever. Do this before any post.
+- [ ] **Claim builderspro.cc in Google Search Console** (search.google.com/search-console)
+      and submit the sitemap — robots.txt + sitemap.xml are already live.
+- [x] Branded domain live: **builderspro.cc** ✅
+- [x] Branded email live (alerts@builderspro.cc — verified in Resend) ✅
+- [x] Terms of Service + Privacy Policy live, w/ arbitration + class-waiver (builderspro.cc/terms, /privacy) ✅
+- [x] Card payouts (Stripe Connect) + monthly, 3-month & yearly plans + $1 packs live ✅
+- [x] 10 free quotes (no card) for every new user ✅
 - [ ] Roll out SLOW — a few users at a time so a bug doesn't hit a crowd
+- [ ] Watch real strangers use it BEFORE spending on ads — fix what confuses them
 - [ ] Have your phone/email on the flyer so interested people can reach you
 
 ---
 
-## 6. What to charge (when you're ready)
+## 6. What to charge
 
-You're set up at **$19.99/mo Pro** (unlimited) with **5 free generations** to try.
-That's a solid spot for contractors — less than one hour of their labor pays for
-a month. Don't undercharge: a tool that saves 10 hours/month is easily worth $20.
-Consider an annual option later (~$199/yr) for commitment + cash flow.
+Set up and live:
+- **Free:** 10 instant quotes to try (no card) — your top-of-funnel hook
+- **Pro — $19.99/mo:** unlimited quotes + thank-you letters
+- **3 months — $49.99** (~$16.66/mo, saves ~17%) — for people who'd rather pay up front
+- **Yearly — $159.99** (~$13.33/mo, best value, saves ~33%) — commitment + cash flow
+- **Pay-as-you-go — $1 per quote** (buy 1–10) for the no-subscription crowd
+
+That's a solid spread — less than one hour of a contractor's labor pays for a
+month. Don't undercharge: a tool that saves 10 hours/month is easily worth $20.
+Push the **yearly** plan to your most committed early users — it locks them in and
+gives you cash up front (there are 5 promo codes for 20% off the yearly plan).
+
+---
+
+## 7. Ready-to-paste posts → see POSTS.md
+
+All the actual copy-paste posts (Facebook group versions, Reddit, the DM
+template, the flyer, the video script, and the exact order to do it in) are in
+**POSTS.md**. Strategy lives here; the posts live there.

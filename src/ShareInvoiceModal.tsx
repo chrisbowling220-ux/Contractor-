@@ -1,5 +1,7 @@
 import { useState } from 'react'
+import { useAuth } from '@clerk/clerk-react'
 import { isPhone } from './lib/shareEstimate'
+import { sendInvoiceByEmail } from './lib/shareInvoice'
 import type { Invoice } from './data/types'
 
 import { PUBLIC_HOST } from './lib/config'
@@ -36,8 +38,29 @@ Due by: ${new Date(inv.dueDate).toLocaleDateString()}
 }
 
 export default function ShareInvoiceModal({ invoice, fromName, onClose }: Props) {
+  const { getToken } = useAuth()
   const [linkCopied, setLinkCopied] = useState(false)
+  const [emailTo, setEmailTo] = useState(invoice.customerEmail || '')
+  const [sendState, setSendState] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle')
+  const [sendError, setSendError] = useState('')
   const link = `${PUBLIC_HOST}/inv/${invoice.id}`
+
+  const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailTo.trim())
+
+  const handleSendEmail = async () => {
+    if (!emailValid || sendState === 'sending') return
+    setSendState('sending'); setSendError('')
+    try {
+      const clerkToken = await getToken()
+      if (!clerkToken) throw new Error('Not signed in')
+      await sendInvoiceByEmail({ clerkToken, invoice, to: emailTo.trim(), fromName })
+      setSendState('sent')
+    } catch (err) {
+      console.error('sendInvoiceByEmail failed', err)
+      setSendError(err instanceof Error ? err.message : 'Could not send. Try the link options below.')
+      setSendState('error')
+    }
+  }
 
   const handleCopy = async () => {
     try {
@@ -65,7 +88,7 @@ export default function ShareInvoiceModal({ invoice, fromName, onClose }: Props)
 
   return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.65)', zIndex: 300, padding: '16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <div onClick={e => e.stopPropagation()} style={{ maxWidth: '480px', width: '100%', background: 'white', borderRadius: '12px', overflow: 'hidden', boxShadow: '0 12px 40px rgba(0,0,0,0.3)' }}>
+      <div onClick={e => e.stopPropagation()} style={{ maxWidth: '480px', width: '100%', background: 'white', borderRadius: '12px', overflow: 'hidden', boxShadow: '0 24px 60px rgba(15,23,42,0.18)' }}>
         <div style={{ background: 'linear-gradient(135deg, #1a1f2e 0%, #0f172a 100%)', color: 'white', padding: '16px 20px', position: 'sticky', top: 0, zIndex: 10 }}>
           <button onClick={onClose} style={{ background: '#f97316', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, fontSize: '14px', marginBottom: '10px' }}>
             ← Back to Project
@@ -80,6 +103,42 @@ export default function ShareInvoiceModal({ invoice, fromName, onClose }: Props)
             {link}
           </div>
 
+          {/* Send it for them — a real branded email with the secure pay link,
+              delivered from BuildPro+ on the contractor's behalf. */}
+          <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: '10px', padding: '14px', marginBottom: '16px' }}>
+            <p style={{ margin: '0 0 8px', fontWeight: 700, fontSize: '14px', color: '#9a3412' }}>📧 Email it to your customer</p>
+            {sendState === 'sent' ? (
+              <p style={{ margin: 0, fontSize: '14px', color: '#15803d', fontWeight: 600 }}>
+                ✓ Sent to {emailTo.trim()} — they'll get the invoice with a pay link.
+              </p>
+            ) : (
+              <>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                  <input
+                    type="email"
+                    value={emailTo}
+                    onChange={e => { setEmailTo(e.target.value); if (sendState === 'error') setSendState('idle') }}
+                    placeholder="customer@email.com"
+                    style={{ flex: '1 1 180px', minWidth: 0, padding: '11px 12px', border: '1px solid #cbd5e1', borderRadius: '8px', fontSize: '14px' }}
+                  />
+                  <button
+                    onClick={handleSendEmail}
+                    disabled={!emailValid || sendState === 'sending'}
+                    style={{ flex: '0 0 auto', background: emailValid && sendState !== 'sending' ? '#f97316' : '#fdba74', color: 'white', border: 'none', padding: '11px 18px', borderRadius: '8px', cursor: emailValid && sendState !== 'sending' ? 'pointer' : 'not-allowed', fontWeight: 700, fontSize: '14px' }}
+                  >
+                    {sendState === 'sending' ? 'Sending…' : 'Send'}
+                  </button>
+                </div>
+                {sendState === 'error' && (
+                  <p style={{ margin: '8px 0 0', fontSize: '12px', color: '#dc2626' }}>{sendError}</p>
+                )}
+                <p style={{ margin: '8px 0 0', fontSize: '11px', color: '#9a3412' }}>
+                  Sent from BuildPro+ as {fromName || invoice.businessName || 'you'}. Replies come straight to you.
+                </p>
+              </>
+            )}
+          </div>
+
           <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
             {isPhone() && (
               <button onClick={handleNativeShare} style={{ flex: '1 1 auto', background: '#0ea5e9', color: 'white', border: 'none', padding: '12px 14px', borderRadius: '8px', cursor: 'pointer', fontWeight: 700 }}>
@@ -92,7 +151,7 @@ export default function ShareInvoiceModal({ invoice, fromName, onClose }: Props)
               </a>
             )}
             <a href={mailtoHref(invoice, fromName)} style={{ flex: '1 1 auto', background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '12px 14px', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, textDecoration: 'none', color: '#1a1f2e', textAlign: 'center', display: 'inline-block' }}>
-              ✉️ Email
+              ✉️ My email app
             </a>
             <button onClick={handleCopy} style={{ flex: '1 1 auto', background: '#16a34a', color: 'white', border: 'none', padding: '12px 14px', borderRadius: '8px', cursor: 'pointer', fontWeight: 700 }}>
               {linkCopied ? '✓ Copied' : '🔗 Copy link'}

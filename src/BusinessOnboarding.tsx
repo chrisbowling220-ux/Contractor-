@@ -73,7 +73,7 @@ export default function BusinessOnboarding({ onDone }: { onDone: () => void }) {
 
   return (
     <div style={{ minHeight: '100vh', background: `linear-gradient(135deg, ${NAVY} 0%, #0f172a 100%)`, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px' }}>
-      <div style={{ background: 'white', borderRadius: '16px', maxWidth: '520px', width: '100%', padding: '32px', boxShadow: '0 12px 40px rgba(0,0,0,0.3)' }}>
+      <div style={{ background: 'white', borderRadius: '16px', maxWidth: '520px', width: '100%', padding: '32px', boxShadow: '0 24px 60px rgba(15,23,42,0.18)' }}>
         <div style={{ textAlign: 'center', marginBottom: '24px' }}>
           <div style={{ width: '56px', height: '56px', background: ORANGE, borderRadius: '14px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: '28px', fontWeight: 800, color: 'white', marginBottom: '12px' }}>B</div>
           <h1 style={{ fontSize: '24px', fontWeight: 800, margin: '0 0 6px', color: NAVY }}>Welcome to BuildPro+</h1>

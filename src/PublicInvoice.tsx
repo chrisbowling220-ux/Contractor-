@@ -2,12 +2,13 @@ import { useEffect, useState } from 'react'
 import { doc, getDoc, updateDoc } from 'firebase/firestore'
 import { db } from './firebase'
 import { BrandHeader, BrandFooter } from './lib/BrandHeader'
+import { FUNCTIONS_BASE_URL } from './lib/config'
 import type { Invoice } from './data/types'
 
 // Public invoice viewer at /inv/<id>. No sign-in required.
 // onRequest function endpoint (not a callable — the paying customer is not
 // signed in, so we use a plain HTTP POST and verify the amount server-side).
-const CHECKOUT_URL = 'https://us-central1-contractors-office-96731.cloudfunctions.net/createInvoiceCheckout'
+const CHECKOUT_URL = `${FUNCTIONS_BASE_URL}/createInvoiceCheckout`
 
 export default function PublicInvoice({ invoiceId }: { invoiceId: string }) {
   const [invoice, setInvoice] = useState<Invoice | null>(null)
@@ -16,6 +17,8 @@ export default function PublicInvoice({ invoiceId }: { invoiceId: string }) {
   const [paying, setPaying] = useState(false)
   const [payError, setPayError] = useState('')
   const [showCash, setShowCash] = useState(false)
+  // Whether the contractor has finished payout setup — gates the card button.
+  const [cardPayOk, setCardPayOk] = useState(false)
 
   async function payByCard() {
     setPaying(true)
@@ -49,7 +52,18 @@ export default function PublicInvoice({ invoiceId }: { invoiceId: string }) {
         const snap = await getDoc(doc(db, 'invoices', invoiceId))
         if (done) return
         if (!snap.exists()) setError('This invoice could not be found. The link may have expired — please ask your contractor to resend.')
-        else setInvoice({ id: snap.id, ...snap.data() } as Invoice)
+        else {
+          const inv = { id: snap.id, ...snap.data() } as Invoice & { createdBy?: string }
+          setInvoice(inv)
+          // Only offer "Pay by Card" if the contractor has finished payout setup
+          // (otherwise the money has nowhere to go). users/{createdBy} is public-read.
+          if (inv.createdBy) {
+            try {
+              const ownerSnap = await getDoc(doc(db, 'users', inv.createdBy))
+              setCardPayOk(!!(ownerSnap.data() as { connectPayoutsEnabled?: boolean } | undefined)?.connectPayoutsEnabled)
+            } catch { /* default: card hidden */ }
+          }
+        }
       } catch (err) {
         if (done) return
         console.error('PublicInvoice load failed:', err)
@@ -95,7 +109,7 @@ export default function PublicInvoice({ invoiceId }: { invoiceId: string }) {
 
   return (
     <div style={{ minHeight: '100vh', background: '#f8fafc', padding: 'clamp(16px, 4vw, 32px)' }}>
-      <div style={{ maxWidth: '720px', margin: '0 auto', background: 'white', borderRadius: '12px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', overflow: 'hidden' }}>
+      <div style={{ maxWidth: '720px', margin: '0 auto', background: 'white', borderRadius: '12px', boxShadow: '0 1px 2px rgba(15,23,42,0.04), 0 8px 24px rgba(15,23,42,0.06)', overflow: 'hidden' }}>
         <BrandHeader
           title={`Invoice ${invoice.invoiceNumber}`}
           subtitle={`${invoice.jobTypeName} · ${new Date(invoice.createdAt).toLocaleDateString()}`}
@@ -193,11 +207,15 @@ export default function PublicInvoice({ invoiceId }: { invoiceId: string }) {
           {invoice.status !== 'paid' && invoice.amountDue > 0 && (
             <>
               <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#64748b', letterSpacing: '1px', margin: '0 0 10px' }}>How would you like to pay?</h3>
-              <button onClick={payByCard} disabled={paying} style={{ width: '100%', background: paying ? '#94a3b8' : '#16a34a', color: 'white', border: 'none', padding: '14px', borderRadius: '8px', cursor: paying ? 'default' : 'pointer', fontWeight: 700, fontSize: '15px', marginBottom: '10px' }}>
-                {paying ? 'Redirecting to secure checkout…' : `💳 Pay Now — $${invoice.amountDue.toFixed(2)} by Card`}
-              </button>
-              {payError && <p style={{ color: '#dc2626', fontSize: '13px', textAlign: 'center', marginTop: 0, marginBottom: '12px' }}>{payError}</p>}
-              <p style={{ fontSize: '11px', color: '#94a3b8', textAlign: 'center', margin: '0 0 14px' }}>Secure payment powered by Stripe. Your card details never touch this site.</p>
+              {cardPayOk && (
+                <>
+                  <button onClick={payByCard} disabled={paying} style={{ width: '100%', background: paying ? '#94a3b8' : '#16a34a', color: 'white', border: 'none', padding: '14px', borderRadius: '8px', cursor: paying ? 'default' : 'pointer', fontWeight: 700, fontSize: '15px', marginBottom: '10px' }}>
+                    {paying ? 'Redirecting to secure checkout…' : `💳 Pay Now — $${invoice.amountDue.toFixed(2)} by Card`}
+                  </button>
+                  {payError && <p style={{ color: '#dc2626', fontSize: '13px', textAlign: 'center', marginTop: 0, marginBottom: '12px' }}>{payError}</p>}
+                  <p style={{ fontSize: '11px', color: '#94a3b8', textAlign: 'center', margin: '0 0 14px' }}>Secure payment powered by Stripe. Your card details never touch this site.</p>
+                </>
+              )}
 
               {!showCash ? (
                 <button

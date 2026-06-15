@@ -50,6 +50,19 @@ export interface AIQuote {
   contractor_notes: string
 }
 
+// A professional proposal letter that wraps an estimate as the customer's first
+// piece of paperwork. Generated once on send and cached on the estimate doc.
+export interface ProposalLetter {
+  greeting: string
+  intro: string
+  approach: string
+  included: string
+  not_included: string
+  timeline: string
+  warranty: string
+  closing: string
+}
+
 export interface Estimate {
   id: string
   customerName: string
@@ -72,6 +85,13 @@ export interface Estimate {
   total: number
   scopeOfWork: string
   aiQuote?: AIQuote
+  // Professional proposal letter shown to the customer as the first paperwork,
+  // above the estimate breakdown. Generated once on first send and saved here
+  // so re-opening/printing/re-sending never regenerates. The contractor can
+  // edit it before sending; `proposalEdited` marks a hand-edited version that
+  // should never be overwritten by a regenerate.
+  proposal?: ProposalLetter
+  proposalEdited?: boolean
   status: 'pending' | 'approved' | 'declined'
   // Optional upfront deposit the contractor requests before starting work.
   // Off by default — many jobs/customers pay only at completion. When set, the
@@ -82,6 +102,17 @@ export interface Estimate {
   // True once the deposit invoice has been auto-created for this estimate, so
   // we don't create duplicates on repeat dashboard loads.
   depositInvoiceCreated?: boolean
+  // Proposed start date (yyyy-mm-dd) the contractor sets in Quick Quote. The
+  // customer sees it on the estimate and can confirm it or request a different
+  // date, so everyone agrees on a plan before work begins.
+  proposedStartDate?: string
+  // The customer's response to the proposed date (set on the public estimate).
+  startDateResponse?: {
+    action: 'confirmed' | 'requested_change'
+    requestedDate?: string  // yyyy-mm-dd, only when they ask for a different day
+    note?: string
+    respondedAt: string
+  }
   createdAt: string
   createdBy?: string
   // Set when the customer accepts/declines via the public share link.
@@ -95,6 +126,10 @@ export interface Estimate {
   // creating duplicates on subsequent dashboard loads.
   projectAutoCreated?: boolean
   projectId?: string
+  // Epoch-ms the customer e-signed (approval). Anchors the 2-year legal
+  // retention lock — while within 2 years, this doc can't be deleted (enforced
+  // in Firestore rules).
+  signedAtMs?: number
 }
 
 export interface ChangeOrderLine {
@@ -121,6 +156,8 @@ export interface ChangeOrder {
     reason?: string
     respondedAt: string
   }
+  // Epoch-ms the customer e-signed (approval) — anchors the 2-year retention lock.
+  signedAtMs?: number
   createdAt: string
   createdBy?: string
 }
@@ -196,6 +233,9 @@ export interface Invoice {
   status: 'draft' | 'sent' | 'paid' | 'overdue'
   dueDate: string               // ISO date
   paidAt?: string
+  // Epoch-ms the invoice was paid — anchors the 2-year retention lock on paid
+  // invoices (enforced in Firestore rules).
+  paidAtMs?: number
   // Set when the customer chooses "Pay Cash / In Person" on the public invoice
   // page (they'll settle up directly with the contractor). Status stays "sent"
   // until the contractor manually confirms cash received.
@@ -204,6 +244,23 @@ export interface Invoice {
   // True for the upfront-deposit invoice auto-created when a customer approves
   // an estimate that requested a deposit. The final invoice nets this out.
   isDeposit?: boolean
+  createdAt: string
+  createdBy?: string
+}
+
+// A custom calendar event/job the contractor adds by tapping a day. Separate
+// from project startDates (those are auto-shown too) — these are free-form
+// entries: a job, an appointment, a reminder, anything.
+export interface CalendarEvent {
+  id: string
+  date: string            // yyyy-mm-dd
+  title: string
+  notes?: string
+  time?: string           // optional "HH:MM" for ordering / display
+  kind?: 'job' | 'event' | 'reminder'
+  // Optional reminder: how many days before to alert (0 = day-of). When set,
+  // the app pops a browser/in-app notification while open.
+  remindDaysBefore?: number
   createdAt: string
   createdBy?: string
 }

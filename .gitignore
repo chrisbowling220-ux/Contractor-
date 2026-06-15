@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Env files and editor save/backup artifacts — never commit these.
+.env
+.env.*
+*.save
+*~
+
 scripts/serviceAccountKey.json
 
 # Editor directories and files

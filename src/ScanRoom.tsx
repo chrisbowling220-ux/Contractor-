@@ -11,6 +11,7 @@ import ManualEstimateBuilder from './ManualEstimateBuilder'
 import { openEstimatePrintWindow } from './lib/printEstimate'
 import { fetchBusinessProfile } from './Settings'
 import type { BusinessProfile } from './Settings'
+import { useTier } from './lib/useTier'
 import type { AIQuote, Estimate } from './data/types'
 
 const callable = httpsCallable<
@@ -25,11 +26,17 @@ const callable = httpsCallable<
       images: string[]
       hourlyRateOverride?: number
       markupPercentOverride?: number
+      includePermitText?: boolean
       debugForceFail?: string
     }
   },
   AIQuote
->(functions, 'analyzeScan')
+  // Default callable timeout is only 70s — a photo quote can take longer than
+  // that (image analysis + thinking), which would falsely trip the retry
+  // screen. Match the backend's full 540s budget so the client never gives up
+  // while the server is still working (which would charge a credit the user
+  // never saw a result for).
+>(functions, 'analyzeScan', { timeout: 540000 })
 
 const transcribeCallable = httpsCallable<
   { clerkToken: string; input: { audioBase64: string; mimeType: string } },
@@ -203,6 +210,7 @@ async function extractKeyframes(videoBlob: Blob, count: number, knownDurationMs:
 export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) => void }) {
   const { user } = useUser()
   const { getToken } = useAuth()
+  const { tier, quotesLeft } = useTier()  // for the "quotes left" countdown
 
   const [customerName, setCustomerName] = useState('')
   const [customerId, setCustomerId] = useState('')
@@ -226,10 +234,20 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
   const [savedId, setSavedId] = useState<string | null>(null)
   const [aiHourlyRate, setAiHourlyRate] = useState('65')
   const [aiMarkupPct, setAiMarkupPct] = useState('20')
+  // Permit wording is opt-in per quote — many customers don't want permits
+  // pulled, so the default keeps every mention of permits out of the quote.
+  const [includePermitText, setIncludePermitText] = useState('no')
   // Optional upfront deposit, chosen right here in Quick Quote. '' = none.
   const [depositPct, setDepositPct] = useState('')
+  // Optional proposed start date — customer can confirm or request a change.
+  const [proposedStartDate, setProposedStartDate] = useState('')
   const [loadingMessage, setLoadingMessage] = useState('')
   const [usedFallback, setUsedFallback] = useState(false)
+  // True when the estimator couldn't be reached and we're offering a one-tap
+  // retry instead of silently saving an empty offline shell. The user's photos
+  // and narration stay in the form, so retrying costs them nothing extra (the
+  // backend already refunds the credit on a failed call).
+  const [regenFailed, setRegenFailed] = useState(false)
   const [videoRecording, setVideoRecording] = useState(false)
   const [videoElapsed, setVideoElapsed] = useState(0)
   const [extractingFrames, setExtractingFrames] = useState(false)
@@ -499,12 +517,13 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
       return
     }
     if (imgs.length === 0 && !transcript.trim()) { setError('Add at least one photo or some narration'); return }
-    setAnalyzing(true); setError(''); setResult(null); setSavedId(null); setUsedFallback(false)
-    setLoadingMessage('Generating your estimate…')
+    setAnalyzing(true); setError(''); setResult(null); setSavedId(null); setUsedFallback(false); setRegenFailed(false)
+    // Clean, friendly loading copy only — never expose provider names, retries,
+    // or "busy" messaging to the user. Just reassure them it's working.
+    setLoadingMessage('Building your estimate…')
     const timers: number[] = []
-    timers.push(window.setTimeout(() => setLoadingMessage('Still working — Claude is analyzing your photos and narration…'), 10000))
-    timers.push(window.setTimeout(() => setLoadingMessage('Anthropic seems busy. Retrying behind the scenes…'), 20000))
-    timers.push(window.setTimeout(() => setLoadingMessage('One more try — this can take up to 45s for image analysis…'), 30000))
+    timers.push(window.setTimeout(() => setLoadingMessage('Crunching the numbers…'), 12000))
+    timers.push(window.setTimeout(() => setLoadingMessage('Almost there — putting your estimate together…'), 25000))
 
     try {
       const clerkToken = await getToken()
@@ -520,6 +539,7 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
           images: imgs.map(i => i.data),
           hourlyRateOverride: Number(aiHourlyRate) || undefined,
           markupPercentOverride: aiMarkupPct === '' ? undefined : Number(aiMarkupPct),
+          includePermitText: includePermitText === 'yes',
           // Dev-only knob: lets local builds force a synthetic failure to
           // exercise the retry/fallback paths. Never honored in production —
           // an end user can't burn quota or trigger errors with ?debugForceFail.
@@ -535,32 +555,15 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
       if (saved) setSavedEstimate(saved)
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err)
-      // Fallback: build a minimal quote from the transcript + form inputs since
-      // ScanRoom has no pre-form materials list. The contractor still gets a
-      // structured shell they can edit.
-      try {
-        const fallback = buildFallbackQuote({
-          customerName,
-          jobTypeName: 'Quick Quote (offline)',
-          description: transcript.trim().slice(0, 1000) || 'No narration captured',
-          jobLocationZip: zip,
-          materials: [],
-          rentals: [],
-          hourlyRate: Number(aiHourlyRate) || 65,
-          estimatedHours: 0,
-          markupPercent: Number(aiMarkupPct) || 20,
-          rateType: 'hourly',
-        })
-        setResult(fallback)
-        setUsedFallback(true)
-        setError(`${errMsg} — showing a placeholder so you can edit and save.`)
-        // Still save + open the editor so the user always gets the edit/share
-        // flow, even when the generator was unavailable.
-        const savedFallback = await saveAsEstimateAndReturn(fallback)
-        if (savedFallback) setSavedEstimate(savedFallback)
-      } catch {
-        setError(errMsg)
-      }
+      // The estimator couldn't be reached. Do NOT silently save an empty
+      // "offline" shell and do NOT burn the user's quote — the backend already
+      // refunds the credit when the call fails, so the retry below is free.
+      // Surface a clean retry state instead; their photos/narration are still
+      // in the form, so "Try Again" re-runs without re-describing the job.
+      console.warn('Quote generation failed (offering retry):', errMsg)
+      setResult(null)
+      setUsedFallback(false)
+      setRegenFailed(true)
     } finally {
       timers.forEach(t => window.clearTimeout(t))
       setAnalyzing(false)
@@ -569,6 +572,31 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
   }
 
   const runAnalysis = () => runAnalysisWithImages(images)
+
+  // Explicit escape hatch shown only on the retry screen: if the estimator
+  // stays unreachable, the user can choose to start a blank estimate built from
+  // their form inputs and fill in the materials/labor themselves. This is NEVER
+  // automatic — it only happens when the user taps "Build it myself", so a
+  // failed AI call can never quietly hand back an empty quote.
+  const buildBlankShellManually = async () => {
+    const fallback = buildFallbackQuote({
+      customerName,
+      jobTypeName: 'Quick Quote',
+      description: transcript.trim().slice(0, 1000) || 'No narration captured',
+      jobLocationZip: zip,
+      materials: [],
+      rentals: [],
+      hourlyRate: Number(aiHourlyRate) || 65,
+      estimatedHours: 0,
+      markupPercent: Number(aiMarkupPct) || 20,
+      rateType: 'hourly',
+    })
+    setRegenFailed(false)
+    setResult(fallback)
+    setUsedFallback(true)
+    const saved = await saveAsEstimateAndReturn(fallback)
+    if (saved) setSavedEstimate(saved)
+  }
 
   // Saves an AI quote as an Estimate doc and returns the full Estimate object
   // (with id) so the caller can open the editor immediately.
@@ -603,6 +631,8 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
       payload.depositRequested = true
       payload.depositAmount = +((ai.final_customer_quote * pct) / 100).toFixed(2)
     }
+    // Apply the proposed start date, if set.
+    if (proposedStartDate) payload.proposedStartDate = proposedStartDate
     if (customerId) payload.customerId = customerId
     try {
       const docRef = await addDoc(collection(db, 'estimates'), payload)
@@ -696,14 +726,37 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
 
   const input: React.CSSProperties = { padding: '10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '14px', boxSizing: 'border-box', width: '100%' }
   const label: React.CSSProperties = { display: 'block', fontSize: '12px', fontWeight: 600, color: '#64748b', marginBottom: '4px' }
-  const card: React.CSSProperties = { background: 'white', padding: '24px', borderRadius: '12px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', marginBottom: '16px' }
+  const card: React.CSSProperties = { background: 'white', padding: '24px', borderRadius: '12px', boxShadow: '0 1px 2px rgba(15,23,42,0.04), 0 8px 24px rgba(15,23,42,0.06)', marginBottom: '16px' }
 
   return (
     <div style={{ padding: 'clamp(16px, 4vw, 32px)', maxWidth: '1100px', margin: '0 auto' }}>
       <div style={{ marginBottom: '20px' }}>
         <h2 style={{ fontSize: '26px', fontWeight: 800, margin: 0, color: '#1a1f2e', letterSpacing: '-0.5px' }}>⚡ Quick Quote</h2>
-        <p style={{ margin: '4px 0 0', color: '#64748b', fontSize: '14px' }}>Walk the job, snap photos or record video, narrate the scope — Claude turns it into a fair-market estimate in seconds.</p>
+        <p style={{ margin: '4px 0 0', color: '#64748b', fontSize: '14px' }}>Walk the job, snap photos or record video, narrate the scope — turn it into a fair-market estimate in seconds.</p>
       </div>
+
+      {/* Quotes-left countdown. Pro = unlimited (hidden). Free shows remaining;
+          turns amber when low, red at zero with a link to buy more / upgrade. */}
+      {tier !== 'pro' && quotesLeft !== null && (
+        <div style={{
+          marginBottom: '16px', borderRadius: '10px', padding: '10px 14px', fontSize: '14px', fontWeight: 600,
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap',
+          background: quotesLeft === 0 ? '#fef2f2' : quotesLeft <= 2 ? '#fffbeb' : '#f0fdf4',
+          color: quotesLeft === 0 ? '#dc2626' : quotesLeft <= 2 ? '#92400e' : '#16a34a',
+          border: `1px solid ${quotesLeft === 0 ? '#fecaca' : quotesLeft <= 2 ? '#fcd34d' : '#86efac'}`,
+        }}>
+          <span>
+            {quotesLeft === 0
+              ? '⚠️ You\'re out of instant quotes — buy more ($1 each) or go Pro in Settings.'
+              : `⚡ ${quotesLeft} instant quote${quotesLeft === 1 ? '' : 's'} left`}
+          </span>
+          {onNavigate && (
+            <button onClick={() => onNavigate('settings')} style={{ background: 'transparent', border: '1px solid currentColor', color: 'inherit', borderRadius: '6px', padding: '5px 12px', cursor: 'pointer', fontSize: '12px', fontWeight: 700, whiteSpace: 'nowrap' }}>
+              {quotesLeft === 0 ? 'Get more →' : 'Buy more / Go Pro'}
+            </button>
+          )}
+        </div>
+      )}
 
       <div style={card}>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px' }}>
@@ -854,6 +907,18 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
             <p style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px' }}>Small: 15–20% · Medium: 20–25% · Specialty: 25–35%</p>
           </div>
           <div>
+            <label style={label}>Permits on the Quote</label>
+            <select value={includePermitText} onChange={e => setIncludePermitText(e.target.value)} style={input}>
+              <option value="no">Don't mention permits (default)</option>
+              <option value="yes">Include permit info & pricing</option>
+            </select>
+            <p style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px' }}>
+              {includePermitText === 'yes'
+                ? 'The estimate will include permit requirements and a permit/inspection allowance where the job needs one.'
+                : 'Nothing the customer sees will mention permits. Switch this on if you want permit info and pricing in the quote.'}
+            </p>
+          </div>
+          <div>
             <label style={label}>Upfront Deposit (optional)</label>
             <select value={depositPct} onChange={e => setDepositPct(e.target.value)} style={input}>
               <option value="">No deposit — pay at completion</option>
@@ -866,6 +931,13 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
             </select>
             <p style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px' }}>
               {depositPct ? `Estimate will require ${depositPct}% upfront, balance at completion.` : 'Leave as "No deposit" if the customer pays only when the job is done.'}
+            </p>
+          </div>
+          <div>
+            <label style={label}>Proposed Start Date (optional)</label>
+            <input type="date" value={proposedStartDate} onChange={e => setProposedStartDate(e.target.value)} style={input} min={new Date().toISOString().slice(0, 10)} />
+            <p style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px' }}>
+              {proposedStartDate ? 'Customer can confirm this date or request a different one.' : 'Suggest when you could start — the customer confirms or picks another day.'}
             </p>
           </div>
         </div>
@@ -889,12 +961,35 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
           {loadingMessage}
         </div>
       )}
-      {usedFallback && !analyzing && (
-        <div style={{ ...card, background: '#fef3c7', color: '#92400e' }}>
-          ⚠ <strong>Pricing service was unavailable — showing a placeholder estimate.</strong> Edit the values below before saving. Click "Generate Instant Estimate" again to retry.
+      {/* Estimator couldn't be reached — one-tap retry, no re-typing, no charge.
+          The user's photos and narration are still in the form above. */}
+      {regenFailed && !analyzing && (
+        <div style={{ ...card, background: '#fff7ed', border: '2px solid #f97316' }}>
+          <div style={{ fontWeight: 800, color: '#9a3412', fontSize: '16px', marginBottom: '6px' }}>
+            Hmm — that one didn’t go through.
+          </div>
+          <p style={{ color: '#7c2d12', fontSize: '14px', margin: '0 0 4px', lineHeight: 1.5 }}>
+            We couldn’t finish your estimate just now. Your photos and notes are still here — just tap below to try again.
+          </p>
+          <p style={{ color: '#16a34a', fontSize: '13px', fontWeight: 700, margin: '0 0 14px' }}>
+            ✓ This didn’t use one of your quotes — retrying is free.
+          </p>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
+            <button onClick={runAnalysis} disabled={analyzing} style={{ background: '#f97316', color: 'white', border: 'none', padding: '12px 24px', borderRadius: '8px', cursor: analyzing ? 'not-allowed' : 'pointer', fontWeight: 800, fontSize: '15px' }}>
+              🔄 Try Again
+            </button>
+            <button onClick={buildBlankShellManually} disabled={analyzing} style={{ background: 'white', color: '#1a1f2e', border: '2px solid #cbd5e1', padding: '12px 20px', borderRadius: '8px', cursor: analyzing ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '14px' }}>
+              ✏️ Build it myself instead
+            </button>
+          </div>
         </div>
       )}
-      {error && !usedFallback && <div style={{ ...card, background: '#fef2f2', color: '#dc2626' }}>⚠ {error}</div>}
+      {usedFallback && !analyzing && (
+        <div style={{ ...card, background: '#fef3c7', color: '#92400e' }}>
+          ⚠ <strong>This is a blank starter estimate you asked to build yourself.</strong> Add your materials, hours, and prices below — or tap 🔄 Regenerate up top to let the estimator try again.
+        </div>
+      )}
+      {error && !usedFallback && !regenFailed && <div style={{ ...card, background: '#fef2f2', color: '#dc2626' }}>⚠ {error}</div>}
 
       {result && (
         <div style={{ ...card, border: '2px dashed #7c3aed' }}>
@@ -903,21 +998,29 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
               <h3>🎯 Instant Estimate</h3>
               <p style={{ color: '#64748b', fontSize: '13px' }}>Based on {images.length} photo(s) and {transcript.trim().split(/\s+/).filter(Boolean).length} words of narration</p>
             </div>
-            {savedId ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-end' }}>
-                <span style={{ background: '#f0fdf4', color: '#16a34a', padding: '6px 12px', borderRadius: '6px', fontWeight: 600, fontSize: '13px' }}>✓ Saved as Project</span>
-                <p style={{ margin: 0, fontSize: '11px', color: '#64748b', textAlign: 'right' }}>
-                  Find it in <strong>🗂️ Projects</strong> — edit, send, add change orders.
-                </p>
-                <button onClick={saveAsEstimate} style={{ background: '#f97316', color: 'white', border: 'none', padding: '8px 14px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}>
-                  ✏️ Reopen Editor
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-end' }}>
+              {savedId ? (
+                <>
+                  <span style={{ background: '#f0fdf4', color: '#16a34a', padding: '6px 12px', borderRadius: '6px', fontWeight: 600, fontSize: '13px' }}>✓ Saved as Project</span>
+                  <p style={{ margin: 0, fontSize: '11px', color: '#64748b', textAlign: 'right' }}>
+                    Find it in <strong>🗂️ Projects</strong> — edit, send, add change orders.
+                  </p>
+                  <button onClick={saveAsEstimate} style={{ background: '#f97316', color: 'white', border: 'none', padding: '8px 14px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}>
+                    ✏️ Reopen Editor
+                  </button>
+                </>
+              ) : (
+                <button onClick={saveAsEstimate} style={{ background: '#f97316', color: 'white', border: 'none', padding: '10px 20px', borderRadius: '6px', cursor: 'pointer', fontWeight: 700 }}>
+                  💾 Save as Estimate
                 </button>
-              </div>
-            ) : (
-              <button onClick={saveAsEstimate} style={{ background: '#f97316', color: 'white', border: 'none', padding: '10px 20px', borderRadius: '6px', cursor: 'pointer', fontWeight: 700 }}>
-                💾 Save as Estimate
+              )}
+              {/* Regenerate: re-run with the same photos/narration already in the
+                  form — one tap, no re-describing. Note: this DOES request a
+                  fresh quote, so it draws a new credit like any generation. */}
+              <button onClick={runAnalysis} disabled={analyzing} style={{ background: 'transparent', color: '#7c3aed', border: '1px solid #7c3aed', padding: '6px 12px', borderRadius: '6px', cursor: analyzing ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '12px' }}>
+                🔄 Regenerate
               </button>
-            )}
+            </div>
           </div>
 
           <div style={{ display: 'grid', gap: '14px' }}>
@@ -1007,6 +1110,7 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
           }}
           onSaved={updated => setSavedEstimate(updated)}
           onPrint={(est) => openEstimatePrintWindow(est, profile)}
+          businessName={profile.businessName}
         />
       )}
 

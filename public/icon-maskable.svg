@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Full-bleed navy so the launcher's mask shape always has solid coverage. -->
+  <rect width="512" height="512" fill="#1a1f2e"/>
+  <!-- Logo scaled to the central 80% safe zone (translate 51.2 = 10% inset). -->
+  <g transform="translate(51.2,51.2) scale(0.8)">
+    <rect x="96" y="96" width="320" height="320" rx="56" fill="#f97316"/>
+    <text x="256" y="370" font-family="system-ui, -apple-system, sans-serif" font-weight="800" font-size="280" fill="white" text-anchor="middle">B</text>
+    <text x="408" y="200" font-family="system-ui, -apple-system, sans-serif" font-weight="800" font-size="120" fill="#fb923c" text-anchor="middle">+</text>
+  </g>
+</svg>

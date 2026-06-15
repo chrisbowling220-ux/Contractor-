@@ -1,5 +1,7 @@
-// deploy-marker: my-prices-v13
+// deploy-marker: proposal-letter-v41
 import { onCall, onRequest, HttpsError } from 'firebase-functions/v2/https'
+import { onSchedule } from 'firebase-functions/v2/scheduler'
+import { onDocumentUpdated } from 'firebase-functions/v2/firestore'
 import { defineSecret } from 'firebase-functions/params'
 import { verifyToken } from '@clerk/backend'
 import Anthropic from '@anthropic-ai/sdk'
@@ -52,20 +54,51 @@ const RESEND_API_KEY = defineSecret('RESEND_API_KEY')
 const STRIPE_SECRET_KEY = defineSecret('STRIPE_SECRET_KEY')
 const STRIPE_WEBHOOK_SECRET = defineSecret('STRIPE_WEBHOOK_SECRET')
 
+// ── EMAIL SENDER ADDRESS — single source of truth for all outgoing email. ──
+// Until builderspro.cc is verified in Resend, this uses the Resend SANDBOX
+// (onboarding@resend.dev), which ONLY delivers to the Resend account owner (you).
+// Once the domain is verified in the Resend dashboard, set EMAIL_DOMAIN_VERIFIED
+// to true — every email then sends from alerts@builderspro.cc and reaches all
+// users. (We keep a sandbox fallback so nothing breaks before verification.)
+const EMAIL_DOMAIN_VERIFIED = true   // builderspro.cc verified in Resend 2026-06-03 (DKIM+SPF)
+const EMAIL_FROM = EMAIL_DOMAIN_VERIFIED
+  ? 'BuildPro+ <alerts@builderspro.cc>'
+  : 'BuildPro+ <onboarding@resend.dev>'
+
 // Where customers return after Stripe Checkout. The public invoice page lives
 // at /inv/<id>; on return it re-reads the invoice (now marked paid by webhook).
-const PUBLIC_HOST = 'https://contractors-office-96731.web.app'
+// Custom domain builderspro.cc (SSL live 2026-06-01). Must stay in sync with
+// src/lib/config.ts on the frontend.
+const PUBLIC_HOST = 'https://builderspro.cc'
 
-// The $19.99/mo "BuildPro+ Pro" recurring price. Test-mode price ID for now;
-// swap to the live price_... here when going live.
 // LIVE-mode $19.99/mo BuildPro+ Pro price. Must be paired with the live
 // sk_live_ secret key — a live price will NOT work with a test secret key.
 const PRO_PRICE_ID = 'price_1Tbj8IKz3SO2ZkDQQ4gjBq9j'
 
+// LIVE-mode 3-month plan: $49.99 billed every 3 months (~$16.66/mo — a discount
+// vs monthly). Created in the Stripe dashboard 2026-06-03.
+const PRO_PRICE_ID_QUARTERLY = 'price_1TeC7OKz3SO2ZkDQy643dlQI'
+
+// LIVE-mode yearly all-access plan: $159.99 billed once a year (~$13.33/mo — the
+// best value vs monthly/quarterly). Lives on its OWN product
+// (prod_UeanRxdXav2z7c, "BuildPro+ Pro — Yearly (All Access)") but still flips
+// the user to Pro (all access) through the exact same webhook path as the other
+// plans (the webhook keys off subscription status, not the product). The 5
+// 20%-off promo codes (coupon yhH68gRK) are restricted to orders >= $159.99, so
+// they only work on this plan. Created via the Stripe API 2026-06-06.
+const PRO_PRICE_ID_YEARLY = 'price_1TfHbfKz3SO2ZkDQ9uBGdy06'
+
+// Map the plan key the client sends → the Stripe price id.
+function priceIdForPlan(plan?: string): string {
+  if (plan === 'yearly' && PRO_PRICE_ID_YEARLY) return PRO_PRICE_ID_YEARLY
+  if (plan === 'quarterly' && PRO_PRICE_ID_QUARTERLY) return PRO_PRICE_ID_QUARTERLY
+  return PRO_PRICE_ID
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Subscription / usage gate
-// Free tier: 5 AI quotes total. After that, AI features turn off until the
-// user upgrades to the paid subscription (wired up in a later session).
+// Free tier: 10 AI quotes total. After that, AI features turn off until the
+// user upgrades to a paid subscription (or buys pay-as-you-go credits).
 // users/{userId} doc shape:
 //   tier: 'free' | 'pro'
 //   aiQuotesUsed: number
@@ -74,17 +107,20 @@ const PRO_PRICE_ID = 'price_1Tbj8IKz3SO2ZkDQQ4gjBq9j'
 //   subscriptionStatus?: 'active' | 'past_due' | 'canceled' | ...
 // ──────────────────────────────────────────────────────────────────────────
 
-const FREE_TIER_AI_LIMIT = 5
+const FREE_TIER_AI_LIMIT = 10
 
 interface UserDoc {
   tier?: 'free' | 'pro'
   aiQuotesUsed?: number
+  paidQuoteCredits?: number   // pay-as-you-go: $1-per-use quote credits bought in packs
 }
 
 // Ensures the user's gate check passes BEFORE we burn an Anthropic call.
-// Throws HttpsError('resource-exhausted') with a friendly message when the
-// free tier is used up. Increments usage atomically on success.
-async function consumeAiQuoteOrThrow(userId: string, featureName: string): Promise<{ tier: 'free' | 'pro'; used: number; remaining: number | null }> {
+// Order of access for a FREE user: (1) their free allowance, then (2) any
+// pay-as-you-go credits they bought ($1 each). Pro = unlimited. Throws
+// HttpsError('resource-exhausted') only when BOTH free + paid are used up.
+// All increments/decrements happen atomically in a transaction.
+async function consumeAiQuoteOrThrow(userId: string, featureName: string): Promise<{ tier: 'free' | 'pro'; remaining: number | null; spentPaid: boolean }> {
   const db = getAdminDb()
   const userRef = db.collection('users').doc(userId)
   const result = await db.runTransaction(async tx => {
@@ -92,43 +128,67 @@ async function consumeAiQuoteOrThrow(userId: string, featureName: string): Promi
     const data = (snap.data() as UserDoc | undefined) ?? {}
     const tier: 'free' | 'pro' = data.tier === 'pro' ? 'pro' : 'free'
     const used = data.aiQuotesUsed ?? 0
+    const paid = Math.max(0, data.paidQuoteCredits ?? 0)
 
-    if (tier === 'free' && used >= FREE_TIER_AI_LIMIT) {
-      throw new HttpsError(
-        'resource-exhausted',
-        `You've used all ${FREE_TIER_AI_LIMIT} free AI generations. Upgrade to BuildPro+ Pro for unlimited.`,
-      )
+    if (tier === 'pro') {
+      tx.set(userRef, { tier, aiQuotesUsed: FieldValue.increment(1), lastAiAt: new Date().toISOString() }, { merge: true })
+      return { tier, remaining: null as number | null, spentPaid: false }
     }
 
-    // Pro = unlimited. We still count usage for analytics/billing-debug, but
-    // don't enforce a cap.
-    tx.set(userRef, {
-      tier,
-      aiQuotesUsed: FieldValue.increment(1),
-      lastAiAt: new Date().toISOString(),
-    }, { merge: true })
-
-    return {
-      tier,
-      used: used + 1,
-      remaining: tier === 'pro' ? null : Math.max(0, FREE_TIER_AI_LIMIT - (used + 1)),
+    const freeLeft = Math.max(0, FREE_TIER_AI_LIMIT - used)
+    if (freeLeft > 0) {
+      // Spend a FREE quote.
+      tx.set(userRef, { tier, aiQuotesUsed: FieldValue.increment(1), lastAiAt: new Date().toISOString() }, { merge: true })
+      return { tier, remaining: (freeLeft - 1) + paid, spentPaid: false }
     }
+    if (paid > 0) {
+      // Free used up → spend a PAID ($1) credit.
+      tx.set(userRef, { paidQuoteCredits: FieldValue.increment(-1), lastAiAt: new Date().toISOString() }, { merge: true })
+      return { tier, remaining: paid - 1, spentPaid: true }
+    }
+    // Nothing left at all.
+    throw new HttpsError(
+      'resource-exhausted',
+      `You're out of instant quotes. Buy more for $1 each, or go Pro for unlimited. (Change orders and invoice notes are always free.)`,
+    )
   })
-  console.log(`AI gate: user=${userId} feature=${featureName} tier=${result.tier} used=${result.used} remaining=${result.remaining}`)
+  console.log(`AI gate: user=${userId} feature=${featureName} tier=${result.tier} remaining=${result.remaining} spentPaid=${result.spentPaid}`)
   return result
 }
 
+// Pro-ONLY gate: blocks the feature entirely for free users (doesn't consume a
+// quote credit — it's simply not available without a subscription). Used for
+// the customer thank-you letter, a premium "wow" perk that drives upgrades.
+async function requireProOrThrow(userId: string, featureName: string): Promise<void> {
+  const db = getAdminDb()
+  const snap = await db.collection('users').doc(userId).get()
+  const data = (snap.data() as UserDoc | undefined) ?? {}
+  const tier: 'free' | 'pro' = data.tier === 'pro' ? 'pro' : 'free'
+  if (tier !== 'pro') {
+    throw new HttpsError(
+      'permission-denied',
+      'Thank-you letters are a BuildPro+ Pro feature. Upgrade to send your customers a personalized thank-you at the end of every job.',
+    )
+  }
+  console.log(`Pro gate: user=${userId} feature=${featureName} tier=${tier} OK`)
+}
+
 // Refund one consumed credit when a generation fails AFTER the gate charged it,
-// so a transient outage doesn't cost a free-tier user one of their 5 quotes.
-// Never lets the counter go negative.
-async function refundAiQuote(userId: string): Promise<void> {
+// so a transient outage doesn't cost a user a quote. `spentPaid` says which
+// bucket to restore: a pay-as-you-go credit (true) or a free quote (false).
+// Never lets either counter go negative.
+async function refundAiQuote(userId: string, spentPaid: boolean): Promise<void> {
   try {
     const db = getAdminDb()
     const userRef = db.collection('users').doc(userId)
     await db.runTransaction(async tx => {
-      const snap = await tx.get(userRef)
-      const used = (snap.data() as UserDoc | undefined)?.aiQuotesUsed ?? 0
-      if (used > 0) tx.set(userRef, { aiQuotesUsed: used - 1 }, { merge: true })
+      const data = (await tx.get(userRef)).data() as UserDoc | undefined
+      if (spentPaid) {
+        tx.set(userRef, { paidQuoteCredits: FieldValue.increment(1) }, { merge: true })
+      } else {
+        const used = data?.aiQuotesUsed ?? 0
+        if (used > 0) tx.set(userRef, { aiQuotesUsed: used - 1 }, { merge: true })
+      }
     })
   } catch (err) {
     console.error('AI credit refund failed for', userId, err)
@@ -174,6 +234,9 @@ interface GenerateAIQuoteInput {
   // Contractor overrides. If provided, the AI MUST use these values exactly.
   hourlyRateOverride?: number
   markupPercentOverride?: number
+  // Opt-in: many customers don't want permits pulled, so permit wording is
+  // OFF by default and only included when the contractor picks it per quote.
+  includePermitText?: boolean
   // DEBUG: forces a synthetic Anthropic failure to test the retry path.
   // Values: 'overloaded' | 'rate_limit' | 'server_error' | 'bad_request'.
   debugForceFail?: string
@@ -194,6 +257,7 @@ interface AnalyzeScanInput {
   images: string[]
   hourlyRateOverride?: number
   markupPercentOverride?: number
+  includePermitText?: boolean
   debugForceFail?: string
 }
 
@@ -223,33 +287,153 @@ REGIONAL ADJUSTMENT GUIDELINES (apply the % to EVERY material line AND labor, no
 - US territories (PR 006–009, etc.): +20 to 40% materials, adjust labor to local norms.
 - If you genuinely cannot place the ZIP, use the NC baseline and SAY SO clearly in contractor_notes so the contractor knows to verify prices.
 
-NORTH CAROLINA BASELINE PRICES (Home Depot / Lowe's, 2026, central NC retail — adjust as above):
-- 1/2" Drywall 4x8 sheet: $15.98
-- 2x4x8 SPF stud: $3.78
-- 2x4x10 SPF stud: $5.48
-- 1/2" CDX plywood 4x8: $36.98
-- 7/16" OSB 4x8: $22.98
-- Interior latex paint (Behr/Valspar, 1 gal): $31.98
-- Primer (1 gal): $23.98
-- Ceramic tile 12x12 (basic): $1.98/sqft
-- Porcelain tile 12x24: $3.98/sqft
-- Thinset (50lb bag): $17.98
-- Sanded grout (10lb): $13.98
-- Oak hardwood flooring: $5.48/sqft
-- Laminate flooring: $1.79/sqft
-- Luxury vinyl plank: $2.69/sqft
-- Architectural shingles (33sqft bundle): $36.98
-- R-13 batt insulation: $0.78/sqft
-- R-19 batt insulation: $1.05/sqft
-- 12/2 Romex w/ ground (250ft): $109.98
-- 14/2 Romex w/ ground (250ft): $82.98
-- Standard 15A outlet: $1.28
-- Single pole switch: $1.78
-- 1/2" PEX (100ft): $36.98
-- Concrete mix (60lb bag): $5.48
-- Joint compound (4.5 gal bucket): $17.97
+MATERIAL PRICE GUIDE — Home Depot / Lowe's, 2026, central NC retail (your PRIMARY source for prices; just LOOK UP the price, don't reason it out). Adjust ONLY by the regional ZIP multiplier.
 
-For items not in the reference list, use realistic 2026 retail prices in the same spirit, adjusted for the job ZIP per the regional guidelines above. If the ZIP is in central NC, use the baseline as-is. If the ZIP is in a higher-cost or lower-cost region, scale appropriately.
+DRYWALL & WALLS:
+- 1/2" drywall 4x8 sheet: $15.98 | 5/8" Type X 4x8 (fire-rated): $18.98 | 1/2" moisture/green board 4x8: $17.98
+- Joint compound (4.5 gal bucket): $17.97 | Drywall tape (500ft): $7.98 | Drywall screws (1lb): $8.98
+- Corner bead (8ft): $4.98 | Texture spray (can): $9.98
+
+LUMBER & FRAMING:
+- 2x4x8 SPF stud: $3.78 | 2x4x10: $5.48 | 2x4x12: $6.98 | 2x6x8: $6.48 | 2x6x10: $8.48 | 2x8x10: $12.98
+- 2x10x10: $16.98 | 4x4x8 treated post: $13.98 | 1/2" CDX plywood 4x8: $36.98 | 3/4" plywood 4x8: $52.98
+- 7/16" OSB 4x8: $22.98 | 3/4" T&G subfloor 4x8: $44.98 | Pressure-treated 2x4x8: $6.48 | PT 2x6x8: $9.98
+- Framing nails (box): $24.98 | Joist hangers (each): $1.28 | Hurricane ties (each): $0.88 | Construction screws (5lb): $32.98
+
+FASTENERS — SCREWS (Lowe's 2026; box price → per-piece for small counts; always pick the right type/length/coating for the job):
+- Drywall, coarse thread, bugle, Phillips: #6x1" 289ct $5.98 ($0.021/pc) | #6x1-1/4" 245ct $6.98 ($0.028/pc) | #6x1-5/8" 189ct $6.98 ($0.037/pc)
+- Drywall bulk (best $/pc for big jobs): #6x1-1/4" 5lb≈1190ct $24.98 ($0.021/pc) / 25lb≈6125ct $49.98 ($0.008/pc) | #6x1-5/8" 5lb≈945ct $24.98 ($0.026/pc)
+- Wood/deck, star/Torx: #8x1-5/8" 153ct $10.48 ($0.068/pc) | #8x2" 129ct $10.48 ($0.081/pc) | #10x3" 73ct $10.48 ($0.144/pc)
+- Deck (Deck Plus/DeckForce, T25 star/Torx): #10x2-1/2" 365ct $29.98 ($0.082/pc) | #10x3" 310ct $29.98 ($0.097/pc) / 5lb≈800ct $59.98 ($0.075/pc)
+- Interior trim screw, yellow zinc, star/Torx: #9x3" 72ct $10.48 ($0.146/pc)
+- Exterior/construction: Power Pro epoxy #10x3" 70ct $12.98 ($0.185/pc) | Simpson Strong-Drive SD mech-galv #9x1-1/2" 100ct $15.98 ($0.160/pc)
+- Screw rule: quote a whole box for small/medium jobs; switch to the 5lb/25lb bulk per-piece rate for large jobs. Drywall = coarse for wood studs; deck/exterior = coated or galvanized; never spec bare interior screws outdoors.
+
+INSULATION & ENERGY:
+- R-13 batt: $0.78/sqft | R-19 batt: $1.05/sqft | R-30 batt: $1.35/sqft | Blown-in cellulose: $0.55/sqft
+- Foam board 1" 4x8: $18.98 | House wrap (9ft roll): $159.98 | Spray foam (can): $7.98
+
+PAINT & FINISHES:
+- Interior latex paint 1 gal (Behr/Valspar): $31.98 | 5-gal: $139.98 | Primer 1 gal: $23.98
+- Exterior paint 1 gal: $39.98 | Caulk (tube): $5.98 | Painter's tape: $6.98 | Roller/tray kit: $14.98 | Brushes (each): $9.98
+
+FLOORING:
+- Ceramic tile 12x12 basic: $1.98/sqft | Porcelain 12x24: $3.98/sqft | Premium tile: $6.50/sqft
+- Thinset (50lb): $17.98 | Sanded grout (10lb): $13.98 | Tile spacers (bag): $4.98 | Backer board 3x5: $13.98
+- Oak hardwood: $5.48/sqft | Engineered wood: $4.25/sqft | Laminate: $1.79/sqft | Luxury vinyl plank: $2.69/sqft
+- Sheet vinyl: $1.45/sqft | Carpet (mid-grade): $2.25/sqft | Carpet pad: $0.55/sqft | Underlayment: $0.45/sqft
+- Transition strips (each): $12.98
+
+ROOFING & EXTERIOR:
+- Architectural shingles (33sqft bundle): $36.98 | 3-tab bundle: $29.98 | Roofing felt (roll): $24.98
+- Ice & water shield (roll): $89.98 | Drip edge (10ft): $9.98 | Ridge cap (bundle): $42.98 | Roofing nails (box): $39.98
+- Vinyl siding (sq): $145 | Soffit panel: $9.98 | Fascia board: $14.98 | Gutters (10ft): $8.98 | Downspout (10ft): $9.98
+
+ROOFING SHINGLE SYSTEMS (U.S. 2026 averages; "square" = 100 sqft; installed = materials + labor — use for full reroofs and to sanity-check totals):
+- 3-Tab asphalt: material $0.90–1.50/sqft, installed $3.50–5.00/sqft ($350–500/square), 15–20yr. Entry-level, flat uniform look; budget/secondary structures.
+- Architectural (dimensional/laminated): material $1.25–1.85/sqft, installed $4.00–8.50/sqft ($400–850/square), 25–30yr. Most popular (>50% of U.S. homes) — DEFAULT choice, best value + wind resistance.
+- Luxury/Designer (premium): material $3.50–6.00/sqft, installed $7.00–16.00/sqft ($700–1,600/square), 40–50yr. Mimics slate/cedar shake; thickest, highest impact resistance.
+- Impact-resistant (Class 4): material $1.50–2.50/sqft, installed $4.50–9.00/sqft ($450–900/square), 25–30yr. Hail/storm-rated; may qualify for insurance discount.
+- Solar shingles: material $6.00–13.00/sqft, installed $15.00–35.00/sqft ($1,500–3,500/square), 25–30yr. Integrated photovoltaics; highest cost, offsets energy bills.
+- Roofing rule: compute roof area in squares (add waste + pitch/steepness factor), default to Architectural unless the customer specifies otherwise, and itemize tear-off, underlayment, drip edge, flashing, ridge cap, and disposal as separate lines on top of the shingle cost.
+
+ELECTRICAL (standard/commodity — price normally; customer-selectable fixtures = $0 placeholder):
+- 14/2 Romex (250ft): $82.98 | 12/2 Romex (250ft): $109.98 | 12/3 Romex (250ft): $169.98
+- Standard 15A outlet: $1.28 | 20A outlet: $2.48 | GFCI outlet: $17.98 | Single-pole switch: $1.78 | 3-way switch: $4.98
+- Single-gang old-work box: $1.48 | New-work box: $0.98 | Cover plate: $0.78 | Wire nuts (box): $8.98
+- 15A breaker: $6.98 | 20A breaker: $7.98 | AFCI breaker: $44.98 | Recessed LED can (4"): $12.98 | Wafer LED: $9.98
+
+PLUMBING (rough-in priced normally; FIXTURES = $0 placeholder for contractor to set):
+- 1/2" PEX (100ft): $36.98 | 3/4" PEX (100ft): $58.98 | PEX fittings (each): $1.98 | 1/2" copper (10ft): $24.98
+- PVC pipe 2" (10ft): $9.98 | 3" (10ft): $16.98 | 4" (10ft): $22.98 | PVC fittings (each): $2.48
+- P-trap: $6.98 | Shutoff/angle stop valve: $7.98 | Braided supply line: $5.98 | Wax ring: $3.98 | PVC cement+primer: $12.98
+
+HVAC (equipment/fixtures = $0 placeholder; consumables priced):
+- Flex duct (25ft): $42.98 | Rigid duct (5ft): $12.98 | Register/grille: $12.98 | Line set (25ft): $89.98
+- Condensate pump: $44.98 | Float switch: $12.98 | Programmable thermostat: $39.98 | Equipment pad: $24.98
+
+CONCRETE & MASONRY:
+- Concrete mix (60lb bag): $5.48 | 80lb bag: $6.98 | Rebar #4 (10ft): $8.98 | Wire mesh (sheet): $8.98
+- Gravel base (50lb): $5.98 | Quikrete fast-set (50lb): $7.98 | Concrete block: $1.98 | Mortar mix (60lb): $7.98
+
+PRESSURE WASHING / CLEANING CONSUMABLES:
+- Sodium hypochlorite 12.5% "SH" (gal): $4.98 | Surfactant/cling soap (gal): $24.98 | Degreaser (gal): $18.98
+- House-wash detergent (gal): $19.98 | Efflorescence/rust remover (gal): $22.98
+
+GENERAL / MISC:
+- Dumpster rental (10-yard): $350 | Construction adhesive (tube): $5.98 | Silicone sealant (tube): $7.98
+- Sandpaper (pack): $8.98 | Drop cloths (pack): $12.98 | Shop rags (pack): $9.98 | Disposal/haul-away (small job): $75-150
+
+TRIM & MOULDING (per piece, commonly 7/8/12/16 ft lengths — use ~midpoint):
+- Colonial base 3-1/4" pine 8ft: $13 | Colonial base primed MDF 8ft: $8 | Ranch/streamline base MDF 8ft: $7
+- Square edge base pine 5-1/4" 8ft: $18 | Square edge base MDF 8ft: $12 | Modern flat base MDF 8ft: $10
+- Tall/Craftsman base pine 7-1/4" 8ft: $28 | Flexible base polymer 8ft: $42 | PVC base (wet area) 8ft: $12
+- Quarter round pine 8ft: $7 | Quarter round primed MDF 8ft: $5 | Quarter round oak 8ft: $11 | Base shoe pine 8ft: $6
+- Base cap pine 8ft: $8 | Color-matched LVP shoe 8ft: $18
+- Colonial crown small pine 8ft: $16 | Colonial crown primed MDF 8ft: $11 | Crown 4-5/8" MDF 8ft: $16
+- Crown large 5-1/4" pine 8ft: $27 | Dentil crown 8ft: $29 | Cove crown pine 8ft: $11 | Flexible crown 8ft: $65
+- Polyurethane ornate crown 8-12ft: $60 | Crown corner block: $12
+- Colonial casing 2-1/4" pine 7ft: $10 | Colonial casing primed MDF 7ft: $7 | Ranch casing MDF 7ft: $6
+- Flat/square casing pine 7ft: $16 | Flat/square casing MDF 7ft: $11 | Fluted casing 7ft: $20 | WM366 casing pine 7ft: $12
+- Casing pro-pack (door kit): $48 | Rosette/plinth block: $9 | Backband 8ft: $9
+- Chair rail pine 8ft: $14 | Chair rail primed MDF 8ft: $10 | Panel/picture-frame moulding 8ft: $12
+- Picture frame kit: $24 | Wainscot/beadboard panel MDF 4x8: $31 | Beadboard PVC 4x8: $45 | Wainscot cap rail 8ft: $12
+- Board & batten strip MDF 8ft: $8 | Cove moulding pine 8ft: $7 | Door stop moulding pine 7ft: $6
+- Lattice pine 8ft: $6 | Screen/bead moulding 8ft: $5 | Half round pine 8ft: $7 | Outside corner guard 8ft: $7
+- Inside corner pine 8ft: $7 | Stair nosing/trim (piece): $24 | Astragal (double door): $29 | Shiplap board 8ft: $10
+- Brick moulding wood 7ft: $19 | Brick moulding PVC 7ft: $29 | PVC trim 1x4 8ft: $19 | PVC trim 1x6 8ft: $27 | PVC trim 1x8 8ft: $36
+- Exterior window trim kit (per window): $80 | Exterior corner post: $29 | Composite fascia 1x6 12ft: $42
+- Finish nails 2" (1lb): $9 | Brad nails 1-1/4" (box): $11 | Wood filler/putty: $8 | Paintable caulk 10oz: $5
+- Trim construction adhesive 10oz: $7 | Miter finish saw blade 80T: $40
+
+PLUMBING FITTINGS (sold each unless noted — use ~midpoint):
+- PVC 90 elbow 1/2": $0.88 | PVC 90 elbow 2": $2.50 | PVC 90 elbow 4": $6 | PVC 45 elbow 2": $2.75
+- PVC coupling 1/2-1": $0.95 | PVC coupling 3-4": $5 | PVC tee 1/2": $1.20 | PVC tee 3": $6.75 | PVC wye 3-4": $10
+- PVC sanitary tee 3": $7.50 | PVC cleanout w/plug 3-4": $10 | PVC male/female adapter: $2 | PVC reducer bushing: $1.80
+- PVC cap: $2.50 | PVC union: $7 | PVC closet/toilet flange: $10 | PVC P-trap 1-1/2": $8 | PVC cement 8oz: $8 | PVC primer 8oz: $8
+- CPVC 90 elbow: $1.30 | CPVC tee: $1.65 | CPVC coupling: $1.10 | CPVC adapter: $2.25 | CPVC-copper transition: $6.50 | CPVC cement 8oz: $9.50
+- PEX 90 elbow brass: $2.75 | PEX tee brass: $3.50 | PEX coupling brass: $3 | PEX adapter MIP/FIP: $4.25
+- PEX crimp rings 100pk: $15 | PEX cinch rings 100pk: $18 | PEX ball valve: $13 | PEX manifold 6-port: $62 | PEX crimp tool: $82
+- SharkBite coupling 1/2": $9.50 | SharkBite elbow: $11 | SharkBite tee: $12.50 | SharkBite shutoff valve: $15
+- Copper 90 elbow 1/2": $1.60 | Copper 90 elbow 3/4": $2.40 | Copper tee: $3.25 | Copper coupling: $1.55 | Copper male adapter: $3
+- Copper cap: $1.85 | Brass ball valve: $17 | Brass gate valve: $19 | Brass compression fitting: $6 | Lead-free solder 1/4lb: $18 | Flux 4oz: $7.50
+- Shutoff/angle valve 1/4-turn: $10 | Braided SS supply line 20": $10 | Toilet supply line 12": $8 | Wax ring w/horn: $8
+- Toilet fill valve: $16 | Toilet flapper: $8 | Sink drain assembly: $15 | Disposal flange kit: $17 | Hose bibb/sillcock: $17
+- Pipe insulation foam 6ft: $3.50 | Teflon/PTFE tape: $2.75 | Pipe thread sealant: $7.50
+
+ELECTRICAL — WIRE & DEVICES (use ~midpoint; rolls priced as listed):
+- Romex 14/2 250ft: $67 | Romex 12/2 250ft: $92 | Romex 12/3 250ft: $145 | Romex 10/2 250ft: $132 | Romex 10/3 25ft: $40
+- Romex 6/3 25ft: $70 | THHN 12AWG per ft: $0.32 | UF-B direct burial 12/2 250ft: $150 | Bell/low-volt 18/2 50ft: $15 | Cat6 250ft box: $67
+- Duplex outlet 15A: $3.50 | Duplex outlet 20A: $5 | GFCI 15A: $24 | GFCI 20A: $28 | USB combo outlet: $29
+- Single-pole switch: $4 | 3-way switch: $7 | Dimmer switch: $27 | Smart Wi-Fi switch: $50 | Weather-resistant outlet: $8
+- Wall plate 1-gang: $2.40 | Weatherproof in-use cover: $13 | Plastic box single-gang new-work: $2 | Old-work box: $3.50
+- Metal box 4" square: $5.75 | Ceiling fan box (braced): $13 | Weatherproof box: $8.50 | EMT 1/2" 10ft: $5.50 | EMT 3/4" 10ft: $7.75
+- PVC conduit 1/2" 10ft: $4.50 | EMT connector/coupling: $1.60 | Conduit strap: $0.65 | Wire nuts 100pk: $10 | Cable staples 100pk: $6.50 | NM cable clamp: $1.25
+- Main panel 100A 20-space: $180 | Main panel 200A 40-space: $275 | Subpanel 100A: $115 | Single-pole breaker 15/20A: $13
+- Double-pole breaker 30/50A: $25 | AFCI breaker 15/20A: $60 | GFCI breaker 20A: $62 | Dual-function AFCI/GFCI 20A: $70
+- Whole-house surge protector: $130 | Grounding rod 8ft: $24 | Grounding wire 6AWG per ft: $1.10
+- LED bulb A19 (60W eq): $4.50 | LED recessed retrofit 6": $27 | LED shop light 4ft: $36 | LED flush mount: $47
+- LED under-cabinet strip: $37 | Ceiling fan 52" w/light: $165 | Vanity light bar 3-light: $80 | Outdoor wall lantern: $60
+- Motion flood light LED 2-head: $62 | Smoke/CO detector combo: $41 | Doorbell transformer 16V: $16
+  (NOTE: light fixtures, ceiling fans, and smart devices are CUSTOMER-SELECTABLE — use the "Fixture:" $0 placeholder rule. The prices above are typical so you can ballpark when the contractor named a specific item; standard outlets/switches/breakers/boxes/wire/recessed cans are priced normally.)
+
+HVAC — EQUIPMENT, DUCT & SUPPLIES (use ~midpoint; equipment = customer-selectable, ballpark only):
+- Window A/C 5,000 BTU: $225 | 8,000 BTU: $300 | 12,000 BTU: $400 | Portable A/C 10,000 BTU: $420
+- Mini-split DIY 12k BTU/1ton: $900 | 18k/1.5ton: $1,150 | 24k/2ton: $1,450 | Gas furnace 80% 60-80k BTU: $1,650
+- Electric furnace/air handler: $1,350 | A/C condenser 2-ton 14 SEER: $2,000 | Evaporator coil 2-3 ton: $675
+- Gas water heater 40gal: $650 | Tankless gas 5.5 GPM: $875
+- Rigid round duct 6" 5ft: $14 | Flex duct insulated 6" 25ft: $36 | Flex duct 8" 25ft: $49 | Duct elbow 6": $9 | Duct tee/wye 6": $12
+- Duct reducer 6-4": $9 | Register boot 4x10/6": $12 | Take-off collar 6": $8 | Duct cap 6": $6.50 | Sheet metal duct 8x16: $21
+- Duct strap hanger 100ft: $15 | Foil duct tape UL181: $15 | Mastic duct sealant 1gal: $25
+- Floor register 4x10: $12 | Floor register 6x12: $15 | Wall/ceiling register 4x10: $13 | Return air grille 20x20: $29
+- Return air grille w/filter 20x25: $40 | Toe-kick register: $16 | Roof/soffit vent: $16 | Dryer vent hood 4": $13
+- Programmable thermostat: $48 | Smart thermostat (Nest/T6): $130 | Furnace filter 16x25x1 MERV8: $10 | Deep filter 20x25x4: $30
+- Line set copper 1/4x3/8 25ft: $90 | Refrigerant gauge set: $88 | Condensate pump auto-float: $65 | Condensate drain tube: $13
+- Contactor/run capacitor: $24 | HVAC whip/disconnect 60A: $29 | Condenser pad 3x3: $33 | Foil tape/insulation wrap: $16
+
+MANDATORY PRICE RULE — THIS OVERRIDES YOUR INSTINCTS, SO YOU DON'T HAVE TO THINK HARD ABOUT PRICES. For any material in the guide above, LOOK UP its price and USE IT (adjusted only by the ZIP multiplier — never more than ±35% from baseline for common staples). Do NOT guess a higher number from memory. A 1/2" drywall sheet is ~$16, NOT $40. A 2x4x8 stud is ~$3.78, NOT $8. If your instinct says a staple costs much more than the guide price, you are WRONG — use the guide price. Over-pricing a $16 sheet at $40 makes the whole quote useless and is a firing offense. Sanity-check EVERY line against the guide before output; cut anything priced >35% above its guide price down to the guide price.
+
+WHEN AN ITEM IS NOT IN THE GUIDE: never skip it and never leave the quote incomplete. Use your full knowledge of Home Depot / Lowe's to figure a realistic, grounded 2026 shelf price for that item (adjusted for the job ZIP), in the same conservative spirit as the guide prices — picture the actual shelf tag, don't inflate. The goal is ALWAYS to deliver the contractor a complete, accurate, ready-to-send quote with every line priced. A missing material or a wildly-off price both ruin the quote — so include everything the job needs and price each line as close to real as you can.
 
 COMPLETENESS — THIS IS THE MOST IMPORTANT RULE. You have full knowledge of everything stocked at Home Depot and Lowe's. Build a COMPLETE material list as if you were physically walking the store aisles filling a cart to finish this exact job start to finish. Do NOT list only the obvious headline materials — include EVERY consumable and incidental the job actually requires. Contractors lose money by forgetting small items, so you must not forget them. Walk through these categories for EVERY job and include any that apply:
 - Fasteners: screws, nails (right type/length), anchors, construction adhesive, staples
@@ -395,38 +579,110 @@ When a customer mentions "shed," apply this knowledge. Default scope assumes pre
 
 const TRADES_KNOWLEDGE = `MULTI-TRADE KNOWLEDGE — you can estimate ALL the trades involved in building or remodeling a structure. Apply the right trade knowledge for whatever the job is. For each trade, build a complete, correctly-priced material list and realistic labor.
 
-ELECTRICAL:
+ELECTRICAL — work through the whole job, price the standard hardware normally, and flag customer-selectable items for the contractor to price:
 - Rough-in: 14/2 Romex for 15A lighting circuits, 12/2 for 20A outlet/kitchen circuits, 12/3 or 14/3 for 3-way switching. Boxes (old-work vs new-work), staples, wire nuts, NM connectors.
-- Devices: outlets ($1-3), switches ($1-4), GFCI ($15-22 — required at kitchen/bath/exterior/garage), AFCI breakers ($35-50), cover plates.
+- STANDARD DEVICES — price these NORMALLY (they're commodity, prices don't really vary): standard receptacles/outlets ($1-3), standard switches ($1-4), GFCI ($15-22 — required at kitchen/bath/exterior/garage), AFCI breakers ($35-50), cover plates, standard recessed cans/wafer LEDs ($8-15 ea). Use real prices for all of these — no placeholder needed.
+- CUSTOMER-SELECTABLE FIXTURES & APPLIANCES — these vary wildly by what the customer picks, so DON'T guess the price. This covers: light FIXTURES (chandeliers, vanity lights, pendants, exterior fixtures), ceiling fans, ranges/ovens/cooktops, microwaves, dishwashers, garbage disposals, water heaters (electric), EV chargers, hot tubs/spas, generators, smart panels/devices, and any other named appliance or decorative fixture the customer chooses. For EACH one:
+  • Add a SEPARATE material line whose name starts with "Fixture: " for decorative/lighting items or "Appliance: " for appliances (e.g. "Fixture: Ceiling fan", "Fixture: Dining chandelier", "Appliance: Electric range", "Appliance: EV charger").
+  • Set its unit_price to 0 as a placeholder UNLESS the contractor's narration clearly named a specific price/model.
+  • You STILL price the rough-in/hardware to serve it normally (the dedicated circuit, breaker, wire, fan-rated box, whip/receptacle) — only the selectable fixture/appliance itself gets the $0 placeholder.
+- TRIGGER WORDS: any time the job says install / hang / mount / put up / add / replace / swap a light fixture, chandelier, pendant, vanity light, CEILING FAN, range, oven, dishwasher, disposal, EV charger, water heater, etc. — that is a customer-selectable item and MUST get its own "Fixture: " or "Appliance: " line at $0. "Hang a ceiling fan" = a "Fixture: Ceiling fan" line at $0, even though it's phrased as labor. Do not skip this just because the verb sounds like labor.
+- In contractor_notes, ALWAYS add a reminder listing them, e.g.: "PRICE BEFORE SENDING: Set the price for each fixture/appliance — Ceiling fan, Dining chandelier, Electric range. These depend on what the customer picks, so they're left at $0 for you to fill in."
 - Panels/service: breakers sized to circuit, sub-panels, service upgrades (100A→200A is a common upgrade). Service/panel work, load calcs, and service-entrance sizing REQUIRE a licensed electrician — flag this in contractor_notes.
-- Lighting: cans/wafer LEDs ($8-15 ea), fixtures, fans (need rated boxes).
+- A ceiling fan needs a FAN-RATED box (price that box normally); heavy fixtures need proper support/blocking. The fan/fixture itself is still a "Fixture: " line at $0.
 
-PLUMBING:
-- Supply: PEX (cheaper, faster) or copper. 1/2" for fixtures, 3/4" for mains. Fittings, manifolds, PEX rings/clamps, shutoff valves, supply lines.
+PLUMBING — work through the WHOLE job methodically, fixture by fixture, then build the complete material list:
+- PROCESS: for a plumbing job, mentally walk each part of the scope: (1) every PLUMBING FIXTURE the job touches or installs, (2) the SUPPLY side feeding each, (3) the DRAIN/WASTE/VENT side serving each, (4) shutoffs/valves/connectors, (5) any water heater or gas work, (6) consumables. Don't skip the small stuff — it's where plumbing jobs lose money.
+- Supply: PEX (cheaper, faster) or copper. 1/2" for fixtures, 3/4" for mains. Fittings, manifolds, PEX rings/clamps, shutoff/angle-stop valves, braided supply lines.
 - DWV (drain/waste/vent): PVC/ABS pipe sized correctly (1.5" lav, 2" shower/tub, 3-4" toilet/main), fittings, P-traps, primer + cement. Proper venting and drain sizing must meet code — flag for licensed-plumber verification on new DWV runs.
-- Fixtures: toilet, vanity/sink, faucet, tub/shower valve + trim, water heater (tank vs tankless — tankless needs gas/electrical sizing). Wax rings, supply lines, caulk.
+- Consumables/rough: wax rings, supply lines, escutcheons, plumber's putty, Teflon tape, pipe straps/hangers, caulk, fire-caulk on penetrations.
+
+FIXTURES — CRITICAL RULE: A "fixture" is any selectable appliance/fitting the customer picks — toilet, sink/lavatory, vanity, faucet, tub, shower valve + trim/head, kitchen sink, garbage disposal, dishwasher hookup, bidet, hose bib, water heater, utility sink, etc. The PRICE of a fixture varies enormously by what the customer chooses (a $79 builder toilet vs a $600 smart toilet; a $40 faucet vs a $400 one), so you must NOT guess a fixture's price.
+- For EVERY fixture the job needs, add a SEPARATE material line. Start the line's name with "Fixture: " (e.g. "Fixture: Toilet", "Fixture: Kitchen faucet", "Fixture: 50-gal water heater"). Set its unit_price to 0 (a placeholder) unless the contractor's narration clearly stated a specific price/model.
+- In contractor_notes, ALWAYS include a clear reminder listing the fixtures, e.g.: "FIXTURE PRICING: Set the price for each fixture before sending — Toilet, Vanity faucet, Shower trim. Fixture costs depend on what the customer picks, so they're left at $0 for you to fill in." This makes sure the contractor never sends a quote with $0 fixtures by accident.
+- The rough-in plumbing materials (pipe, fittings, valves, traps, supply lines) you CAN price normally — only the customer-selectable FIXTURES get the $0 placeholder + reminder.
 - Water heater swaps and gas line work REQUIRE a licensed plumber — flag in contractor_notes.
 
-HVAC:
-- Materials: ductwork (flex vs rigid), registers/grilles, line sets, refrigerant, condensate pump/line, thermostat, disconnect, whip, pad.
-- Equipment: condenser, air handler/furnace, mini-split heads — sized by Manual J load calculation.
-- IMPORTANT: HVAC equipment SIZING (tonnage), Manual J/D load + duct calculations, refrigerant handling (EPA 608), and gas/electrical hookups REQUIRE a licensed HVAC tech. You may estimate materials and a rough equipment cost, but ALWAYS note in contractor_notes that a licensed HVAC pro must confirm sizing and do the hookup.
+HVAC — you understand how systems WORK, how they're SIZED, and how to TROUBLESHOOT, so your quotes and notes are sharp and genuinely helpful:
+- SYSTEM TYPES & HOW THEY WORK: Split system (outdoor condenser + indoor air handler/furnace + evaporator coil, joined by a refrigerant line set) — the standard. Heat pump (same hardware but a reversing valve lets it heat AND cool; uses aux/emergency electric heat strips or a gas furnace as backup "dual fuel" below balance point). Straight A/C + gas/oil furnace. Packaged unit (everything in one outdoor cabinet, common on rooftops/commercial). Ductless mini-split (outdoor unit + 1+ wall/ceiling heads, no ductwork — great for additions/no-duct spaces). Refrigeration cycle basics: compressor pressurizes refrigerant → outdoor coil rejects heat (condenser) → metering device (TXV/piston) drops pressure → indoor coil absorbs heat (evaporator) → repeat. Heat moves; the system doesn't "make cold."
+- KEY SPECS: cooling capacity in TONS (1 ton = 12,000 BTU/hr); efficiency in SEER2 (cooling) and HSPF2/AFUE (heating); refrigerant type matters — legacy R-410A vs the newer low-GWP R-454B/R-32 systems now phasing in (don't mix; equipment is refrigerant-specific). Furnace sized in BTU input × AFUE = output. Airflow rule of thumb ~400 CFM per ton.
+- SIZING: by Manual J load calc (not by square-foot guess and NOT by "match the old unit" — old units are often wrong). Oversizing short-cycles and won't dehumidify; undersizing never keeps up. Duct sizing by Manual D, equipment selection by Manual S. State sizing as a planning figure to be confirmed by load calc.
+- COMMON FAULTS / TROUBLESHOOTING (use this to write smart contractor_notes and to scope repair/replace jobs correctly): not cooling → check thermostat/batteries, tripped breaker, dirty air filter (the #1 cause), iced evaporator coil (low airflow or low refrigerant), dirty condenser coil, failed capacitor (very common, cheap — unit hums but fan/compressor won't start), bad contactor, low refrigerant = a LEAK (topping off without finding the leak is a band-aid; flag it), failed compressor (expensive — often tips the decision toward replacement), clogged condensate drain (water shutoff switch trips unit), bad blower motor/ECM, frozen line set. Heat side → no heat: ignitor/flame sensor (dirty flame sensor is the most common no-heat call), gas valve, pressure switch, limit switch, heat pump in defrost, dead reversing valve, or aux-heat strips/sequencer. Weak airflow → filter, closed/blocked registers, undersized or leaky ducts, dirty blower wheel.
+- REPAIR vs REPLACE guidance (helps the contractor advise the customer): if the unit is 12–15+ years old, on R-22 (obsolete/expensive), or facing a compressor/coil failure, repair cost often approaches replacement — note that in contractor_notes so the contractor can have the honest conversation. A capacitor or contactor on a newer unit is a cheap fix, not a replacement.
+- MATERIALS to list as relevant: condenser, air handler/furnace, evaporator coil, mini-split head(s), line set + insulation, refrigerant (correct type), filter drier, ductwork (flex vs rigid), plenums, registers/grilles, flex connectors, condensate pump + drain line + float switch, thermostat (smart/programmable), whip/disconnect, breaker, equipment pad, and consumables (nitrogen for pressure-test, flux/brazing rod, mastic/tape, hangers).
+- IMPORTANT — you are NOT a substitute for hands-on diagnosis. Equipment SIZING (tonnage), Manual J/D/S calcs, refrigerant handling (EPA 608 certification required to buy/handle refrigerant), brazing, gas piping, and electrical hookups REQUIRE a licensed HVAC tech. Provide materials, a rough equipment cost, and a sharp likely-cause note, but ALWAYS state in contractor_notes that a licensed HVAC pro must confirm the diagnosis/sizing and perform the refrigerant/gas/electrical work.
+
+PRESSURE WASHING / SOFT WASHING (residential AND commercial):
+- This is a SERVICE job, not a build — most of the cost is LABOR + chemicals + equipment time, NOT lumber/hardware. Keep the material list to consumables (cleaning solutions) and small supplies; do NOT invent construction materials.
+- Pricing basis: price by SQUARE FOOTAGE of the surface being cleaned (or by panel/unit for things like driveways). Typical ranges — flatwork (driveways, sidewalks, patios) $0.15–0.35/sqft; house exterior (siding) $0.20–0.45/sqft; decks/fences $0.30–0.60/sqft; roofs (soft wash ONLY, never high-pressure) $0.40–0.70/sqft. Commercial (storefronts, parking lots, dumpster pads, fleet/equipment) runs $0.10–0.25/sqft for large flat areas but has bigger minimums and may need night/off-hours work.
+- ALWAYS apply a job MINIMUM — most pros won't roll out for less than $150–250 residential. State the minimum in contractor_notes if the calculated total is below it.
+- CONSUMABLES / materials to list: sodium hypochlorite (12.5% "SH"/bleach) for soft washing organic growth (mold, mildew, algae) — roughly 1 gal SH per ~300–400 sqft of soft-wash area at mix; surfactant/"cling" soap; degreaser (concrete, oil stains, commercial kitchens/dumpster pads); house-wash detergent; optional sodium hydroxide for heavy grease; efflorescence/rust remover (oxalic/acid) when needed; sand or polymeric sand if re-sanding pavers after cleaning. Estimate gallons from the area.
+- EQUIPMENT/OVERHEAD to fold into pricing (as labor/overhead, not customer-facing line items unless rented): pressure washer (3,000–4,000 PSI, 4+ GPM gas unit for flatwork), surface cleaner attachment (speeds flatwork 3–4x), soft-wash/12V pump + downstream injector for siding & roofs, hoses, nozzles, water source/buncker tank, fuel. If a lift or water-reclamation/containment is required (common on COMMERCIAL lots near storm drains — EPA/municipal runoff rules), add a rental line and flag it.
+- SURFACE RULES (get these right): high pressure for concrete/brick/flatwork; SOFT WASH (low pressure + chemical) for vinyl/wood siding, painted surfaces, screens, and ALWAYS for roofs (high pressure destroys shingles and voids warranties). Wood decks/fences: low-medium pressure + cleaner, never gouge the grain.
+- REALISTIC TIMEFRAMES (use these to set estimated_hours): single-story house wash ~2–4 hrs; two-story ~4–6 hrs; average driveway (~600 sqft) ~1–2 hrs with a surface cleaner; deck/fence ~3–5 hrs incl. prep; roof soft wash ~3–6 hrs. COMMERCIAL: storefront/sidewalk frontage half a day; mid-size parking lot or large flatwork 1–2 days, often split across nights; recurring commercial contracts (monthly dumpster pad / drive-thru) are short repeat visits. Add prep/setup/breakdown time (~30–45 min) and travel.
+- COMMERCIAL extras to account for: bigger minimums, possible night/weekend hours, insurance/COI requirements, water containment & wastewater capture near storm drains, and sometimes a flat per-visit or monthly contract rate instead of per-sqft. Note any of these in contractor_notes when the job reads commercial.
 
 WHOLE-STRUCTURE / GROUND-UP BUILDS:
 - These run in phases: site prep → foundation → framing → roof dry-in → rough-ins (electrical/plumbing/HVAC) → insulation → drywall → finishes → trim → final mechanical/inspections.
 - For a full build, organize the work_scope by phase. Be clear in contractor_notes that a ground-up build estimate is a planning ballpark — permits, engineering, inspections, and licensed-trade sub-quotes are needed for a firm number.
 
+NEW CONSTRUCTION — STICK-BUILT HOME, FOUNDATION TO DRY-IN (phase-by-phase material-takeoff reference based on the IRC framework; trades stack in this order — each phase's checklist maps directly to estimate line items. Use it to build a COMPLETE material list and not miss consumables, connectors, or code-required items):
+- SEQUENCE (you cannot frame before the foundation cures or sheathe before framing is braced): Ph0 permits/site logistics → 1 site work/excavation/grading → 2 footings & foundation → 3 waterproofing/drainage/backfill → 4 slab/crawl/basement floor → 5 first-floor deck & subfloor → 6 wall framing → 7 upper floors & stairs → 8 roof framing → 9 roof & wall sheathing → 10 windows/doors/weather barrier → 11 roofing underlayment-to-shingles = DRY-IN. After dry-in (separate scope): MEP rough-in → insulation → drywall → finishes.
+- PH0 PERMITS/SITE: stamped architectural + structural plans (permitted copy on site), building permit + sub-permits (electrical/plumbing/mechanical/grading/septic/driveway), soils/geotech report (sets soil bearing capacity → drives footing design — don't guess), 811 utility locate, temp power pole + meter, temp water, portable toilet, gravel construction-entrance pad, silt fence/erosion control, posted permit sign. Gate: erosion/sediment-control inspection BEFORE grading.
+- PH1 SITE/EXCAVATION/GRADING: strip & stockpile topsoil (organic soil is compressible — never build on it), clear stumps in footprint, rough-grade for drainage (IRC: min 6" of fall within first 10 ft from foundation), batter boards + mason's line (square via 3-4-5 + equal diagonals), excavate below local frost line, #57 stone for over-dig/pad base, geotextile fabric (soft soils), compactable structural fill placed in lifts (commonly 95% modified Proctor). Gate: open-hole/footing-trench + bearing-soil sign-off (some areas). Verify benchmark elevation + finished-floor height vs street/sewer BEFORE digging.
+- PH2 FOOTINGS & FOUNDATION (most unforgiving phase — everything above inherits its accuracy): ready-mix concrete (2,500–3,000+ PSI per engineer), rebar #4/#5 + tie wire + chairs/dobies (continuous horizontal bars, correct lap splices/clearances, vertical dowels for walls), anchor bolts (typ. ½"x10" J-bolts — ≤6 ft o.c., within 12" of each plate end, min 2 bolts per plate piece) OR embedded hold-down straps, form panels/lumber + form ties + stakes + form release, CMU block + mortar + grout (block walls: grout rebar cells solid + bond-beam cap), vapor barrier/capillary break, sill seal + termite treatment staged. Concrete cures ~28 days to full strength. Gates (HARD STOPS, both before pour): footing (rebar/depth/width/bearing), then foundation-wall (rebar + anchor bolts). Re-check diagonals + dimensions after forms set and after pour — an out-of-square foundation fights every framer above it.
+- PH3 WATERPROOFING/DRAINAGE/BACKFILL: damp-proofing (sprayed/troweled asphaltic — code minimum for many crawls) vs true waterproofing membrane (sheet/fluid/peel-and-stick — basements & high water table), dimple/protection board, 4" perforated footing drain (holes DOWN) + filter fabric/sock + #57 washed drainage gravel to daylight/sump, sump pit + pump (high water table), free-draining backfill in lifts, termite soil treatment/physical barrier. Backfill ONLY after cure AND first floor framed (or walls temp-braced top+bottom) — unbraced fresh basement walls crack/cave under soil pressure (common, expensive failure). Gate: drainage/waterproofing before backfill (some areas).
+- PH4 SLAB/CRAWL/BASEMENT FLOOR: compacted gravel base (#57/crusher run = capillary break), 10–15 mil under-slab vapor retarder lapped + seam-taped, rigid foam (slab edge/under-slab per energy code), WWM or rebar or fiber-reinforced mix + chairs, under-slab plumbing + electrical conduit + radiant tubing roughed in, ready-mix concrete (screed/bull-float/edge/trowel), expansion/isolation joint at walls/columns, control joints cut early to direct shrinkage cracking, curing compound/sealer; crawlspace = ground vapor barrier (sealed/conditioned crawl now standard over vented). Gate: under-slab plumbing & electrical rough BEFORE pour (buried forever after).
+- PH5 FIRST-FLOOR DECK & SUBFLOOR: PT sill plate bedded on sill-seal foam + bolted to anchor bolts (untreated wood on concrete rots — code), termite shield, anchor-bolt nuts + square plate washers, center beam (LVL/glulam/built-up dimensional or steel) on interior posts/columns with their own footings + post caps/bases, floor joists (dimensional / I-joist / open-web truss) typ. 16" o.c., rim/band joist closing perimeter, joist hangers + the SPECIFIED structural-connector (hanger) nails — NOT drywall screws/random nails (wrong fasteners void the rated capacity + fail inspection), blocking/bridging on long spans, 3/4" T&G APA-rated subfloor glued (construction adhesive) + screwed/nailed, staggered.
+- PH6 WALL FRAMING (built flat on deck, tilted up, squared on the ground): bottom plate + studs (typ. 16" o.c., 24" with advanced framing; 2x4 or 2x6 per spec) + double top plate lapped at corners/intersections, headers sized by span (dimensional/LVL/built-up) with king + jack/trimmer studs + sills at openings, extra studs at corners/partition intersections for nailing + drywall backing, braced-wall panels (structural sheathing / let-in metal-or-wood / engineered shear panels per the braced-wall plan) for lateral wind/seismic, hurricane/seismic clips + connectors, temp bracing, shims. INSTALL BACKING/BLOCKING NOW for cabinets, grab bars, TVs, handrails, heavy fixtures — trivial during framing, a nightmare after drywall.
+- PH7 UPPER FLOORS & STAIRS: repeat platform framing (joists / I-joists / trusses + rim joist + 3/4" T&G subfloor + adhesive) bearing on lower walls' double top plate; KEEP THE LOAD PATH CONTINUOUS — beams/posts/bearing walls above must land on a beam, wall, or post below, continuously down to a footing (a point load on unsupported subfloor = structural failure); stair stringers (2x12) cut to uniform rise/run (IRC ≤7-3/4" max riser, ≥10" min tread, uniform within tight tolerance or it's a trip hazard + guaranteed inspection failure), framed stairwell rough opening + headroom.
+- PH8 ROOF FRAMING: engineered stamped roof trusses (typ. 24" o.c. — craned/lifted, set, braced, tied down) OR stick-framed rafters bearing on a ridge board/beam with ceiling joists / collar / rafter ties resisting outward thrust (needed for vaults/complex rooflines); hurricane/uplift connectors at EVERY rafter/truss bearing point sized to the local wind zone (NOT optional, NOT interchangeable — match connector + exact fasteners to the engineering; first thing a framing inspector checks); permanent truss bracing (per truss engineering) + temp bracing; sub-fascia, lookouts/outriggers, gable-end framing/barge rafters; coordinate crane/lift for the truss set.
+- PH9 ROOF & WALL SHEATHING (skins the frame into a rigid shear diaphragm — resists racking, is the nail base for roofing/siding, first weather layer): wall panels OSB/plywood (typ. 7/16–1/2"), roof decking OSB/plywood (thickness per rafter/truss spacing) laid perpendicular to framing + staggered with H-clips or T&G edges for edge support, gapped at edges for expansion, nailed to the ENGINEERED schedule (8d common/ring-shank; edge spacing often 6", field often 12"; not over-driven through the panel face — the whole shear value depends on it), optional continuous exterior insulation board per energy code. Gate: framing/sheathing nailing-pattern inspection (under-nailing/missed shear nailing = common red-tag).
+- PH10 WINDOWS/EXTERIOR DOORS/WEATHER BARRIER (make the walls weather-tight; sequence + lapping is everything): house wrap/WRB over sheathing lapped shingle-style (upper course over lower so gravity sheds water out) + taped seams = the drainage plane behind the cladding; flash each opening so every layer laps over the one below — sill flashing FIRST (often with a back dam) → window set in a bed of sealant + fastened → jamb flashing → head flashing tucked UNDER the WRB above (a reversed lap funnels water INTO the wall = #1 cause of hidden rot around windows); exterior doors plumb/level/square on a flashed, sloped sill pan; shims + low-expansion foam; backer rod + WRB-compatible exterior sealant; fasten per the window/door manufacturer instructions.
+- PH11 ROOFING / DRY-IN (install sequence; pull shingle cost tiers from the ROOFING SHINGLE SYSTEMS pricing chart): ice-and-water shield membrane at eaves (cold climates), valleys, penetrations, low-slope areas; synthetic underlayment (or felt) rolled up-slope lapped course-over-course + over the ridge; drip edge metal (eave UNDER underlayment, rake OVER underlayment); starter strip at eave; field shingles (3-tab / architectural / luxury — default to architectural unless customer specifies) OR metal panels (own panel/clip system); hip & ridge caps; step flashing at roof-to-wall, counter-flashing at masonry, valley flashing (open/woven), pipe boots at vents; roofing nails LENGTH-MATCHED to deck thickness (point must fully penetrate/clinch) landed in the nail zone (typ. 4–6 nails/shingle, more in high-wind); ridge vent / attic ventilation; roofing cement/sealant; fall protection (harness/rope grab/anchors). House is now DRIED IN — interior trades can start.
+- INSPECTION GATES (hard stops — work can't be covered until it passes; order/exact gates vary by AHJ): 1 erosion/sediment control (before grading) → 2 footing (before footing pour) → 3 foundation wall rebar+anchor bolts (before wall pour) → 4 under-slab plumbing & electrical (before slab pour) → 5 foundation drainage/waterproofing (before backfill, some areas) → 6 framing & sheathing incl. braced walls + connectors (after roof on, before insulation) → rough MEP (after dry-in, next scope). Fold a permit + inspection allowance into the estimate when scope triggers it.
+- TAKEOFF UNITS & WASTE (turn the phase checklists into quantities): roofing square = 100 sqft of roof (~3 bundles/square); sheathing/subfloor by the 4x8 sheet (32 sqft/sheet); concrete by the cubic yard (27 cu ft — order a little extra, you can't add to a short pour); lumber by linear foot + piece count at the o.c. spacing; apply waste factors ~10% framing/sheathing, 10–15% roofing (more on cut-up/steep/complex roofs + walls).
+- COST DRIVERS THAT MOVE THE ESTIMATE (call these out in contractor_notes): roof complexity — valleys/hips/dormers/steep pitch +15–50% labor; foundation type (slab vs crawl vs full basement) is a major swing; engineered lumber (LVL/I-joist/trusses) vs dimensional changes cost + labor; local wind/seismic/frost requirements drive connectors, footing depth, and bracing; regional labor rates + material freight (coastal/metro runs higher).
+
+MEP ROUGH-IN & TRIM-OUT — ELECTRICAL / PLUMBING / HVAC (companion to the new-construction guide above; picks up at the dried-in shell and runs to Certificate of Occupancy. Each trade has TWO stages at different points in the build: ROUGH-IN = installed in open walls/floors/ceilings BEFORE insulation+drywall (inspected before cover); TRIM-OUT = devices/fixtures/equipment AFTER finishes+paint, ending in a tested, inspected system. Quote both stages when a job spans them):
+- TRADE SEQUENCE (same every job — plan shared chases/penetrations together before anyone pulls wire/pipe/duct): HVAC FIRST (bulky inflexible duct gets first pick of routes) → PLUMBING SECOND (gravity DWV needs fixed slope, claims its runs next) → ELECTRICAL LAST (wire bends around everything, weaves through what's left).
+- ELECTRICAL ROUGH-IN (E-1): service entrance (overhead/underground) + meter base + main panel/load center set with required clear working space; grounding electrode system (ground rods and/or concrete-encased Ufer) bonded to water/gas piping; service+feeder conductors sized to the load calc; device boxes (old-work/new-work) at consistent heights (~12–16" to center for receptacles, ~48" switches) set to finished-wall depth so they end up flush, box fill by conductor count (no overfill); fan-rated boxes; NM/Romex (14/2, 12/2, 12/3) bored back from the stud face or nail-plate-protected within 1-1/4", stapled per code spacing with free conductor length left at each box, home runs landed in the panel; AFCI on living-area circuits + GFCI where required; dedicated kitchen small-appliance / laundry / bath circuits; recessed-can + bath-fan rough housings; low-voltage (Cat6/coax/thermostat/security) run but separated from line voltage; conduit + fittings at garage/exterior/feeds. Gate: electrical rough BEFORE insulation/drywall (box mounting/fill, cable support, nail-plate protection, grounding/bonding, AFCI/GFCI layout). Leave generous conductor length — you can trim at trim-out, can't add.
+- ELECTRICAL TRIM-OUT (E-2): receptacles/switches/dimmers + GFCI/AFCI devices set + cover plates; light fixtures, ceiling fans (on their rated boxes), recessed trims, bath-fan grilles/motors hung + connected; panel dressed (breakers landed, circuits labeled, directory complete); smoke + CO alarms (interconnected, on required circuits); whips/connections for HVAC, water heater, appliances; verify polarity/grounding/tight terminations (TORQUE to spec — loose connections are the leading cause of failures + fires), test GFCI/AFCI buttons, energize + verify every circuit. Gate: final electrical (part of CO). [Selectable light fixtures/fans/appliances still follow the "Fixture:"/"Appliance:" $0 rule above.]
+- PLUMBING ROUGH-IN (P-1): two hidden systems — DWV (PVC/ABS waste to each fixture at code slope, typ. 1/4" per foot on smaller drains so solids carry; every fixture gets a trap + vent so it drains without siphoning the trap seal; vents tie together + penetrate the roof; building drain to sewer/septic; cleanouts for access) and SUPPLY (PEX/copper/CPVC hot+cold from main + water heater, 1/2" at fixtures / 3/4" mains, stub-outs at each fixture's spec rough-in dimensions, shutoffs/manifolds, hose bibbs, water-hammer arrestors, nail plates through framing); tub/shower valves set to finished-wall depth with bracing/backing; closet flanges; set drop-in/alcove tubs; system held under air/water TEST for inspection. Gate: plumbing/DWV rough BEFORE cover, under test (slope, venting, trap arms, supports, holds pressure). Confirm fixture rough-in dimensions against the ACTUAL fixtures, not generic numbers, or the trim won't line up.
+- PLUMBING TRIM-OUT (P-2): toilets set on the closet flange with a new wax/gasket + closet bolts; sinks/lavs/faucets + supply lines + angle stops; P-traps; tub/shower trim kits (handles/spouts/heads); water heater final connections + T&P relief + discharge/drain line; disposal, dishwasher, icemaker, washer hookups; plumber's putty / PTFE tape / silicone; turn water on + leak-check under pressure, run drains to confirm flow + traps hold, verify aerators/flow + WaterSense. Don't overtighten plastic fittings/supply nuts (hand-tight + a small turn — cracking one means opening a finished wall). Gate: final plumbing (part of CO). [Customer-selectable fixtures still get the "Fixture:" $0 line + reminder.]
+- HVAC ROUGH-IN (H-1): size equipment off a real Manual J load calc (NOT a rule of thumb or "match the old unit" — oversizing short-cycles, wastes energy, leaves humidity high); furnace/air-handler/heat-pump location + condenser pad set; supply+return trunk + branch ducts (rigid metal and/or flex) sized per Manual D, boots/takeoffs, sealed at joints with mastic / UL-181 tape (leaky ducts lose 20%+ of conditioned air to the attic), hung/supported; combustion appliances get correct flue/venting + combustion air; refrigerant line sets (insulated) between indoor/outdoor units; condensate drain (primary + secondary safety pan / float switch) piped to an approved termination at slope; register/return penetrations cut + firestopped; bath/kitchen exhaust + dryer vent to exterior; thermostat wire + zone dampers run; duct leak-test where energy code requires; equipment disconnect (coordinate with electrical). Gate: HVAC/mechanical rough BEFORE cover (duct routing/sealing/support, combustion venting, condensate, line-set protection, firestop).
+- HVAC TRIM-OUT (H-2): supply registers + return grilles at each boot; thermostat (programmable/smart) mounted + connected; air filters + filter rack; equipment final electrical (disconnect/whip, with the electrician); verify refrigerant charge (weighed in or to manufacturer subcooling/superheat — under/overcharge cuts efficiency, capacity, and compressor life); startup, balance airflow room-to-room, test heat/cool + safeties + condensate float, check static pressure + temperature split to confirm designed performance. Gate: final mechanical (part of CO). [The equipment itself = customer-selectable; rough-in/distribution is priced normally per the HVAC section above.]
+- MEP INSPECTION ORDER (hard stops; vary by AHJ): all three ROUGH-INS pass BEFORE cover (HVAC → plumbing-held-under-test → electrical) → insulation inspection → drywall → finishes → FINALS bundled into the building final / Certificate of Occupancy (plumbing: fixtures set, no leaks, drainage/venting OK; mechanical: equipment runs, venting/condensate, thermostat; electrical: devices, GFCI/AFCI, smoke/CO, panel labeled). Fold permit + inspection allowance into the estimate.
+- MEP TAKEOFF UNITS: ELECTRICAL by device/fixture count + by circuit + cable by the foot (+10–15% waste); PLUMBING by fixture count (a fixture drives drain + vent + supply) + pipe by the foot + fittings by count; HVAC by equipment (tonnage/BTU from the load calc) + duct by foot/section + registers/returns by count. Always carry waste/contingency — fittings and connectors are cheap, a second trip is not.
+- LIGHT COMMERCIAL MEP DELTAS (flag in contractor_notes when the job reads commercial): ELECTRICAL → pipe-and-wire (EMT + THHN) instead of Romex, larger feeders, three-phase panels, stricter working-clearance/labeling + arc-flash, emergency/exit lighting + fire-alarm interface, occupancy sensors + lighting controls for energy code. PLUMBING → grease interceptors, backflow preventers (certified-tester testing), floor drains, ADA fixture heights/clearances + grab-bar backing, cast-iron/commercial-grade pipe, higher-demand water sizing. HVAC → rooftop units (RTUs), larger sealed/insulated duct, outside-air ventilation rates (often ASHRAE 62.1), fire/smoke dampers at rated assemblies, economizer + energy-code controls, and formal test-and-balance + commissioning/BAS documentation for sign-off.
+
 VERIFY-SPECS RULE (critical): Whenever a line involves code-governed sizing or a licensed trade (service/panel sizing, DWV sizing, gas, HVAC tonnage/refrigerant, structural/load-bearing changes), you MUST add a brief note in contractor_notes telling the contractor that a licensed pro should confirm specs before ordering or committing. This protects the contractor. Never present specialty engineering as a finished, code-final spec — it's a working estimate.
 
-BUILDING CODE AWARENESS (apply intelligently, but NEVER as the final authority):
-You know the major model codes (IRC residential, NEC electrical, IPC/UPC plumbing, IMC mechanical, IECC energy) and common requirements. USE this knowledge to make estimates realistic and to catch what a sharp contractor would catch, for example:
-- Electrical: GFCI at kitchens/baths/garages/exterior/within 6ft of water; AFCI on living-area circuits; tamper-resistant receptacles; interconnected smoke + CO detectors; proper box fill; dedicated appliance circuits.
-- Plumbing: trap + vent on every fixture; correct drain sizes; anti-scald/backflow protection; water heater T&P + drain pan; fixture clearances (~15" toilet center-to-wall, ~21" front clearance).
-- Structural/framing: typical joist/rafter spans, header sizing over openings, fire blocking, hurricane ties in wind zones, bedroom egress windows (~5.7 sqft opening, 24"h/20"w min), stair rise/run + handrail/guardrail rules.
-- Energy/insulation: typical R-values (walls R-13–21, attics R-38–60), vapor barriers, air sealing.
-- General: permits + inspections for structural/electrical/plumbing/mechanical work.
+BUILDING CODE AWARENESS (apply intelligently and PROACTIVELY, but NEVER as the final authority):
+You know the major model codes (IRC residential, IBC commercial, NEC electrical, IPC/UPC plumbing, IMC mechanical, IECC/IgCC energy, IFGC fuel gas, ADA accessibility) and how they're commonly applied. On EVERY relevant quote you must DO TWO THINGS: (1) actually BUILD the code-required items into the material list, scope, and labor — don't just mention them; and (2) add a short contractor_notes "Code note" telling the contractor to confirm current local code with their AHJ. A sharp contractor never forgets these — neither should you:
 
-BUT — codes are LOCAL and CHANGE. State, county, and city amendments differ and update on cycles. NEVER state a code requirement as the absolute final word for the contractor's location. When code matters, fold the requirement into the scope/materials naturally AND add a contractor_notes line like: "Code note: [requirement] is typical — confirm current local code and pull permits/inspections with your local AHJ (authority having jurisdiction)." You are the smart, experienced second set of eyes — not the code official. The local inspector always has final say.`
+- ELECTRICAL (NEC): GFCI protection at kitchens, baths, garages, exterior, laundry, wet bars, and within 6 ft of any sink; AFCI protection on most living-area circuits; tamper-resistant receptacles throughout dwellings; weather-resistant + in-use covers outdoors; interconnected smoke + CO alarms (CO near sleeping areas / fuel-burning appliances); proper box fill and working clearances; dedicated circuits for kitchen small-appliance, laundry, bath, dishwasher, microwave; whole-home surge protection now required on service upgrades; correct conductor sizing/derating. Service/panel/load-calc work = licensed electrician.
+- PLUMBING (IPC/UPC): trap + vent on every fixture, correct drain & vent sizing, slope on drain lines; anti-scald (pressure-balance/thermostatic) valves at tubs/showers; backflow/anti-siphon protection on hose bibs and irrigation; water heater T&P valve + discharge + drain pan + seismic strap where required; expansion tank on closed systems; fixture clearances (~15" toilet center-to-wall, ~21"+ front clearance); accessible shutoffs. Gas lines, water-heater, and new DWV = licensed plumber.
+- STRUCTURAL/FRAMING (IRC/IBC): proper joist/rafter spans and spacing, correct header sizing over openings, fireblocking/draftstopping, hurricane/seismic ties and proper fastening schedules in high-wind/seismic zones, bedroom egress windows (~5.7 sqft net clear, 24" min height / 20" min width, 44" max sill), stair rise/run (≤7-3/4" rise, ≥10" run), handrails (34–38") and guardrails (36"+ with ≤4" sphere spacing), deck ledger flashing + lag/bolt schedule + footing depth below frost line. Load-bearing changes/beams = engineer/architect stamp.
+- ENERGY/INSULATION (IECC): climate-zone R-values (walls R-13–21+, attics R-38–60, slab/crawl per zone), continuous air sealing, vapor/air barriers, duct sealing & insulation, blower-door / duct-leakage testing on new work in many jurisdictions, U-factor/SHGC window ratings.
+- EGRESS / FIRE / LIFE-SAFETY: smoke/CO placement, egress paths, fire-rated assemblies and self-closing 20-min door between house and attached garage, garage firewall/ceiling drywall (typically 5/8" Type X), fire-caulk penetrations.
+- ACCESSIBILITY (commercial/ADA): on COMMERCIAL or public-facing jobs, watch for ADA — accessible routes, ramp slopes (1:12), door widths/clearances, grab-bar blocking, accessible restroom clearances, counter heights. Flag when the job is commercial.
+- PERMITS & INSPECTIONS: most structural, electrical, plumbing, mechanical, gas, re-roof, deck, and addition work needs a permit + inspections. Fold permit/inspection allowance into the estimate when the scope clearly triggers it, and note it.
+- LEAD/ASBESTOS (pre-1978 homes): renovating pre-1978 housing may trigger EPA RRP lead-safe work practices; older popcorn ceilings/flooring/pipe wrap may contain asbestos — note testing/abatement may be required before disturbance.
+
+BUT — codes are LOCAL and CHANGE on adoption cycles (different states/counties/cities are on different code editions with their own amendments), and YOUR KNOWLEDGE HAS A TRAINING CUTOFF so the very latest local amendment may differ. NEVER state a code requirement as the absolute final word for the contractor's location or as the current adopted edition. Always fold the requirement into the scope/materials naturally AND add a contractor_notes line like: "Code note: [requirement] is standard practice — confirm the current adopted code edition and pull permits/inspections with your local AHJ (authority having jurisdiction) before ordering or committing." You are the smart, experienced second set of eyes that catches what gets missed — not the code official. The local inspector always has final say.`
+
+// Permit wording is opt-in per quote: lots of customers don't want permits
+// pulled, so by default NOTHING in the output may mention permits. The block
+// is appended LAST so it overrides every permit instruction inside the
+// knowledge sections above (shed/new-construction/MEP/code blocks all tell
+// the model to fold in permit allowances — this switches that off).
+function permitPolicyBlock(includePermitText: boolean | undefined): string {
+  if (includePermitText) {
+    return `PERMIT TEXT — ENABLED for this quote: The contractor chose to include permit information and pricing. Apply the permit knowledge in the sections above normally: fold a permit/inspection allowance into the estimate where the scope triggers it, note permit requirements in work_scope where relevant, and include permit reminders in contractor_notes.`
+  }
+  return `PERMIT TEXT — OFF for this quote (FINAL RULE — OVERRIDES every earlier permit instruction in this prompt): Do NOT mention permits in ANY part of your output. The words "permit", "permits", "permitting", "permitted", and "pull a permit" must NOT appear in work_scope, customer_summary, material_list item names, labor phase names, quantity_math, included/excluded text, OR contractor_notes. Do NOT add any permit fee, permit allowance, or inspection-allowance line item or dollar amount to the pricing. Wherever the knowledge sections above say to "fold a permit + inspection allowance into the estimate" or to add a permit note — SKIP that entirely for this quote. You may still build code-required materials into the quote, and code notes in contractor_notes are still welcome, but word them WITHOUT permit language (say "confirm current local code requirements with your local building department" instead of anything about pulling permits). Before you output, scan every field for the word "permit" and remove it.`
+}
 
 const GENERATE_SYSTEM_PROMPT = `You are a senior general contractor in central North Carolina producing a structured estimate document for a customer job.
 
@@ -449,13 +705,20 @@ ${SHED_KNOWLEDGE}
 
 ${ARITHMETIC_RULES}`
 
-const ANALYZE_SYSTEM_PROMPT = `You are a senior general contractor doing a live walkthrough of a job site. You are looking at one or more photos of the space AND listening to the contractor's spoken narration about what work needs to be done. Your job is to produce a complete structured estimate from what you see and hear.
+const ANALYZE_SYSTEM_PROMPT = `You are a master general contractor with 30 years in the field, doing a live walkthrough. You're looking at photos of the actual job AND hearing the contractor describe what needs doing. Estimate like a seasoned pro who quotes jobs every day — sharp eyes, tight numbers, no fat. Your reputation rides on accurate quotes that win work.
+
+#1 RULE — ESTIMATE THE EXACT JOB DESCRIBED, AND ONLY THAT JOB. NEVER INVENT WORK OR TRADES THAT WEREN'T MENTIONED. This is the most important rule. Quote ONLY the specific tasks the narration and photos actually describe. Do NOT add adjacent work, do NOT assume a bigger remodel, do NOT pull in other trades the contractor never mentioned.
+- HARD RULE: If the contractor only mentions electrical work (e.g. "take down a can light and hang a ceiling fan"), the quote is ELECTRICAL ONLY. Do NOT add drywall, sheetrock, paint, framing, or any other trade unless they explicitly said so. A simple fixture swap does NOT require re-doing sheetrock — patching a small box hole, IF actually needed, is at most a tiny note, never a sheetrock/drywall job.
+- WORKED EXAMPLE A (DO NOT invent trades): "Take down the can light and hang a ceiling fan." → The job is: remove the recessed can, install a fan-rated box if needed, hang and wire the customer's ceiling fan. Materials: fan-rated box, maybe a few wire nuts, and a "Fixture: Ceiling fan" line. Labor: ~1–2 hours. That's it. It is a FIRING OFFENSE to add sheetrock, drywall sheets, joint compound, paint, or framing to this — none of that was mentioned. If you list materials for a trade the contractor didn't bring up, the quote is wrong and useless.
+- WORKED EXAMPLE B (DO NOT oversize): A single water-damaged spot needing one 4x8 drywall sheet → the answer is 1 sheet (2 at the absolute most if the patch spans a seam). NEVER 9 sheets. Match material to the ACTUAL work area.
+- Only quote a full-room/full-surface or multi-trade scope if the photos OR narration CLEARLY say that's the job (e.g. "we're gutting the whole bathroom"). When in doubt, quote the NARROW, literal scope the contractor stated — they can add more if they want.
+- When you must estimate an area, estimate the WORK area conservatively and err LOW. An over-quote (too much material, or invented extra work) loses the job on the spot and makes the tool look ridiculous.
 
 How to read the inputs:
-- The images show the actual job site. Identify what is there: surface materials, fixtures, condition of walls/floors/ceilings, visible damage, obstacles, room dimensions if you can infer them from context.
-- The transcript is the contractor talking out loud during the scan. It will be informal speech, possibly with fillers, repetition, and corrections. Extract the contractor's intent — what they say should be done, what materials they mention, what concerns they raise. The transcript is the primary source of TRUTH for scope; the images give physical context.
-- If the transcript and images disagree, prioritize the transcript and flag the disagreement in contractor_notes.
-- If room dimensions are not stated in the transcript and not inferable from images, make reasonable estimates (e.g. "approximately 10×12 ft based on visible fixtures") and note your assumptions in contractor_notes.
+- The images show the ACTUAL job site and the ACTUAL extent of work. Read them like a contractor measuring with their eyes: how big is the damaged/work area really? What's the actual square footage involved? Don't assume — look.
+- The transcript is the contractor talking during the scan — informal, with fillers. Extract their real intent and any quantities they state. The transcript is the PRIMARY source of truth for scope; if they say how much, that's the number. The images confirm the physical extent.
+- If transcript and images disagree, prioritize the transcript and flag it in contractor_notes.
+- If you genuinely must estimate dimensions, estimate the SPECIFIC work area shown (not the whole room unless that's the job), state your assumption plainly in contractor_notes (e.g. "patch ~3x4 ft = 12 sqft → 1 sheet"), and keep it tight.
 
 Material strategy:
 - Generate a COMPLETE material list with realistic items, units, and 2026 retail unit prices at Home Depot / Lowe's (see reference prices below). Completeness is critical — see the COMPLETENESS rule in the pricing section. Include every consumable and incidental (fasteners, adhesives, caulk, primer, tape, underlayment, trim, fixtures, disposal) the job needs, not just the headline materials. Build the list as if walking the store aisles filling a cart to finish this exact job. Forgetting small items costs the contractor money — do not forget them.
@@ -470,6 +733,8 @@ Labor and pricing:
 - Prefer the LOWER end of labor hour ranges. Coverage for risk goes in the markup, not in inflated hours.
 
 work_scope and customer_summary go directly in front of the customer. contractor_notes are private to the contractor and should flag risks, assumptions, and items needing field verification.
+
+FINAL SANITY CHECK before you output (do this on EVERY material line): Re-read each quantity and ask "would a real contractor actually buy THIS many to do THIS specific job shown in the photos?" If any number looks high for the visible scope, CUT IT to what the job really needs. Especially gut-check sheet goods (drywall, plywood), lumber counts, and tile/flooring sqft against the ACTUAL work area — never the whole room unless that's the job. A lean, accurate list that matches what's in the photos is the entire point. An over-count makes the whole tool worthless. When unsure, go LOWER.
 
 ${NC_PRICING_GUIDANCE}
 
@@ -588,23 +853,18 @@ async function withAnthropicRetry<T>(label: string, fn: () => Promise<T>): Promi
   throw lastErr
 }
 
+// User-facing error copy. Deliberately GENERIC — never names the AI provider,
+// never leaks raw API messages (e.g. billing/credit details). The real error is
+// logged server-side for debugging; the user just sees a friendly "try again".
 function friendlyAnthropicError(err: unknown): string {
-  if (!err || typeof err !== 'object') return 'AI service error. Please try again.'
+  if (!err || typeof err !== 'object') return 'Something went wrong. Please try again in a moment.'
   const e = err as { status?: number; error?: { type?: string; message?: string } }
   const type = e.error?.type
-  if (type === 'overloaded_error' || e.status === 529) {
-    return 'The AI service is busy right now. We retried but couldn\'t get through — please try again in a minute.'
+  if (type === 'overloaded_error' || e.status === 529 || type === 'rate_limit_error' || e.status === 429) {
+    return 'Our quote service is a little busy right now. Please try again in a minute.'
   }
-  if (type === 'rate_limit_error' || e.status === 429) {
-    return 'AI rate limit hit. Please wait a moment and try again.'
-  }
-  if (e.status === 401) {
-    return 'AI authentication failed — please contact support.'
-  }
-  if (e.status && e.status >= 500) {
-    return 'AI service is having issues. Please try again shortly.'
-  }
-  return e.error?.message || 'AI quote generation failed. Please try again.'
+  // Everything else (auth, billing, 5xx, unknown) → one calm, generic line.
+  return 'We couldn\'t complete that just now. Please try again in a moment.'
 }
 
 async function verifyClerk(token: string): Promise<string> {
@@ -664,41 +924,49 @@ export const generateAIQuote = onCall<GenerateCallPayload>(
     console.log(`generateAIQuote user=${userId} job=${input.jobTypeName}`)
 
     // Subscription gate — burns one of the free-tier AI quotes, or rejects
-    // if the user has used all 5. Atomic increment so concurrent calls
+    // if the user has used all 10. Atomic increment so concurrent calls
     // can't sneak past the limit. (Note: we burn the credit BEFORE the
-    // call, so a failed AI call still counts. Could refund on retry later.)
-    await consumeAiQuoteOrThrow(userId, 'quote')
+    // call, so a failed AI call still counts — but we refund on failure below.)
+    const gate = await consumeAiQuoteOrThrow(userId, 'quote')
 
     const learnedPrices = await loadLearnedPricesBlock(userId)
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() })
 
     try {
       return await withAnthropicRetry('generateAIQuote', async () => {
-        if (input.debugForceFail) {
+        // Dev-only: synthetic failure injection for testing retry/refund paths.
+        // Hard-gated to the local emulator so external callers can't trigger it
+        // in production.
+        if (input.debugForceFail && process.env.FUNCTIONS_EMULATOR === 'true') {
           console.log(`generateAIQuote: synthetic failure requested (${input.debugForceFail})`)
           throwSyntheticFailure(input.debugForceFail)
         }
         const stream = client.messages.stream({
-          model: 'claude-opus-4-7',
+          // Opus 4.8 — our most capable model — gives the strongest "contractor
+          // brain": better material completeness, quantity/waste math, and
+          // location-aware pricing than Sonnet. 'high' effort lets it reason
+          // hard about the scope before writing the quote. This trades a bit of
+          // latency for accuracy; the 540s function timeout has ample room.
+          model: 'claude-opus-4-8',
           max_tokens: 8000,
           thinking: { type: 'adaptive' },
           output_config: {
-            effort: 'medium',
+            effort: 'high',
             format: { type: 'json_schema', schema: aiQuoteSchema },
           },
-          system: GENERATE_SYSTEM_PROMPT,
+          system: GENERATE_SYSTEM_PROMPT + '\n\n' + permitPolicyBlock(input.includePermitText),
           messages: [{ role: 'user', content: buildGenerateUserPrompt(input) + learnedPrices }],
         })
         const message = await stream.finalMessage()
         const textBlock = message.content.find(b => b.type === 'text')
         if (!textBlock || textBlock.type !== 'text') {
-          throw new HttpsError('internal', 'Claude returned no text content')
+          throw new HttpsError('internal', 'No content returned. Please try again.')
         }
         return JSON.parse(textBlock.text)
       })
     } catch (err) {
       // The gate already charged a credit; refund it so a failure is free.
-      await refundAiQuote(userId)
+      await refundAiQuote(userId, gate.spentPaid)
       if (err instanceof HttpsError) throw err
       console.error('Anthropic call failed after retries', err)
       throw new HttpsError('unavailable', friendlyAnthropicError(err))
@@ -731,8 +999,8 @@ export const analyzeScan = onCall<AnalyzeCallPayload>(
     console.log(`analyzeScan user=${userId} images=${images.length} transcriptLen=${transcript.length}`)
 
     // Subscription gate — same as generateAIQuote. Video/photo scan also
-    // counts as one AI quote against the free tier.
-    await consumeAiQuoteOrThrow(userId, 'quote')
+    // counts as one AI quote against the free tier (or a paid $1 credit).
+    const gate = await consumeAiQuoteOrThrow(userId, 'quote')
 
     const learnedPrices = await loadLearnedPricesBlock(userId)
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() })
@@ -763,31 +1031,38 @@ Analyze the images and the contractor's narration together. Produce the structur
 
     try {
       return await withAnthropicRetry('analyzeScan', async () => {
-        if (input.debugForceFail) {
+        // Dev-only synthetic failure (emulator-gated — never fires in prod).
+        if (input.debugForceFail && process.env.FUNCTIONS_EMULATOR === 'true') {
           console.log(`analyzeScan: synthetic failure requested (${input.debugForceFail})`)
           throwSyntheticFailure(input.debugForceFail)
         }
         const stream = client.messages.stream({
-          model: 'claude-opus-4-7',
+          // Opus 4.8 is the first Claude with high-resolution vision (up to
+          // 2576px), so it reads the job-site photos far more accurately —
+          // measuring the real work area, spotting materials implied by the
+          // images, and counting fixtures. 'high' effort makes it study the
+          // photos + narration before producing the material list. The 540s
+          // function timeout leaves plenty of room.
+          model: 'claude-opus-4-8',
           max_tokens: 8000,
           thinking: { type: 'adaptive' },
           output_config: {
-            effort: 'medium',
+            effort: 'high',
             format: { type: 'json_schema', schema: aiQuoteSchema },
           },
-          system: ANALYZE_SYSTEM_PROMPT,
+          system: ANALYZE_SYSTEM_PROMPT + '\n\n' + permitPolicyBlock(input.includePermitText),
           messages: [{ role: 'user', content: userContent }],
         })
         const message = await stream.finalMessage()
         const textBlock = message.content.find(b => b.type === 'text')
         if (!textBlock || textBlock.type !== 'text') {
-          throw new HttpsError('internal', 'Claude returned no text content')
+          throw new HttpsError('internal', 'No content returned. Please try again.')
         }
         return JSON.parse(textBlock.text)
       })
     } catch (err) {
       // The gate already charged a credit; refund it so a failure is free.
-      await refundAiQuote(userId)
+      await refundAiQuote(userId, gate.spentPaid)
       if (err instanceof HttpsError) throw err
       console.error('Anthropic scan analysis failed after retries', err)
       throw new HttpsError('unavailable', friendlyAnthropicError(err))
@@ -836,6 +1111,9 @@ export const transcribeAudio = onCall<TranscribeCallPayload>(
     const { clerkToken, input } = request.data ?? ({} as TranscribeCallPayload)
     if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
     if (!input?.audioBase64) throw new HttpsError('invalid-argument', 'Missing audio data')
+    // Cap size so a huge payload can't exhaust memory / rack up Speech-to-Text cost.
+    // ~8MB base64 ≈ 6MB audio ≈ several minutes (well past the 25s recording cap).
+    if (input.audioBase64.length > 8_000_000) throw new HttpsError('invalid-argument', 'Audio clip too large')
 
     const userId = await verifyClerk(clerkToken)
     console.log(`transcribeAudio user=${userId} mimeType=${input.mimeType} bytes=${input.audioBase64.length}`)
@@ -1026,11 +1304,17 @@ export const sendEstimateEmail = onCall<SendEstimateCallPayload>(
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          from: `${input.fromName || 'Contractors Office'} <onboarding@resend.dev>`,
+          // Display the contractor's business name, but send from our verified
+          // domain (or sandbox until verified). Reply-to routes to the contractor.
+          from: EMAIL_DOMAIN_VERIFIED
+            ? `${input.fromName || 'BuildPro+'} <alerts@builderspro.cc>`
+            : EMAIL_FROM,
           to: [input.to],
           subject,
           html,
-          reply_to: input.replyTo || undefined,
+          // Only set reply-to when the contractor provided one — never default
+          // to a personal inbox (would misroute other contractors' replies).
+          ...(input.replyTo ? { reply_to: input.replyTo } : {}),
         }),
       })
       if (!res.ok) {
@@ -1043,6 +1327,156 @@ export const sendEstimateEmail = onCall<SendEstimateCallPayload>(
     } catch (err) {
       if (err instanceof HttpsError) throw err
       console.error('sendEstimateEmail error', err)
+      const msg = err instanceof Error ? err.message : String(err)
+      throw new HttpsError('internal', `Email send failed: ${msg}`)
+    }
+  },
+)
+
+// ──────────────────────────────────────────────────────────────────────────
+// Invoice email — sends the customer a branded invoice with a secure pay link.
+// Mirrors sendEstimateEmail: the contractor triggers it explicitly (after they
+// review/edit the invoice), it sends from the verified domain with the business
+// name in the From, and reply-to routes back to the contractor.
+// ──────────────────────────────────────────────────────────────────────────
+
+interface SendInvoiceInput {
+  to: string
+  fromName?: string
+  replyTo?: string
+  subject?: string
+  invoice: {
+    invoiceNumber: string
+    customerName: string
+    jobTypeName: string
+    businessName?: string
+    introNote?: string
+    paymentTerms?: string
+    lineItems: { name: string; quantity: number; unitPrice: number; lineTotal: number }[]
+    subtotal: number
+    amountPaid?: number
+    amountDue: number
+    dueDate: string
+    payUrl: string
+  }
+}
+
+interface SendInvoiceCallPayload {
+  clerkToken: string
+  input: SendInvoiceInput
+}
+
+function renderInvoiceEmailHtml(input: SendInvoiceInput): string {
+  const inv = input.invoice
+  const fromName = input.fromName || inv.businessName || 'Your Contractor'
+  const money = (n: number) => `$${Number(n || 0).toFixed(2)}`
+  // Only render a safe http(s) pay link; never inject an arbitrary scheme.
+  const safePayUrl = /^https?:\/\//i.test(inv.payUrl) ? inv.payUrl : ''
+  const rows = (inv.lineItems || []).map(l => `
+        <tr>
+          <td style="padding:8px;border-bottom:1px solid #e2e8f0;">${escapeHtml(l.name)}</td>
+          <td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;">${Number(l.quantity || 0)}</td>
+          <td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;">${money(l.unitPrice)}</td>
+          <td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;font-weight:600;">${money(l.lineTotal)}</td>
+        </tr>`).join('')
+  const due = (() => { const d = new Date(inv.dueDate); return isNaN(d.getTime()) ? '' : d.toLocaleDateString() })()
+
+  return `<!doctype html>
+<html><head><meta charset="utf-8"/><title>Invoice ${escapeHtml(inv.invoiceNumber)}</title></head>
+<body style="margin:0;padding:24px;background:#f8fafc;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#1a1f2e;">
+  <div style="max-width:640px;margin:0 auto;background:white;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+    <div style="background:#1a1f2e;color:white;padding:24px;">
+      <h1 style="margin:0 0 4px;color:#f97316;font-size:24px;">Invoice ${escapeHtml(inv.invoiceNumber)}</h1>
+      <p style="margin:0;color:#94a3b8;font-size:14px;">From ${escapeHtml(fromName)}</p>
+    </div>
+    <div style="padding:24px;">
+      <p style="font-size:15px;margin:0 0 16px;">Hi ${escapeHtml(inv.customerName)},</p>
+      ${inv.introNote ? `<p style="font-size:15px;line-height:1.5;margin:0 0 20px;">${escapeHtml(inv.introNote)}</p>` : `<p style="font-size:15px;line-height:1.5;margin:0 0 20px;">Here's your invoice for <strong>${escapeHtml(inv.jobTypeName)}</strong>.</p>`}
+
+      ${rows ? `
+        <table style="width:100%;border-collapse:collapse;font-size:13px;margin:0 0 16px;">
+          <thead><tr style="border-bottom:2px solid #e2e8f0;text-align:left;">
+            <th style="padding:8px;">Item</th>
+            <th style="padding:8px;text-align:right;">Qty</th>
+            <th style="padding:8px;text-align:right;">Unit $</th>
+            <th style="padding:8px;text-align:right;">Total</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>` : ''}
+
+      <div style="background:#1a1f2e;color:white;padding:20px;border-radius:8px;margin-bottom:20px;">
+        <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:14px;"><span style="color:#cbd5e1;">Subtotal</span><span style="font-weight:600;">${money(inv.subtotal)}</span></div>
+        ${inv.amountPaid && inv.amountPaid > 0 ? `<div style="display:flex;justify-content:space-between;padding:6px 0;font-size:14px;"><span style="color:#cbd5e1;">Already paid</span><span style="font-weight:600;">− ${money(inv.amountPaid)}</span></div>` : ''}
+        <div style="display:flex;justify-content:space-between;padding:12px 0 0;border-top:2px solid #f97316;margin-top:8px;align-items:center;">
+          <span style="color:#fb923c;font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:1px;">Amount Due</span>
+          <span style="color:#f97316;font-size:28px;font-weight:700;">${money(inv.amountDue)}</span>
+        </div>
+        ${due ? `<div style="margin-top:8px;color:#94a3b8;font-size:13px;text-align:right;">Due by ${escapeHtml(due)}</div>` : ''}
+      </div>
+
+      ${safePayUrl ? `<div style="text-align:center;margin:0 0 20px;">
+        <a href="${safePayUrl}" style="display:inline-block;background:#f97316;color:white;text-decoration:none;font-weight:700;font-size:16px;padding:14px 28px;border-radius:8px;">View &amp; Pay Invoice →</a>
+        <p style="font-size:12px;color:#94a3b8;margin:10px 0 0;">Or copy this link: ${escapeHtml(safePayUrl)}</p>
+      </div>` : ''}
+
+      ${inv.paymentTerms ? `<pre style="background:#f8fafc;padding:12px;border-radius:6px;font-family:inherit;font-size:13px;white-space:pre-wrap;margin:0 0 20px;">${escapeHtml(inv.paymentTerms)}</pre>` : ''}
+
+      <p style="font-size:14px;line-height:1.5;color:#64748b;margin:0 0 8px;">Reply to this email with any questions about your invoice.</p>
+      <p style="font-size:14px;line-height:1.5;color:#64748b;margin:0;">Thank you,<br/><strong style="color:#1a1f2e;">${escapeHtml(fromName)}</strong></p>
+    </div>
+  </div>
+</body></html>`
+}
+
+export const sendInvoiceEmail = onCall<SendInvoiceCallPayload>(
+  {
+    secrets: [CLERK_SECRET_KEY, RESEND_API_KEY],
+    timeoutSeconds: 60,
+    memory: '256MiB',
+    cors: true,
+  },
+  async (request) => {
+    const { clerkToken, input } = request.data ?? ({} as SendInvoiceCallPayload)
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    if (!input?.to || !input?.invoice) throw new HttpsError('invalid-argument', 'Missing email or invoice data')
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.to)) {
+      throw new HttpsError('invalid-argument', 'Invalid email address')
+    }
+
+    const userId = await verifyClerk(clerkToken)
+    console.log(`sendInvoiceEmail user=${userId} to=${input.to} inv=${input.invoice.invoiceNumber}`)
+
+    const html = renderInvoiceEmailHtml(input)
+    const subject = input.subject
+      || `Invoice ${input.invoice.invoiceNumber} from ${input.fromName || input.invoice.businessName || 'Your Contractor'}`
+
+    try {
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${RESEND_API_KEY.value()}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: EMAIL_DOMAIN_VERIFIED
+            ? `${input.fromName || input.invoice.businessName || 'BuildPro+'} <alerts@builderspro.cc>`
+            : EMAIL_FROM,
+          to: [input.to],
+          subject,
+          html,
+          ...(input.replyTo && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.replyTo) ? { reply_to: input.replyTo } : {}),
+        }),
+      })
+      if (!res.ok) {
+        const errText = await res.text()
+        console.error('Resend invoice send failed', res.status, errText)
+        throw new HttpsError('internal', `Email send failed: ${res.status}`)
+      }
+      const data = await res.json() as { id?: string }
+      return { ok: true, emailId: data.id }
+    } catch (err) {
+      if (err instanceof HttpsError) throw err
+      console.error('sendInvoiceEmail error', err)
       const msg = err instanceof Error ? err.message : String(err)
       throw new HttpsError('internal', `Email send failed: ${msg}`)
     }
@@ -1131,15 +1565,15 @@ export const generateChangeOrder = onCall<GenerateChangeOrderPayload>(
     const userId = await verifyClerk(clerkToken)
     console.log(`generateChangeOrder user=${userId} job=${input.jobTypeName}`)
 
-    // Free-tier gate — change orders count against the 5 free generations.
-    await consumeAiQuoteOrThrow(userId, 'generation')
+    // NOTE: Change orders are FREE for all tiers. Only Quick Quotes (the two
+    // estimate generators) count against the 10 free generations.
 
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() })
 
     try {
       return await withAnthropicRetry('generateChangeOrder', async () => {
         const stream = client.messages.stream({
-          model: 'claude-opus-4-7',
+          model: 'claude-opus-4-8',
           max_tokens: 4000,
           thinking: { type: 'adaptive' },
           output_config: {
@@ -1152,12 +1586,12 @@ export const generateChangeOrder = onCall<GenerateChangeOrderPayload>(
         const message = await stream.finalMessage()
         const textBlock = message.content.find(b => b.type === 'text')
         if (!textBlock || textBlock.type !== 'text') {
-          throw new HttpsError('internal', 'Claude returned no text content')
+          throw new HttpsError('internal', 'No content returned. Please try again.')
         }
         return JSON.parse(textBlock.text)
       })
     } catch (err) {
-      await refundAiQuote(userId)
+      // No quota refund here — change orders don't consume a credit (free for all).
       if (err instanceof HttpsError) throw err
       console.error('Change order generation failed after retries', err)
       throw new HttpsError('unavailable', friendlyAnthropicError(err))
@@ -1231,7 +1665,8 @@ const thankYouSchema = {
 export const generateThankYouLetter = onCall<ThankYouPayload>(
   {
     secrets: [ANTHROPIC_API_KEY, CLERK_SECRET_KEY],
-    timeoutSeconds: 60,
+    // Opus 4.8 with medium effort is a bit slower than Sonnet — give headroom.
+    timeoutSeconds: 120,
     memory: '512MiB',
     cors: true,
   },
@@ -1245,8 +1680,9 @@ export const generateThankYouLetter = onCall<ThankYouPayload>(
     const userId = await verifyClerk(clerkToken)
     console.log(`generateThankYouLetter user=${userId} customer=${input.customerName}`)
 
-    // Free-tier gate — thank-you letters count against the 5 free generations.
-    await consumeAiQuoteOrThrow(userId, 'generation')
+    // Pro-ONLY feature — a premium perk for paying contractors. Free users are
+    // blocked here (it doesn't consume a quote credit; it's simply Pro-gated).
+    await requireProOrThrow(userId, 'thankYouLetter')
 
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() })
 
@@ -1258,7 +1694,7 @@ Write the thank-you letter.`
     try {
       return await withAnthropicRetry('generateThankYouLetter', async () => {
         const stream = client.messages.stream({
-          model: 'claude-opus-4-7',
+          model: 'claude-opus-4-8',
           max_tokens: 2000,
           thinking: { type: 'adaptive' },
           output_config: {
@@ -1271,14 +1707,158 @@ Write the thank-you letter.`
         const message = await stream.finalMessage()
         const textBlock = message.content.find(b => b.type === 'text')
         if (!textBlock || textBlock.type !== 'text') {
-          throw new HttpsError('internal', 'Claude returned no text content')
+          throw new HttpsError('internal', 'No content returned. Please try again.')
         }
         return JSON.parse(textBlock.text) as ThankYouLetter
       })
     } catch (err) {
-      await refundAiQuote(userId)
+      // No quota refund — thank-you letters are Pro-gated, not quota-consuming.
       if (err instanceof HttpsError) throw err
       console.error('Thank-you letter generation failed', err)
+      throw new HttpsError('unavailable', friendlyAnthropicError(err))
+    }
+  },
+)
+
+// ──────────────────────────────────────────────────────────────────────────
+// Proposal letter. Wraps a finished estimate in a warm, professional proposal
+// the customer receives as their FIRST piece of paperwork — so the first thing
+// they see reads like a real proposal, not a bare parts list. The estimate
+// breakdown (scope, materials, totals, deposit, e-sign) still lives below it on
+// the customer page; this just produces the cover letter that frames it.
+//
+// NOT Pro-gated and NOT quota-consuming — it's part of the standard send flow,
+// and a cheap/fast text call. The client generates it ONCE on first send and
+// caches the result on the estimate doc, so re-opening/printing never re-spends.
+// If this call fails, the client falls back to a clean template so sending the
+// customer's paperwork is NEVER blocked by an AI hiccup.
+// ──────────────────────────────────────────────────────────────────────────
+
+interface ProposalInput {
+  customerName: string
+  jobTypeName: string
+  workScope?: string          // the work_scope / scope-of-work text
+  customerSummary?: string    // the AI customer_summary, if present
+  total?: number
+  depositRequested?: boolean
+  depositAmount?: number
+  proposedStartDate?: string  // ISO date or free text, if the contractor set one
+  jobLocationZip?: string
+  businessName?: string
+  contractorName?: string
+  licenseNumber?: string
+}
+
+interface ProposalPayload {
+  clerkToken: string
+  input: ProposalInput
+}
+
+interface ProposalLetter {
+  greeting: string
+  intro: string
+  approach: string
+  included: string
+  not_included: string
+  timeline: string
+  warranty: string
+  closing: string
+}
+
+const proposalSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    greeting: { type: 'string' },
+    intro: { type: 'string' },
+    approach: { type: 'string' },
+    included: { type: 'string' },
+    not_included: { type: 'string' },
+    timeline: { type: 'string' },
+    warranty: { type: 'string' },
+    closing: { type: 'string' },
+  },
+  required: ['greeting', 'intro', 'approach', 'included', 'not_included', 'timeline', 'warranty', 'closing'],
+} as const
+
+const PROPOSAL_SYSTEM_PROMPT = `You are a seasoned general contractor writing a professional PROPOSAL letter to a customer, based on an estimate you've already prepared. This is the first formal document the customer receives, so it must read warm, confident, and professional — like a respected tradesman who runs a real business, not a template and not a robot.
+
+Output a JSON object with these EXACT fields (all required, all customer-facing prose, NO markdown, NO bullet symbols unless noted):
+
+- greeting: A short greeting line using the customer's first name if possible. E.g. "Dear Mr. Smith," or "Hi Sarah,".
+- intro: ONE short paragraph (2-3 sentences) thanking them for the opportunity to bid their project and introducing this as your proposal for the work. If a business name is given, weave it in naturally (e.g. "Thank you for the opportunity to bid your bathroom remodel — we at [Business] are pleased to present this proposal.").
+- approach: ONE paragraph (3-5 sentences) describing HOW you will actually perform and handle the job, in plain, confident language. Walk them through the real sequence of work based on the scope provided (e.g. protect the space, demo, rough-in, install, finish, clean up). Make it specific to THIS job using the scope details — not generic filler.
+- included: A clear list of what the price covers. Begin with the line "This proposal includes:" then 3-6 short items each on its own line starting with "• ". Base these on the scope and materials (e.g. all labor and materials listed, haul-away and cleanup). Be accurate to the job; do not invent things not in the scope.
+- not_included: A brief, polite list of common exclusions so expectations are clear. Begin with the line "Not included:" then 2-4 short items each on its own line starting with "• " (e.g. unforeseen structural or code issues discovered during work, changes to the agreed scope which would be quoted separately). Keep it fair and standard — never adversarial.
+
+PERMIT RULE (strict): Do NOT mention permits, permit fees, permitting, or pulling permits ANYWHERE in this letter UNLESS the scope/summary text provided below explicitly mentions permits. Many customers prefer the topic never be raised — if the estimate itself doesn't bring up permits, neither do you. The word "permit" must not appear in your output unless it appears in the provided scope.
+- timeline: ONE or two sentences on how long the work takes and when it can begin. If a proposed start date is given, reference it. If not, give a reasonable working estimate for a job of this scope and note that the schedule will be confirmed together. Always include a gentle "weather permitting / barring unforeseen conditions" type caveat where appropriate.
+- warranty: ONE or two sentences stating that you stand behind your work with a workmanship warranty and that if anything isn't right, the customer should reach out and you'll make it right. Confident and reassuring, not legalistic.
+- closing: A short closing line ("Sincerely," / "We look forward to working with you," / "Respectfully,") on its own line, then the contractor's name (use EXACTLY the name given — never invent one) on the next line, then the business name on a third line if provided, then the license number prefixed with "Lic. " on a fourth line if provided. Use real newlines between each. If no contractor name is given, use just the closing line plus business name/license.
+
+Tone: professional, confident, warm, trustworthy. Reads like a real contractor wrote it personally. Keep the whole thing tight — this frames an estimate that appears right below it, so don't repeat the line-item pricing here. Refer to the total/deposit only in passing if at all (the estimate shows the numbers).`
+
+export const generateProposal = onCall<ProposalPayload>(
+  {
+    secrets: [ANTHROPIC_API_KEY, CLERK_SECRET_KEY],
+    // Opus 4.8 with medium effort is a bit slower than Sonnet — give headroom.
+    timeoutSeconds: 120,
+    memory: '512MiB',
+    cors: true,
+  },
+  async (request) => {
+    const { clerkToken, input } = request.data ?? ({} as ProposalPayload)
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    if (!input?.customerName || !input?.jobTypeName) {
+      throw new HttpsError('invalid-argument', 'Missing customer name or job type')
+    }
+
+    const userId = await verifyClerk(clerkToken)
+    console.log(`generateProposal user=${userId} customer=${input.customerName}`)
+
+    // Not gated and not quota-consuming — part of the standard send flow.
+    const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() })
+
+    const startLine = input.proposedStartDate
+      ? `Proposed start date: ${input.proposedStartDate}\n`
+      : ''
+    const depositLine = input.depositRequested && (input.depositAmount || 0) > 0
+      ? `A deposit of $${(input.depositAmount || 0).toFixed(2)} is requested before work begins.\n`
+      : ''
+    const userPrompt = `Customer: ${input.customerName}
+Job: ${input.jobTypeName}
+${input.jobLocationZip ? `Location: ZIP ${input.jobLocationZip}\n` : ''}${input.total ? `Total quoted: $${input.total.toFixed(2)}\n` : ''}${depositLine}${startLine}${input.businessName ? `Business: ${input.businessName}\n` : ''}${input.contractorName ? `Contractor name (sign exactly this): ${input.contractorName}\n` : ''}${input.licenseNumber ? `License #: ${input.licenseNumber}\n` : ''}
+${input.customerSummary ? `=== Customer summary of the job ===\n${input.customerSummary}\n` : ''}
+=== Scope of work (base the approach + included items on THIS) ===
+${input.workScope || '(no detailed scope provided — write a sensible professional approach for this job type)'}
+
+Write the proposal letter.`
+
+    try {
+      return await withAnthropicRetry('generateProposal', async () => {
+        const stream = client.messages.stream({
+          model: 'claude-opus-4-8',
+          max_tokens: 2500,
+          thinking: { type: 'adaptive' },
+          output_config: {
+            effort: 'medium',
+            format: { type: 'json_schema', schema: proposalSchema },
+          },
+          system: PROPOSAL_SYSTEM_PROMPT,
+          messages: [{ role: 'user', content: userPrompt }],
+        })
+        const message = await stream.finalMessage()
+        const textBlock = message.content.find(b => b.type === 'text')
+        if (!textBlock || textBlock.type !== 'text') {
+          throw new HttpsError('internal', 'No content returned. Please try again.')
+        }
+        return JSON.parse(textBlock.text) as ProposalLetter
+      })
+    } catch (err) {
+      // No quota to refund. Sending must never be blocked, so the CLIENT has a
+      // template fallback — we just surface the error for it to catch.
+      if (err instanceof HttpsError) throw err
+      console.error('Proposal generation failed', err)
       throw new HttpsError('unavailable', friendlyAnthropicError(err))
     }
   },
@@ -1322,7 +1902,8 @@ Tone: professional, friendly, brief. Customer-facing. No markdown.`
 export const generateInvoiceCopy = onCall<{ clerkToken: string; input: InvoiceCopyInput }>(
   {
     secrets: [ANTHROPIC_API_KEY, CLERK_SECRET_KEY],
-    timeoutSeconds: 60,
+    // Opus 4.8 with medium effort is a bit slower than Sonnet — give headroom.
+    timeoutSeconds: 120,
     memory: '512MiB',
     cors: true,
   },
@@ -1334,8 +1915,8 @@ export const generateInvoiceCopy = onCall<{ clerkToken: string; input: InvoiceCo
     const userId = await verifyClerk(clerkToken)
     console.log(`generateInvoiceCopy user=${userId} customer=${input.customerName}`)
 
-    // Free-tier gate — invoice copy counts against the 5 free generations.
-    await consumeAiQuoteOrThrow(userId, 'generation')
+    // NOTE: Invoice cover notes are FREE for all tiers. Only Quick Quotes count
+    // against the 10 free generations.
 
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() })
     const prompt = `Customer: ${input.customerName}
@@ -1348,11 +1929,11 @@ Write the invoice cover text.`
     try {
       return await withAnthropicRetry('generateInvoiceCopy', async () => {
         const stream = client.messages.stream({
-          model: 'claude-opus-4-7',
+          model: 'claude-opus-4-8',
           max_tokens: 1500,
           thinking: { type: 'adaptive' },
           output_config: {
-            effort: 'low',
+            effort: 'medium',
             format: { type: 'json_schema', schema: invoiceCopySchema },
           },
           system: INVOICE_COPY_SYSTEM_PROMPT,
@@ -1361,14 +1942,105 @@ Write the invoice cover text.`
         const message = await stream.finalMessage()
         const textBlock = message.content.find(b => b.type === 'text')
         if (!textBlock || textBlock.type !== 'text') {
-          throw new HttpsError('internal', 'Claude returned no text content')
+          throw new HttpsError('internal', 'No content returned. Please try again.')
         }
         return JSON.parse(textBlock.text) as { intro_note: string; payment_terms: string }
       })
     } catch (err) {
-      await refundAiQuote(userId)
+      // No quota refund — invoice cover notes don't consume a credit (free for all).
       if (err instanceof HttpsError) throw err
       console.error('Invoice copy generation failed', err)
+      throw new HttpsError('unavailable', friendlyAnthropicError(err))
+    }
+  },
+)
+
+// ──────────────────────────────────────────────────────────────────────────
+// parseCalendarEntry — voice "Quick Add" on the dashboard. The contractor taps
+// the mic, says something like "add a job for the Miller bathroom next Tuesday
+// at 9am" or "remind me to order tile on the 15th", and we turn that spoken
+// sentence into a structured calendar entry. FREE for all tiers (tiny call).
+// ──────────────────────────────────────────────────────────────────────────
+const calendarEntrySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    // What kind of thing it is.
+    kind: { type: 'string', enum: ['job', 'event', 'reminder'] },
+    // A short, clean title (no date/time words baked in).
+    title: { type: 'string' },
+    // ISO date yyyy-mm-dd the entry belongs on. ALWAYS resolved to a real date.
+    date: { type: 'string' },
+    // 24h time "HH:MM" if the speaker gave one, else empty string.
+    time: { type: 'string' },
+    // Any extra detail worth keeping, else empty string.
+    notes: { type: 'string' },
+    // True only if we couldn't confidently figure out a date (caller will ask).
+    needsDate: { type: 'boolean' },
+  },
+  required: ['kind', 'title', 'date', 'time', 'notes', 'needsDate'],
+} as const
+
+export const parseCalendarEntry = onCall<{ clerkToken: string; input: { transcript: string; todayISO: string } }>(
+  {
+    secrets: [ANTHROPIC_API_KEY, CLERK_SECRET_KEY],
+    timeoutSeconds: 60,
+    memory: '512MiB',
+    cors: true,
+  },
+  async (request) => {
+    const { clerkToken, input } = request.data ?? {} as { clerkToken: string; input: { transcript: string; todayISO: string } }
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    const transcript = (input?.transcript || '').trim()
+    if (!transcript) throw new HttpsError('invalid-argument', 'Nothing was said')
+    // today's date drives relative phrases ("tomorrow", "next Tuesday"). The
+    // client sends its LOCAL today so the math matches the contractor's timezone.
+    const todayISO = /^\d{4}-\d{2}-\d{2}$/.test(input?.todayISO || '') ? input.todayISO : new Date().toISOString().slice(0, 10)
+
+    const userId = await verifyClerk(clerkToken)
+    console.log(`parseCalendarEntry user=${userId} transcript="${transcript.slice(0, 120)}"`)
+
+    const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() })
+    const prompt = `Today's date is ${todayISO} (yyyy-mm-dd). The day of week of today is ${new Date(todayISO + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long' })}.
+
+A contractor spoke this to quickly add something to their work calendar:
+"""
+${transcript}
+"""
+
+Turn it into a single calendar entry:
+- kind: "job" if it's actual work for a customer; "reminder" if they said "remind me…" or it's a to-do; otherwise "event".
+- title: a short clean label, WITHOUT the date or time words in it (e.g. "Miller bathroom", "Order tile", "Inspection at 123 Oak").
+- date: resolve ANY relative phrase to a real yyyy-mm-dd using today's date above. "tomorrow" = today+1. "next Tuesday" = the Tuesday of next week. "the 15th" = the 15th of the current month (or next month if the 15th already passed). If they truly gave no date, set needsDate=true and put today's date in date as a placeholder.
+- time: if they gave a time ("9am", "at 2:30"), convert to 24h "HH:MM". If no time, empty string "".
+- notes: anything extra worth keeping; else "".
+- needsDate: true ONLY if no date could be determined at all.`
+
+    try {
+      return await withAnthropicRetry('parseCalendarEntry', async () => {
+        const stream = client.messages.stream({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 1000,
+          thinking: { type: 'adaptive' },
+          output_config: {
+            effort: 'low',
+            format: { type: 'json_schema', schema: calendarEntrySchema },
+          },
+          system: 'You convert a contractor\'s spoken sentence into one structured calendar entry. Be literal and accurate about dates — always output a real yyyy-mm-dd. Output JSON only.',
+          messages: [{ role: 'user', content: prompt }],
+        })
+        const message = await stream.finalMessage()
+        const textBlock = message.content.find(b => b.type === 'text')
+        if (!textBlock || textBlock.type !== 'text') {
+          throw new HttpsError('internal', 'No content returned. Please try again.')
+        }
+        return JSON.parse(textBlock.text) as {
+          kind: 'job' | 'event' | 'reminder'; title: string; date: string; time: string; notes: string; needsDate: boolean
+        }
+      })
+    } catch (err) {
+      if (err instanceof HttpsError) throw err
+      console.error('parseCalendarEntry failed', err)
       throw new HttpsError('unavailable', friendlyAnthropicError(err))
     }
   },
@@ -1391,7 +2063,17 @@ interface InvoiceDoc {
   jobTypeName?: string
   amountDue?: number
   status?: 'draft' | 'sent' | 'paid' | 'overdue'
+  createdBy?: string   // the contractor who owns this invoice — money routes to them
 }
+
+// Platform fee taken off the top of every customer card payment, to cover the
+// cost of running the platform. Taken via Stripe application_fee so it's routed
+// to OUR platform account automatically on every payment — guaranteed every
+// time. The contractor keeps the rest. Because the charge sets `on_behalf_of`
+// the contractor (see createInvoiceCheckout), the contractor is the merchant of
+// record and Stripe's own processing fee is debited from THEM, not us — so this
+// 2% is clean platform margin, not eaten by Stripe fees.
+const PLATFORM_FEE_PERCENT = 2
 
 // Called by the PUBLIC estimate page right after a customer approves an
 // estimate that requested a deposit. Creates the deposit invoice SERVER-SIDE
@@ -1531,6 +2213,26 @@ export const createInvoiceCheckout = onRequest(
       // Amount is read from Firestore server-side (never from the client) and
       // converted to integer cents — this is the only source for what's charged.
       const amountCents = Math.round(amountDue * 100)
+
+      // Route the money to the CONTRACTOR's connected account (Stripe Connect),
+      // taking our 2% platform fee off the top. The contractor must have
+      // finished payout setup (connectPayoutsEnabled) — if not, the public page
+      // shouldn't have shown "Pay by Card", but we double-check here so money
+      // never has nowhere valid to land.
+      let connectAccountId: string | undefined
+      if (inv.createdBy) {
+        const ownerSnap = await db.collection('users').doc(inv.createdBy).get()
+        const owner = ownerSnap.data() as { stripeConnectId?: string; connectPayoutsEnabled?: boolean } | undefined
+        if (owner?.stripeConnectId && owner.connectPayoutsEnabled) {
+          connectAccountId = owner.stripeConnectId
+        }
+      }
+      if (!connectAccountId) {
+        res.status(409).json({ error: 'This contractor hasn\'t finished setting up card payouts yet. Please pay by cash, or contact them.' })
+        return
+      }
+      const feeCents = Math.round(amountCents * (PLATFORM_FEE_PERCENT / 100))
+
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
         // Omit payment_method_types so Stripe shows dynamic payment methods.
@@ -1550,7 +2252,19 @@ export const createInvoiceCheckout = onRequest(
         cancel_url: returnUrl,
         // Stamped onto the webhook event so we know which invoice to mark paid.
         metadata: { invoiceId },
-        payment_intent_data: { metadata: { invoiceId } },
+        payment_intent_data: {
+          metadata: { invoiceId },
+          // 2% off the top → our platform; remainder → the contractor.
+          application_fee_amount: feeCents,
+          // The contractor is the merchant of record: their business shows on the
+          // customer's statement and Stripe's processing fee is debited from the
+          // contractor (not the platform), so our 2% application fee is clean
+          // margin. The charge itself is still created on the platform account,
+          // so checkout.session.completed fires on the platform and the existing
+          // webhook marks the invoice paid — no Connect webhook needed.
+          on_behalf_of: connectAccountId,
+          transfer_data: { destination: connectAccountId },
+        },
       }, {
         // Idempotency: keying on invoiceId + current amount means rapid repeat
         // clicks (or two open tabs) reuse the SAME checkout session instead of
@@ -1582,7 +2296,17 @@ async function getOrCreateStripeCustomer(stripe: InstanceType<typeof StripeLib>,
   const userRef = db.collection('users').doc(userId)
   const snap = await userRef.get()
   const existing = (snap.data() as { stripeCustomerId?: string } | undefined)?.stripeCustomerId
-  if (existing) return existing
+  if (existing) {
+    // Verify the saved customer still exists in the CURRENT Stripe mode. Early
+    // accounts may carry a TEST-mode customer id from before we went live; in
+    // live mode that lookup fails. If so, fall through and create a fresh one.
+    try {
+      const c = await stripe.customers.retrieve(existing)
+      if (c && !(c as { deleted?: boolean }).deleted) return existing
+    } catch {
+      console.warn(`Stale/unknown Stripe customer ${existing} for ${userId} — recreating in current mode`)
+    }
+  }
   const customer = await stripe.customers.create({
     ...(email ? { email } : {}),
     metadata: { clerkUserId: userId },
@@ -1591,10 +2315,127 @@ async function getOrCreateStripeCustomer(stripe: InstanceType<typeof StripeLib>,
   return customer.id
 }
 
-export const createSubscriptionCheckout = onCall<{ clerkToken: string; email?: string }>(
+// ──────────────────────────────────────────────────────────────────────────
+// Stripe CONNECT — so contractors can RECEIVE card payments from THEIR
+// customers directly into their own bank. We use Express connected accounts:
+// the contractor does a short Stripe-hosted onboarding (bank/debit + the
+// legally-required identity info) without ever seeing a Stripe dashboard.
+// Money from a customer's card goes straight to the contractor's connected
+// account; we take a 2% application fee off the top automatically.
+//
+// The connected account id + payout-ready status live on users/{id} as
+// SERVER-ONLY fields (stripeConnectId, connectPayoutsEnabled) — the client can
+// never write them (enforced by Firestore rules), only read them.
+// ──────────────────────────────────────────────────────────────────────────
+
+// Get the contractor's existing connected account id, or create one.
+async function getOrCreateConnectAccount(stripe: InstanceType<typeof StripeLib>, userId: string, email?: string): Promise<string> {
+  const db = getAdminDb()
+  const userRef = db.collection('users').doc(userId)
+  const snap = await userRef.get()
+  const existing = (snap.data() as { stripeConnectId?: string } | undefined)?.stripeConnectId
+  if (existing) return existing
+  const account = await stripe.accounts.create({
+    type: 'express',
+    ...(email ? { email } : {}),
+    business_type: 'individual',
+    capabilities: {
+      card_payments: { requested: true },
+      transfers: { requested: true },
+    },
+    metadata: { clerkUserId: userId },
+  })
+  await userRef.set({ stripeConnectId: account.id }, { merge: true })
+  return account.id
+}
+
+// startConnectOnboarding: contractor taps "Set up payouts". Returns a Stripe
+// Account Link URL we send them to; on completion Stripe redirects back to the
+// app. We refresh status from Stripe (don't trust the redirect alone).
+export const startConnectOnboarding = onCall<{ clerkToken: string; email?: string }>(
   { secrets: [STRIPE_SECRET_KEY, CLERK_SECRET_KEY], cors: true, timeoutSeconds: 30 },
   async (request) => {
     const { clerkToken, email } = request.data ?? {} as { clerkToken: string; email?: string }
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    const userId = await verifyClerk(clerkToken)
+    try {
+      const stripe = new StripeLib(STRIPE_SECRET_KEY.value())
+      const accountId = await getOrCreateConnectAccount(stripe, userId, email)
+      const link = await stripe.accountLinks.create({
+        account: accountId,
+        refresh_url: `${PUBLIC_HOST}/?payouts=refresh`,
+        return_url: `${PUBLIC_HOST}/?payouts=done`,
+        type: 'account_onboarding',
+      })
+      return { url: link.url }
+    } catch (err) {
+      console.error('startConnectOnboarding failed', err)
+      const msg = err instanceof Error ? err.message : 'Could not start payout setup.'
+      // Surface Stripe's "Connect not enabled" message clearly to the owner.
+      throw new HttpsError('internal', msg)
+    }
+  },
+)
+
+// createConnectAccountSession: returns a short-lived client_secret for an
+// EMBEDDED onboarding component, so the bank/identity form renders RIGHT INSIDE
+// our app (no redirect to a Stripe page). The frontend mounts it with
+// @stripe/react-connect-js. This is the "feels native" payout setup.
+export const createConnectAccountSession = onCall<{ clerkToken: string; email?: string }>(
+  { secrets: [STRIPE_SECRET_KEY, CLERK_SECRET_KEY], cors: true, timeoutSeconds: 30 },
+  async (request) => {
+    const { clerkToken, email } = request.data ?? {} as { clerkToken: string; email?: string }
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    const userId = await verifyClerk(clerkToken)
+    try {
+      const stripe = new StripeLib(STRIPE_SECRET_KEY.value())
+      const accountId = await getOrCreateConnectAccount(stripe, userId, email)
+      const accountSession = await stripe.accountSessions.create({
+        account: accountId,
+        components: {
+          account_onboarding: { enabled: true },
+        },
+      })
+      return { clientSecret: accountSession.client_secret }
+    } catch (err) {
+      console.error('createConnectAccountSession failed', err)
+      const msg = err instanceof Error ? err.message : 'Could not start payout setup.'
+      throw new HttpsError('internal', msg)
+    }
+  },
+)
+
+// getConnectStatus: read the contractor's payout readiness from Stripe and cache
+// it on their user doc. Returns whether they can accept card payments yet.
+export const getConnectStatus = onCall<{ clerkToken: string }>(
+  { secrets: [STRIPE_SECRET_KEY, CLERK_SECRET_KEY], cors: true, timeoutSeconds: 30 },
+  async (request) => {
+    const { clerkToken } = request.data ?? {} as { clerkToken: string }
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    const userId = await verifyClerk(clerkToken)
+    try {
+      const db = getAdminDb()
+      const userRef = db.collection('users').doc(userId)
+      const connectId = (await userRef.get()).data()?.stripeConnectId as string | undefined
+      if (!connectId) return { connected: false, payoutsEnabled: false, detailsSubmitted: false }
+
+      const stripe = new StripeLib(STRIPE_SECRET_KEY.value())
+      const acct = await stripe.accounts.retrieve(connectId)
+      const payoutsEnabled = !!acct.charges_enabled && !!acct.payouts_enabled
+      // Cache for quick reads (e.g. gating the public Pay-by-Card button).
+      await userRef.set({ connectPayoutsEnabled: payoutsEnabled, connectDetailsSubmitted: !!acct.details_submitted }, { merge: true })
+      return { connected: true, payoutsEnabled, detailsSubmitted: !!acct.details_submitted }
+    } catch (err) {
+      console.error('getConnectStatus failed', err)
+      throw new HttpsError('internal', 'Could not check payout status.')
+    }
+  },
+)
+
+export const createSubscriptionCheckout = onCall<{ clerkToken: string; email?: string; plan?: string }>(
+  { secrets: [STRIPE_SECRET_KEY, CLERK_SECRET_KEY], cors: true, timeoutSeconds: 30 },
+  async (request) => {
+    const { clerkToken, email, plan } = request.data ?? {} as { clerkToken: string; email?: string; plan?: string }
     if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
     const userId = await verifyClerk(clerkToken)
 
@@ -1602,12 +2443,19 @@ export const createSubscriptionCheckout = onCall<{ clerkToken: string; email?: s
       const stripe = new StripeLib(STRIPE_SECRET_KEY.value())
       const customerId = await getOrCreateStripeCustomer(stripe, userId, email)
       const returnUrl = `${PUBLIC_HOST}/?billing=`
+      // monthly ($19.99/mo) by default; 'quarterly' = $49.99 every 3 months;
+      // 'yearly' = $159.99/yr all access.
+      const priceId = priceIdForPlan(plan)
       const session = await stripe.checkout.sessions.create({
         mode: 'subscription',
         customer: customerId,
-        line_items: [{ price: PRO_PRICE_ID, quantity: 1 }],
+        line_items: [{ price: priceId, quantity: 1 }],
         success_url: `${returnUrl}success`,
         cancel_url: `${returnUrl}cancel`,
+        // Let customers enter a promotion code (e.g. the yearly 20%-off codes).
+        // Codes are restricted in Stripe (min order $159.99) so they only apply
+        // to the yearly plan; entering one on monthly/quarterly is rejected.
+        allow_promotion_codes: true,
         // Stamp the user so the webhook can map the subscription back to them.
         subscription_data: { metadata: { clerkUserId: userId } },
         metadata: { clerkUserId: userId },
@@ -1616,6 +2464,47 @@ export const createSubscriptionCheckout = onCall<{ clerkToken: string; email?: s
     } catch (err) {
       console.error('createSubscriptionCheckout failed', err)
       throw new HttpsError('internal', 'Could not start subscription checkout.')
+    }
+  },
+)
+
+// Pay-as-you-go: buy a pack of instant-quote credits at $1 each (1–10). A
+// one-time Checkout; the webhook adds `quantity` to paidQuoteCredits on success.
+// For people who don't want a subscription — a few bucks gets them going.
+export const createQuotePackCheckout = onCall<{ clerkToken: string; email?: string; quantity?: number }>(
+  { secrets: [STRIPE_SECRET_KEY, CLERK_SECRET_KEY], cors: true, timeoutSeconds: 30 },
+  async (request) => {
+    const { clerkToken, email, quantity } = request.data ?? {} as { clerkToken: string; email?: string; quantity?: number }
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    const userId = await verifyClerk(clerkToken)
+    // Clamp to 1–10 server-side so the amount can never be tampered with.
+    const qty = Math.max(1, Math.min(10, Math.round(Number(quantity) || 1)))
+
+    try {
+      const stripe = new StripeLib(STRIPE_SECRET_KEY.value())
+      const customerId = await getOrCreateStripeCustomer(stripe, userId, email)
+      const returnUrl = `${PUBLIC_HOST}/?credits=`
+      const session = await stripe.checkout.sessions.create({
+        mode: 'payment',
+        customer: customerId,
+        line_items: [{
+          quantity: qty,
+          price_data: {
+            currency: 'usd',
+            unit_amount: 100, // $1.00 each
+            product_data: { name: 'BuildPro+ instant quote', description: 'One instant quote credit' },
+          },
+        }],
+        success_url: `${returnUrl}success`,
+        cancel_url: `${returnUrl}cancel`,
+        // The webhook reads these to credit the right user the right amount.
+        metadata: { clerkUserId: userId, quoteCredits: String(qty) },
+        payment_intent_data: { metadata: { clerkUserId: userId, quoteCredits: String(qty) } },
+      })
+      return { url: session.url }
+    } catch (err) {
+      console.error('createQuotePackCheckout failed', err)
+      throw new HttpsError('internal', 'Could not start checkout.')
     }
   },
 )
@@ -1630,9 +2519,12 @@ export const createPortalSession = onCall<{ clerkToken: string }>(
     try {
       const db = getAdminDb()
       const snap = await db.collection('users').doc(userId).get()
-      const customerId = (snap.data() as { stripeCustomerId?: string } | undefined)?.stripeCustomerId
-      if (!customerId) throw new HttpsError('failed-precondition', 'No subscription to manage yet.')
+      const data = snap.data() as { stripeCustomerId?: string; businessEmail?: string } | undefined
+      if (!data?.stripeCustomerId) throw new HttpsError('failed-precondition', 'No subscription to manage yet.')
       const stripe = new StripeLib(STRIPE_SECRET_KEY.value())
+      // Self-heal: if the saved customer id is stale (e.g. a test-mode id from
+      // before going live), getOrCreateStripeCustomer recreates a valid one.
+      const customerId = await getOrCreateStripeCustomer(stripe, userId, data.businessEmail)
       const portal = await stripe.billingPortal.sessions.create({
         customer: customerId,
         return_url: `${PUBLIC_HOST}/`,
@@ -1641,7 +2533,11 @@ export const createPortalSession = onCall<{ clerkToken: string }>(
     } catch (err) {
       if (err instanceof HttpsError) throw err
       console.error('createPortalSession failed', err)
-      throw new HttpsError('internal', 'Could not open the billing portal.')
+      // Pass Stripe's specific reason through so it's diagnosable (e.g. "portal
+      // configuration not set up", "No such customer").
+      const msg = (err as { raw?: { message?: string } })?.raw?.message
+        || (err instanceof Error ? err.message : 'Could not open the billing portal.')
+      throw new HttpsError('internal', msg)
     }
   },
 )
@@ -1673,6 +2569,8 @@ export const stripeWebhook = onRequest(
         status: string
         metadata?: Record<string, string> | null
         cancel_at_period_end?: boolean | null
+        current_period_end?: number | null
+        items?: { data?: Array<{ current_period_end?: number | null }> } | null
       }) => {
         const userId = sub.metadata?.clerkUserId
         if (!userId) {
@@ -1692,20 +2590,40 @@ export const stripeWebhook = onRequest(
         // window. To soften, add 'past_due' to proStatuses.
         const proStatuses = ['active', 'trialing']
         const isPro = proStatuses.includes(sub.status)
+
+        // ── ACCESS CUTOFF DATE (Stripe's real paid-through date) ──
+        // current_period_end is the unix-seconds timestamp that this paid period
+        // runs through — i.e. the date access is good until. Stripe pushes it
+        // FORWARD automatically every time a renewal payment succeeds (monthly →
+        // next calendar month, 3-month → +3 months, yearly → +1 year), and never
+        // moves it on a failed/cancelled sub. We store it (ms) so the app can show
+        // "Pro access through <date>" and so access has a concrete end even if a
+        // later webhook is ever missed. Newer Stripe API versions expose the field
+        // on the subscription item rather than the subscription, so we read both.
+        const periodEndSec = sub.current_period_end
+          ?? sub.items?.data?.[0]?.current_period_end
+          ?? null
+        const periodEndMs = periodEndSec ? periodEndSec * 1000 : null
+
         await db.collection('users').doc(userId).set({
           tier: isPro ? 'pro' : 'free',
           subscriptionStatus: sub.status,
           stripeSubscriptionId: sub.id,
           cancelAtPeriodEnd: sub.cancel_at_period_end ?? false,
+          // Only overwrite the cutoff when Stripe gave us a fresh one, so a
+          // sparse event can't wipe a known-good date.
+          ...(periodEndMs ? { subscriptionCurrentPeriodEnd: periodEndMs } : {}),
         }, { merge: true })
-        console.log(`User ${userId} tier=${isPro ? 'pro' : 'free'} (sub ${sub.status})`)
+        console.log(`User ${userId} tier=${isPro ? 'pro' : 'free'} (sub ${sub.status}) through ${periodEndMs ? new Date(periodEndMs).toISOString() : 'n/a'}`)
       }
 
       switch (event.type) {
         case 'checkout.session.completed': {
           const session = event.data.object
           // Subscription signup → grant Pro immediately (don't wait for the
-          // separate subscription.created event). The webhook reconciles later.
+          // separate subscription.created event). Idempotent by nature: a
+          // duplicate webhook delivery just re-writes the same tier:'pro' (no-op);
+          // the customer.subscription.* events are the authoritative source of truth.
           if (session.mode === 'subscription') {
             const userId = session.metadata?.clerkUserId
             if (userId) {
@@ -1715,6 +2633,27 @@ export const stripeWebhook = onRequest(
                 ...(typeof session.subscription === 'string' ? { stripeSubscriptionId: session.subscription } : {}),
               }, { merge: true })
               console.log(`User ${userId} upgraded to Pro via checkout`)
+            }
+            break
+          }
+          // Pay-as-you-go quote pack ($1 each) → add credits to the buyer.
+          const quoteCredits = Number(session.metadata?.quoteCredits ?? 0)
+          if (quoteCredits > 0 && session.payment_status === 'paid') {
+            const buyerId = session.metadata?.clerkUserId
+            if (buyerId) {
+              // Idempotency: record handled session ids so a duplicate webhook
+              // delivery doesn't double-credit.
+              const sessRef = db.collection('processedCreditSessions').doc(session.id)
+              const already = await sessRef.get()
+              if (already.exists) {
+                console.log(`Quote-pack session ${session.id} already processed — skipping`)
+                break
+              }
+              await db.collection('users').doc(buyerId).set({
+                paidQuoteCredits: FieldValue.increment(quoteCredits),
+              }, { merge: true })
+              await sessRef.set({ at: new Date().toISOString(), userId: buyerId, credits: quoteCredits })
+              console.log(`Added ${quoteCredits} quote credit(s) to ${buyerId}`)
             }
             break
           }
@@ -1736,6 +2675,7 @@ export const stripeWebhook = onRequest(
               status: 'paid',
               amountDue: 0,
               paidAt: new Date().toISOString(),
+              paidAtMs: Date.now(),   // numeric anchor for the 2-year retention lock
               stripePaymentIntentId: typeof session.payment_intent === 'string' ? session.payment_intent : null,
             }, { merge: true })
             console.log(`Invoice ${invoiceId} marked paid via Stripe`)
@@ -1769,6 +2709,28 @@ export const stripeWebhook = onRequest(
           await applySubscriptionStatus(event.data.object)
           break
         }
+        // A contractor's CONNECT account changed (finished onboarding, payouts
+        // enabled/disabled). Cache the payout-ready flag on their user doc so the
+        // public Pay-by-Card button and checkout routing stay accurate.
+        case 'account.updated': {
+          const acct = event.data.object as { id?: string; charges_enabled?: boolean; payouts_enabled?: boolean; details_submitted?: boolean; metadata?: { clerkUserId?: string } }
+          const uid = acct.metadata?.clerkUserId
+          if (uid) {
+            // Cross-check: the account id must match the one stored on this user,
+            // so a confused/stale event can never flip the wrong user's payout flag.
+            const storedConnectId = (await db.collection('users').doc(uid).get()).data()?.stripeConnectId as string | undefined
+            if (storedConnectId && acct.id && storedConnectId !== acct.id) {
+              console.warn(`account.updated id mismatch for ${uid}: event ${acct.id} != stored ${storedConnectId} — ignoring`)
+              break
+            }
+            await db.collection('users').doc(uid).set({
+              connectPayoutsEnabled: !!acct.charges_enabled && !!acct.payouts_enabled,
+              connectDetailsSubmitted: !!acct.details_submitted,
+            }, { merge: true })
+            console.log(`Connect account.updated for ${uid}: payouts=${!!acct.charges_enabled && !!acct.payouts_enabled}`)
+          }
+          break
+        }
         default:
           // Ignore other event types.
           break
@@ -1780,5 +2742,203 @@ export const stripeWebhook = onRequest(
     }
 
     res.json({ received: true })
+  },
+)
+
+// ──────────────────────────────────────────────────────────────────────────
+// morningAgendaAlert — runs every day at 6:00 AM Eastern. For each contractor
+// who has something on their calendar TODAY (a custom calendar event OR a
+// project whose startDate is today), email them that day's agenda so a job
+// never sneaks up on them. The in-app 6am notification (client-side) is the
+// other half — this is the "works even when the app is closed" half.
+//
+// Sender uses the shared EMAIL_FROM (sandbox until builderspro.cc is verified,
+// then alerts@builderspro.cc — flip EMAIL_DOMAIN_VERIFIED at the top of the file).
+const ALERT_FROM = EMAIL_FROM
+
+export const morningAgendaAlert = onSchedule(
+  {
+    schedule: '0 6 * * *',
+    timeZone: 'America/New_York',
+    secrets: [RESEND_API_KEY],
+    timeoutSeconds: 300,
+    memory: '512MiB',
+  },
+  async () => {
+    const db = getAdminDb()
+    // Today's date in Eastern (the schedule's timezone) as yyyy-mm-dd.
+    const todayISO = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+    console.log(`morningAgendaAlert running for ${todayISO}`)
+
+    // Gather everything scheduled for today, grouped by owner.
+    const byUser = new Map<string, { jobs: string[]; events: string[] }>()
+    const bucket = (uid: string) => { if (!byUser.has(uid)) byUser.set(uid, { jobs: [], events: [] }); return byUser.get(uid)! }
+
+    // Calendar events dated today.
+    const evSnap = await db.collection('calendarEvents').where('date', '==', todayISO).get()
+    evSnap.forEach(d => {
+      const e = d.data() as { createdBy?: string; title?: string; time?: string; kind?: string }
+      if (!e.createdBy) return
+      const t = e.time ? ` at ${e.time}` : ''
+      bucket(e.createdBy).events.push(`${e.kind === 'reminder' ? '🔔 ' : ''}${e.title || 'Event'}${t}`)
+    })
+
+    // Projects starting today. startDate may be a plain "yyyy-mm-dd" or a full
+    // ISO timestamp, so range-match anything that BEGINS with today's date
+    // (\uf8ff is a high code point — the standard Firestore starts-with trick).
+    const projSnap = await db.collection('projects')
+      .where('startDate', '>=', todayISO)
+      .where('startDate', '<=', todayISO + '\uf8ff')
+      .get()
+    projSnap.forEach(d => {
+      const p = d.data() as { createdBy?: string; archived?: boolean; declined?: boolean; status?: string; customerName?: string; jobTypeName?: string; startDate?: string }
+      if (!p.createdBy || p.archived || p.declined || p.status === 'closed') return
+      if (!(p.startDate || '').startsWith(todayISO)) return
+      bucket(p.createdBy).jobs.push(`${p.jobTypeName || 'Job'} for ${p.customerName || 'customer'}`)
+    })
+
+    if (byUser.size === 0) { console.log('No agendas today; nothing to send.'); return }
+
+    let sent = 0
+    for (const [uid, agenda] of byUser) {
+      try {
+        // Find the contractor's email: profile businessEmail first.
+        const uDoc = await db.collection('users').doc(uid).get()
+        const u = (uDoc.data() as { businessEmail?: string; businessName?: string } | undefined) ?? {}
+        const to = u.businessEmail
+        if (!to || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) { console.log(`Skip ${uid}: no valid email`); continue }
+
+        const lines: string[] = []
+        if (agenda.jobs.length) lines.push('<strong>Jobs today:</strong><ul>' + agenda.jobs.map(j => `<li>🔨 ${j}</li>`).join('') + '</ul>')
+        if (agenda.events.length) lines.push('<strong>On your calendar:</strong><ul>' + agenda.events.map(e => `<li>📌 ${e}</li>`).join('') + '</ul>')
+        const prettyDate = new Date(todayISO + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })
+        const html = `<div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;color:#1a1f2e">
+          <h2 style="color:#f97316;margin:0 0 4px">Good morning${u.businessName ? ', ' + escapeHtml(u.businessName) : ''} ☀️</h2>
+          <p style="color:#64748b;margin:0 0 16px">Here's what you've got on for <strong>${prettyDate}</strong>:</p>
+          ${lines.join('')}
+          <p style="color:#94a3b8;font-size:12px;margin-top:20px">— BuildPro+ · Open the app: https://builderspro.cc</p>
+        </div>`
+
+        const res = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${RESEND_API_KEY.value()}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ from: ALERT_FROM, to: [to], subject: `☀️ Today's schedule — ${prettyDate}`, html }),
+        })
+        if (res.ok) { sent++ } else { console.error(`Agenda email failed for ${uid}:`, res.status, await res.text()) }
+      } catch (err) {
+        console.error(`Agenda email error for ${uid}:`, err)
+      }
+    }
+    console.log(`morningAgendaAlert done: ${sent} email(s) sent for ${todayISO}`)
+  },
+)
+
+// ──────────────────────────────────────────────────────────────────────────
+// "A customer responded" email alerts. When a customer approves/declines an
+// estimate or change order, or pays an invoice, the contractor gets an email
+// instantly — so they know even when the app is closed. These are Firestore
+// triggers (fire the moment the doc changes), not tied to the app being open.
+// ──────────────────────────────────────────────────────────────────────────
+
+// Send a branded email to a contractor. Looks up their email from their user
+// doc (businessEmail). No-op if they have no email on file.
+async function emailContractor(ownerId: string | undefined, subject: string, bodyHtml: string): Promise<void> {
+  if (!ownerId) return
+  try {
+    const db = getAdminDb()
+    const u = (await db.collection('users').doc(ownerId).get()).data() as { businessEmail?: string; businessName?: string } | undefined
+    const to = u?.businessEmail
+    if (!to || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) { console.log(`emailContractor: no valid email for ${ownerId}`); return }
+    const html = `<div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;color:#1a1f2e">
+      <h2 style="color:#f97316;margin:0 0 12px">BuildPro+</h2>
+      ${bodyHtml}
+      <p style="color:#94a3b8;font-size:12px;margin-top:20px">Open the app: https://builderspro.cc</p>
+    </div>`
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${RESEND_API_KEY.value()}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: EMAIL_FROM, to: [to], subject, html }),
+    })
+    if (!res.ok) console.error('emailContractor send failed', res.status, await res.text())
+  } catch (err) {
+    console.error('emailContractor error', err)
+  }
+}
+
+// Estimate approved/declined → email the contractor.
+export const onEstimateResponded = onDocumentUpdated(
+  { document: 'estimates/{id}', secrets: [RESEND_API_KEY] },
+  async (event) => {
+    const before = event.data?.before.data() as { status?: string } | undefined
+    const after = event.data?.after.data() as { status?: string; createdBy?: string; customerName?: string; jobTypeName?: string; total?: number; customerResponse?: { signedName?: string; reason?: string } } | undefined
+    if (!after) return
+    // Only fire on the FIRST transition into approved/declined (not later edits).
+    const wasPending = before?.status === 'pending' || !before?.status
+    if (!wasPending) return
+    // Escape all customer/contractor-supplied strings before putting them in HTML.
+    const name = escapeHtml(after.customerName || 'your customer')
+    const job = escapeHtml(after.jobTypeName || 'job')
+    if (after.status === 'approved') {
+      await emailContractor(after.createdBy,
+        `✅ ${after.customerName || 'A customer'} approved your estimate`,
+        `<p style="font-size:15px">Good news — <strong>${name}</strong> just <strong>approved</strong> the ${job} estimate${after.total ? ` ($${Number(after.total).toLocaleString()})` : ''}.</p>
+         <p style="font-size:14px;color:#64748b">Signed by ${escapeHtml(after.customerResponse?.signedName || after.customerName || 'the customer')}. It's now in your Projects, ready to go.</p>`)
+    } else if (after.status === 'declined') {
+      await emailContractor(after.createdBy,
+        `${after.customerName || 'A customer'} declined your estimate`,
+        `<p style="font-size:15px"><strong>${name}</strong> declined the ${job} estimate.</p>
+         ${after.customerResponse?.reason ? `<p style="font-size:14px;color:#64748b">Reason: ${escapeHtml(after.customerResponse.reason)}</p>` : ''}
+         <p style="font-size:14px;color:#64748b">You can adjust it and re-send anytime.</p>`)
+    }
+  },
+)
+
+// Change order approved/declined → email the contractor.
+export const onChangeOrderResponded = onDocumentUpdated(
+  { document: 'changeOrders/{id}', secrets: [RESEND_API_KEY] },
+  async (event) => {
+    const before = event.data?.before.data() as { status?: string } | undefined
+    const after = event.data?.after.data() as { status?: string; createdBy?: string; customerName?: string; delta?: number; customerResponse?: { signedName?: string } } | undefined
+    if (!after) return
+    const wasPending = before?.status === 'pending' || !before?.status
+    if (!wasPending) return
+    const coName = escapeHtml(after.customerName || 'Your customer')
+    if (after.status === 'approved') {
+      await emailContractor(after.createdBy,
+        `✅ ${after.customerName || 'A customer'} approved a change order`,
+        `<p style="font-size:15px"><strong>${coName}</strong> approved a change order${after.delta != null ? ` (${after.delta >= 0 ? '+' : '−'}$${Math.abs(Number(after.delta)).toLocaleString()})` : ''}.</p>
+         <p style="font-size:14px;color:#64748b">Your contract total has been updated in the project.</p>`)
+    } else if (after.status === 'declined') {
+      await emailContractor(after.createdBy,
+        `${after.customerName || 'A customer'} declined a change order`,
+        `<p style="font-size:15px"><strong>${coName}</strong> declined a change order.</p>`)
+    }
+  },
+)
+
+// Invoice paid (card) or customer chose cash → email the contractor.
+export const onInvoicePaidAlert = onDocumentUpdated(
+  { document: 'invoices/{id}', secrets: [RESEND_API_KEY] },
+  async (event) => {
+    const before = event.data?.before.data() as { status?: string; customerCashChoice?: boolean } | undefined
+    const after = event.data?.after.data() as { status?: string; customerCashChoice?: boolean; createdBy?: string; customerName?: string; invoiceNumber?: string; subtotal?: number } | undefined
+    if (!after) return
+    const invName = escapeHtml(after.customerName || 'Your customer')
+    const invNo = escapeHtml(after.invoiceNumber || '')
+    // Paid by card: status flipped to 'paid'.
+    if (before?.status !== 'paid' && after.status === 'paid') {
+      await emailContractor(after.createdBy,
+        `💳 ${after.customerName || 'A customer'} paid invoice ${after.invoiceNumber || ''}`.trim(),
+        `<p style="font-size:15px">You got paid! <strong>${invName}</strong> paid invoice ${invNo}${after.subtotal ? ` ($${Number(after.subtotal).toLocaleString()})` : ''} by card.</p>
+         <p style="font-size:14px;color:#64748b">The funds are on their way to your bank.</p>`)
+      return
+    }
+    // Customer chose "Pay Cash / In Person".
+    if (!before?.customerCashChoice && after.customerCashChoice) {
+      await emailContractor(after.createdBy,
+        `💵 ${after.customerName || 'A customer'} will pay cash for invoice ${after.invoiceNumber || ''}`.trim(),
+        `<p style="font-size:15px"><strong>${invName}</strong> chose to pay invoice ${invNo}${after.subtotal ? ` ($${Number(after.subtotal).toLocaleString()})` : ''} in cash/in person.</p>
+         <p style="font-size:14px;color:#64748b">Confirm it as paid in the app once you've collected.</p>`)
+    }
   },
 )

@@ -190,6 +190,11 @@ async function createProjectFor(e: Estimate, userId: string, status: ProjectStat
     createdBy: userId,
     sourceEstimateId: e.id,
     estimateTotal: e.total || 0,
+    // Carry the start date into the project: the customer's confirmed/requested
+    // date wins, otherwise the contractor's proposed date.
+    ...((e.startDateResponse?.action === 'requested_change' && e.startDateResponse.requestedDate)
+      ? { startDate: e.startDateResponse.requestedDate }
+      : e.proposedStartDate ? { startDate: e.proposedStartDate } : {}),
     ...(declined ? {
       declined: true,
       declinedAt: e.customerResponse?.respondedAt || new Date().toISOString(),

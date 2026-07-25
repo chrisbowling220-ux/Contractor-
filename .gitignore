@@ -15,6 +15,7 @@ dist-ssr
 # Env files and editor save/backup artifacts — never commit these.
 .env
 .env.*
+!.env.example
 *.save
 *~
 

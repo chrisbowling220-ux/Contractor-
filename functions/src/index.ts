@@ -253,7 +253,9 @@ interface AnalyzeScanInput {
   jobLocationRegion: string
   regionMultiplier: number
   transcript: string
-  // Base64-encoded JPEG image data, WITHOUT the `data:image/jpeg;base64,` prefix.
+  // Base64-encoded image data, WITHOUT the `data:<type>;base64,` prefix.
+  // The real media type is sniffed from the bytes server-side — never assume
+  // JPEG here, because the file picker hands us PNG/WebP/HEIC just as often.
   images: string[]
   hourlyRateOverride?: number
   markupPercentOverride?: number
@@ -867,6 +869,117 @@ function friendlyAnthropicError(err: unknown): string {
   return 'We couldn\'t complete that just now. Please try again in a moment.'
 }
 
+// Output-token budget for the quote generators.
+//
+// `max_tokens` is a hard cap on adaptive thinking AND the visible JSON
+// together. At 'high' effort a photo-driven quote can spend most of a small
+// budget on thinking, so the JSON gets cut off mid-object, JSON.parse throws,
+// and the user sees a failed quote with no explanation. Both call sites
+// stream, so there's no HTTP-timeout reason to keep the budget tight and we
+// only ever pay for tokens actually produced — give it real headroom.
+const QUOTE_MAX_TOKENS = 32000
+
+// Turns a finished quote message into the parsed JSON document, failing loudly
+// (and legibly, in the logs) instead of throwing a bare SyntaxError.
+function parseQuoteResponse(label: string, message: Anthropic.Message): unknown {
+  console.log(
+    `${label}: stop_reason=${message.stop_reason} in=${message.usage.input_tokens} out=${message.usage.output_tokens}`,
+  )
+
+  // Truncated output. Retrying the identical request would truncate again, so
+  // tell the user what to change rather than sending them round the loop.
+  if (message.stop_reason === 'max_tokens') {
+    console.error(`${label}: hit max_tokens (${QUOTE_MAX_TOKENS}) — response truncated`)
+    throw new HttpsError(
+      'invalid-argument',
+      'That job had more going on than we could fit in one estimate. Try fewer photos, or shorten the narration, and run it again.',
+    )
+  }
+  if ((message.stop_reason as string) === 'refusal') {
+    console.error(`${label}: model declined the request`)
+    throw new HttpsError(
+      'invalid-argument',
+      'We couldn\'t build an estimate from those photos. Try different photos, or describe the job in the notes and run it again.',
+    )
+  }
+
+  const textBlock = message.content.find(b => b.type === 'text')
+  if (!textBlock || textBlock.type !== 'text' || !textBlock.text.trim()) {
+    console.error(
+      `${label}: no text block returned (stop_reason=${message.stop_reason}, blocks=[${message.content.map(b => b.type).join(', ')}])`,
+    )
+    throw new HttpsError('internal', 'No content returned. Please try again.')
+  }
+
+  try {
+    return JSON.parse(textBlock.text)
+  } catch (err) {
+    // Log both ends — the tail is what tells us whether it was truncated.
+    console.error(
+      `${label}: could not parse quote JSON (len=${textBlock.text.length}) head=${textBlock.text.slice(0, 200)} tail=${textBlock.text.slice(-200)}`,
+      err,
+    )
+    throw new HttpsError('internal', 'We couldn\'t read the estimate we just built. Please try again.')
+  }
+}
+
+// ── Image validation ──────────────────────────────────────────────────────
+// Claude accepts JPEG, PNG, GIF and WebP only, and rejects the whole request
+// when the declared media_type doesn't match the actual bytes. Phone photos
+// arrive as HEIC as often as JPEG, so sniff the magic bytes rather than
+// hardcoding a type and having every scan 400 at the API.
+const SUPPORTED_IMAGE_MEDIA_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'] as const
+type SupportedImageMediaType = (typeof SUPPORTED_IMAGE_MEDIA_TYPES)[number]
+
+// Per-image cap on the Claude API is 10MB base64; the whole request is capped
+// at 32MB. Stay under both with room for the prompt and JSON envelope.
+const MAX_IMAGE_BASE64_CHARS = 9_000_000
+const MAX_TOTAL_IMAGE_BASE64_CHARS = 24_000_000
+
+function sniffImageMediaType(base64: string): SupportedImageMediaType | null {
+  // 64 base64 chars (a multiple of 4) decode to 48 bytes — plenty for every
+  // signature below, and cheap regardless of how big the image is.
+  const head = Buffer.from(base64.slice(0, 64), 'base64')
+  if (head.length < 12) return null
+  if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return 'image/jpeg'
+  if (head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) return 'image/png'
+  if (head.toString('ascii', 0, 3) === 'GIF') return 'image/gif'
+  if (head.toString('ascii', 0, 4) === 'RIFF' && head.toString('ascii', 8, 12) === 'WEBP') return 'image/webp'
+  return null
+}
+
+// Validates every scan photo and returns ready-to-send image blocks. Throws an
+// HttpsError naming the offending photo so the user can remove just that one.
+function buildImageBlocks(images: string[]): Anthropic.ContentBlockParam[] {
+  const blocks: Anthropic.ContentBlockParam[] = []
+  let totalChars = 0
+
+  for (let i = 0; i < images.length; i++) {
+    const label = `Photo ${i + 1}`
+    const data = typeof images[i] === 'string' ? images[i].trim() : ''
+    if (!data) {
+      throw new HttpsError('invalid-argument', `${label} came through empty. Remove it and try again.`)
+    }
+    if (data.length > MAX_IMAGE_BASE64_CHARS) {
+      throw new HttpsError('invalid-argument', `${label} is too large to send. Retake it at a smaller size and try again.`)
+    }
+    const mediaType = sniffImageMediaType(data)
+    if (!mediaType) {
+      throw new HttpsError(
+        'invalid-argument',
+        `${label} isn't a format we can read. We support JPEG, PNG, GIF and WebP — iPhone HEIC photos need converting first (Settings → Camera → Formats → Most Compatible).`,
+      )
+    }
+    totalChars += data.length
+    blocks.push({ type: 'image', source: { type: 'base64', media_type: mediaType, data } })
+  }
+
+  if (totalChars > MAX_TOTAL_IMAGE_BASE64_CHARS) {
+    throw new HttpsError('invalid-argument', 'Those photos add up to more than we can send at once. Remove a couple and try again.')
+  }
+  return blocks
+}
+
 async function verifyClerk(token: string): Promise<string> {
   try {
     const claims = await verifyToken(token, { secretKey: CLERK_SECRET_KEY.value() })
@@ -948,7 +1061,7 @@ export const generateAIQuote = onCall<GenerateCallPayload>(
           // hard about the scope before writing the quote. This trades a bit of
           // latency for accuracy; the 540s function timeout has ample room.
           model: 'claude-opus-4-8',
-          max_tokens: 8000,
+          max_tokens: QUOTE_MAX_TOKENS,
           thinking: { type: 'adaptive' },
           output_config: {
             effort: 'high',
@@ -957,12 +1070,7 @@ export const generateAIQuote = onCall<GenerateCallPayload>(
           system: GENERATE_SYSTEM_PROMPT + '\n\n' + permitPolicyBlock(input.includePermitText),
           messages: [{ role: 'user', content: buildGenerateUserPrompt(input) + learnedPrices }],
         })
-        const message = await stream.finalMessage()
-        const textBlock = message.content.find(b => b.type === 'text')
-        if (!textBlock || textBlock.type !== 'text') {
-          throw new HttpsError('internal', 'No content returned. Please try again.')
-        }
-        return JSON.parse(textBlock.text)
+        return parseQuoteResponse('generateAIQuote', await stream.finalMessage())
       })
     } catch (err) {
       // The gate already charged a credit; refund it so a failure is free.
@@ -995,8 +1103,14 @@ export const analyzeScan = onCall<AnalyzeCallPayload>(
       throw new HttpsError('invalid-argument', 'Up to 8 images per scan')
     }
 
+    // Validate and type the photos BEFORE the credit gate — a request the API
+    // would reject outright must never cost the user a quote.
+    const imageBlocks = buildImageBlocks(images)
+
     const userId = await verifyClerk(clerkToken)
-    console.log(`analyzeScan user=${userId} images=${images.length} transcriptLen=${transcript.length}`)
+    console.log(
+      `analyzeScan user=${userId} images=${images.length} imageBytes=${images.reduce((n, d) => n + (d?.length ?? 0), 0)} transcriptLen=${transcript.length}`,
+    )
 
     // Subscription gate — same as generateAIQuote. Video/photo scan also
     // counts as one AI quote against the free tier (or a paid $1 credit).
@@ -1006,10 +1120,7 @@ export const analyzeScan = onCall<AnalyzeCallPayload>(
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() })
 
     const userContent: Anthropic.ContentBlockParam[] = [
-      ...images.map(data => ({
-        type: 'image' as const,
-        source: { type: 'base64' as const, media_type: 'image/jpeg' as const, data },
-      })),
+      ...imageBlocks,
       {
         type: 'text' as const,
         text: `Customer: ${input.customerName || '(not provided)'}
@@ -1044,7 +1155,7 @@ Analyze the images and the contractor's narration together. Produce the structur
           // photos + narration before producing the material list. The 540s
           // function timeout leaves plenty of room.
           model: 'claude-opus-4-8',
-          max_tokens: 8000,
+          max_tokens: QUOTE_MAX_TOKENS,
           thinking: { type: 'adaptive' },
           output_config: {
             effort: 'high',
@@ -1053,12 +1164,7 @@ Analyze the images and the contractor's narration together. Produce the structur
           system: ANALYZE_SYSTEM_PROMPT + '\n\n' + permitPolicyBlock(input.includePermitText),
           messages: [{ role: 'user', content: userContent }],
         })
-        const message = await stream.finalMessage()
-        const textBlock = message.content.find(b => b.type === 'text')
-        if (!textBlock || textBlock.type !== 'text') {
-          throw new HttpsError('internal', 'No content returned. Please try again.')
-        }
-        return JSON.parse(textBlock.text)
+        return parseQuoteResponse('analyzeScan', await stream.finalMessage())
       })
     } catch (err) {
       // The gate already charged a credit; refund it so a failure is free.

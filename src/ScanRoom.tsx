@@ -55,6 +55,101 @@ function fileToBase64(file: File | Blob): Promise<string> {
   })
 }
 
+const MAX_PHOTOS = 8
+
+// Callable errors carry a 'functions/<code>' code that says whether retrying
+// can possibly help. Anything else (a plain network error) reads as retryable.
+function firebaseErrorCode(err: unknown): string {
+  const code = (err as { code?: unknown })?.code
+  return typeof code === 'string' ? code.replace(/^functions\//, '') : ''
+}
+
+// Minimal shape check on the estimator's response — enough that the save path
+// below can't throw a TypeError on a missing nested field and get misreported
+// as a failed generation.
+function isAIQuote(v: unknown): v is AIQuote {
+  const q = v as AIQuote | undefined
+  return !!q
+    && typeof q.customer_summary === 'string'
+    && typeof q.work_scope === 'string'
+    && Array.isArray(q.material_list)
+    && typeof q.labor?.hourly_rate === 'number'
+    && typeof q.labor?.estimated_hours === 'number'
+    && typeof q.labor?.labor_total === 'number'
+    && typeof q.price_breakdown?.materials_subtotal === 'number'
+    && typeof q.price_breakdown?.rentals_subtotal === 'number'
+    && typeof q.final_customer_quote === 'number'
+}
+
+// Every photo is re-encoded through a canvas before it leaves the browser.
+// Two reasons, both of which otherwise kill the scan outright:
+//
+//  1. Format. The estimator only reads JPEG/PNG/GIF/WebP, and rejects the whole
+//     request if the declared type doesn't match the bytes. The file picker
+//     hands us HEIC on most iPhones, so passing the raw file through fails
+//     every time. Re-encoding gives us one known format.
+//  2. Size. A full-resolution phone photo is several megabytes; base64 adds a
+//     third on top. Eight of them blow past the request limit long before they
+//     reach the model, and the call fails with nothing to show for it.
+//
+// 2000px on the long edge keeps the detail the estimator needs to read a work
+// area while landing each photo in the low hundreds of KB.
+const MAX_PHOTO_EDGE = 2000
+const PHOTO_JPEG_QUALITY = 0.82
+
+type DecodedImage = { image: CanvasImageSource; width: number; height: number; close: () => void }
+
+// Decodes an image file to something drawable. createImageBitmap is the fast
+// path; the <img> fallback covers browsers without it. A file the browser
+// can't decode at all (HEIC outside Safari) surfaces as a readable error
+// rather than a silently dropped photo.
+async function decodeImageFile(file: File): Promise<DecodedImage> {
+  const name = file.name || 'that photo'
+  if (typeof createImageBitmap === 'function') {
+    try {
+      const bitmap = await createImageBitmap(file)
+      return { image: bitmap, width: bitmap.width, height: bitmap.height, close: () => bitmap.close() }
+    } catch {
+      // Fall through to the <img> path.
+    }
+  }
+  const url = URL.createObjectURL(file)
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image()
+      el.onload = () => resolve(el)
+      el.onerror = () => reject(new Error(
+        `Couldn't read "${name}". If it's an iPhone HEIC photo, use 📷 Take Photo instead, or switch Settings → Camera → Formats to "Most Compatible".`,
+      ))
+      el.src = url
+    })
+    return { image: img, width: img.naturalWidth, height: img.naturalHeight, close: () => URL.revokeObjectURL(url) }
+  } catch (err) {
+    URL.revokeObjectURL(url)
+    throw err
+  }
+}
+
+// Returns base64 JPEG data (no data: prefix) sized for the estimator.
+async function fileToScanPhoto(file: File): Promise<string> {
+  const source = await decodeImageFile(file)
+  try {
+    if (!source.width || !source.height) throw new Error(`"${file.name || 'That photo'}" looks empty — try another one.`)
+    const ratio = Math.min(1, MAX_PHOTO_EDGE / Math.max(source.width, source.height))
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(source.width * ratio))
+    canvas.height = Math.max(1, Math.round(source.height * ratio))
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('This browser can\'t process photos. Try Chrome or Safari.')
+    ctx.drawImage(source.image, 0, 0, canvas.width, canvas.height)
+    const base64 = canvas.toDataURL('image/jpeg', PHOTO_JPEG_QUALITY).split(',')[1] || ''
+    if (base64.length < 100) throw new Error(`"${file.name || 'That photo'}" came out empty after processing.`)
+    return base64
+  } finally {
+    source.close()
+  }
+}
+
 // Pick the first MIME type the browser supports. Order matters: prefer formats
 // Google Speech-to-Text handles natively, fall back to whatever the browser offers.
 function pickRecorderMimeType(): string {
@@ -228,6 +323,8 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
   // Max 2 voice sessions per estimate. Resets when the estimate is saved/cleared.
   const [voiceSessionsUsed, setVoiceSessionsUsed] = useState(0)
   const [images, setImages] = useState<{ preview: string; data: string }[]>([])
+  // True while picked photos are being decoded/resized for upload.
+  const [processingPhotos, setProcessingPhotos] = useState(false)
   const [analyzing, setAnalyzing] = useState(false)
   const [result, setResult] = useState<AIQuote | null>(null)
   const [error, setError] = useState('')
@@ -248,6 +345,13 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
   // and narration stay in the form, so retrying costs them nothing extra (the
   // backend already refunds the credit on a failed call).
   const [regenFailed, setRegenFailed] = useState(false)
+  // Why the last attempt failed, shown on the retry card. Without this the user
+  // gets "try again" forever with no idea that they're out of quotes, signed
+  // out, or sending a photo we can't read.
+  const [regenError, setRegenError] = useState('')
+  // Some failures (out of quotes, signed out, an unusable photo) will fail the
+  // exact same way on retry — offer "Build it myself" as the primary path.
+  const [regenRetryable, setRegenRetryable] = useState(true)
   const [videoRecording, setVideoRecording] = useState(false)
   const [videoElapsed, setVideoElapsed] = useState(0)
   const [extractingFrames, setExtractingFrames] = useState(false)
@@ -363,7 +467,7 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
           // Replace the photo list with the extracted keyframes. The user
           // sees them in the grid below, can remove any they don't want,
           // then taps "Generate Instant Estimate" when ready.
-          setImages(newImages)
+          setImages(newImages.slice(0, MAX_PHOTOS))
           setLastVideoExtraction({ count: frames.length, durationSec: Math.round(recordDurationMs / 1000) })
         } catch (err) {
           setError('Could not extract frames from the video: ' + (err instanceof Error ? err.message : String(err)))
@@ -498,18 +602,46 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
     }
   }
 
-  const handleFiles = async (files: FileList | null) => {
-    if (!files) return
-    const remaining = 8 - images.length
-    const picked = Array.from(files).slice(0, remaining)
-    const next = await Promise.all(picked.map(async f => ({
-      preview: URL.createObjectURL(f),
-      data: await fileToBase64(f),
-    })))
-    setImages([...images, ...next])
+  // `inputEl` is cleared so picking the same file twice in a row still fires a
+  // change event. Failures are reported per photo instead of dropping the
+  // whole batch — one unreadable HEIC shouldn't lose the other seven.
+  const handleFiles = async (files: FileList | null, inputEl?: HTMLInputElement | null) => {
+    const chosen = files ? Array.from(files) : []
+    if (inputEl) inputEl.value = ''
+    if (chosen.length === 0) return
+
+    const room = MAX_PHOTOS - images.length
+    if (room <= 0) {
+      setError(`You can attach up to ${MAX_PHOTOS} photos per estimate. Remove one to add another.`)
+      return
+    }
+
+    setError('')
+    setProcessingPhotos(true)
+    try {
+      const picked = chosen.slice(0, room)
+      const accepted: { preview: string; data: string }[] = []
+      const failures: string[] = []
+      for (const file of picked) {
+        try {
+          const data = await fileToScanPhoto(file)
+          accepted.push({ preview: `data:image/jpeg;base64,${data}`, data })
+        } catch (err) {
+          failures.push(err instanceof Error ? err.message : `Couldn't read "${file.name || 'that photo'}".`)
+        }
+      }
+      if (accepted.length > 0) setImages(prev => [...prev, ...accepted].slice(0, MAX_PHOTOS))
+
+      const notes = [...failures]
+      const dropped = chosen.length - picked.length
+      if (dropped > 0) notes.push(`Only ${MAX_PHOTOS} photos fit on an estimate — ${dropped} left off.`)
+      if (notes.length > 0) setError(notes.join(' '))
+    } finally {
+      setProcessingPhotos(false)
+    }
   }
 
-  const removeImage = (i: number) => setImages(images.filter((_, idx) => idx !== i))
+  const removeImage = (i: number) => setImages(prev => prev.filter((_, idx) => idx !== i))
 
   const runAnalysisWithImages = async (imgs: { preview: string; data: string }[]) => {
     if (!customerName) {
@@ -517,7 +649,8 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
       return
     }
     if (imgs.length === 0 && !transcript.trim()) { setError('Add at least one photo or some narration'); return }
-    setAnalyzing(true); setError(''); setResult(null); setSavedId(null); setUsedFallback(false); setRegenFailed(false)
+    setAnalyzing(true); setError(''); setResult(null); setSavedId(null); setUsedFallback(false)
+    setRegenFailed(false); setRegenError(''); setRegenRetryable(true)
     // Clean, friendly loading copy only — never expose provider names, retries,
     // or "busy" messaging to the user. Just reassure them it's working.
     setLoadingMessage('Building your estimate…')
@@ -548,22 +681,33 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
             : undefined,
         },
       })
+      // A malformed payload would otherwise blow up inside the save below and
+      // be reported as "the estimator couldn't be reached", which it wasn't.
+      if (!isAIQuote(res.data)) throw new Error('The estimate came back in a shape we couldn\'t read.')
+      // Show the quote before saving. The save is a separate failure mode and
+      // must never throw away a quote the user has already been charged for.
       setResult(res.data)
       // Auto-save the AI quote to Firestore and open the editor so the user
       // can review/edit and send to the customer right away.
       const saved = await saveAsEstimateAndReturn(res.data)
       if (saved) setSavedEstimate(saved)
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err)
-      // The estimator couldn't be reached. Do NOT silently save an empty
-      // "offline" shell and do NOT burn the user's quote — the backend already
-      // refunds the credit when the call fails, so the retry below is free.
-      // Surface a clean retry state instead; their photos/narration are still
-      // in the form, so "Try Again" re-runs without re-describing the job.
-      console.warn('Quote generation failed (offering retry):', errMsg)
+      // The estimator couldn't be reached, or refused the input. Do NOT
+      // silently save an empty "offline" shell — surface a retry state with the
+      // actual reason, since some of these ("out of quotes", "that photo isn't
+      // readable") will fail identically no matter how many times we retry.
+      // Their photos and narration stay in the form either way.
+      const code = firebaseErrorCode(err)
+      const message = err instanceof Error ? err.message : String(err)
+      // The backend refunds the credit on a failed generation, so a transient
+      // failure really is free to retry. These four aren't transient.
+      const retryable = !['resource-exhausted', 'invalid-argument', 'unauthenticated', 'permission-denied'].includes(code)
+      console.warn(`Quote generation failed (code=${code || 'none'}, retryable=${retryable}):`, message)
       setResult(null)
       setUsedFallback(false)
       setRegenFailed(true)
+      setRegenError(message)
+      setRegenRetryable(retryable)
     } finally {
       timers.forEach(t => window.clearTimeout(t))
       setAnalyzing(false)
@@ -793,17 +937,17 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
       </div>
 
       <div style={card}>
-        <h3 style={{ marginBottom: '4px' }}>📸 Photos ({images.length}/8)</h3>
+        <h3 style={{ marginBottom: '4px' }}>📸 Photos ({images.length}/{MAX_PHOTOS})</h3>
         <p style={{ fontSize: '12px', color: '#64748b', marginBottom: '12px' }}>Snap individual photos, upload existing ones, OR record a 25-second walkthrough video and we'll pick {KEYFRAME_COUNT} keyframes automatically.</p>
         <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
-          <button onClick={() => cameraInputRef.current?.click()} disabled={images.length >= 8 || videoRecording || extractingFrames} style={{ background: '#0ea5e9', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
+          <button onClick={() => cameraInputRef.current?.click()} disabled={images.length >= MAX_PHOTOS || videoRecording || extractingFrames || processingPhotos} style={{ background: '#0ea5e9', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
             📷 Take Photo
           </button>
-          <button onClick={() => fileInputRef.current?.click()} disabled={images.length >= 8 || videoRecording || extractingFrames} style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '10px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
+          <button onClick={() => fileInputRef.current?.click()} disabled={images.length >= MAX_PHOTOS || videoRecording || extractingFrames || processingPhotos} style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '10px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
             Upload Photos
           </button>
           {!videoRecording ? (
-            <button onClick={startVideoRecording} disabled={extractingFrames} style={{ background: '#dc2626', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '6px', cursor: extractingFrames ? 'not-allowed' : 'pointer', fontWeight: 600 }}>
+            <button onClick={startVideoRecording} disabled={extractingFrames || processingPhotos} style={{ background: '#dc2626', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '6px', cursor: (extractingFrames || processingPhotos) ? 'not-allowed' : 'pointer', fontWeight: 600 }}>
               🎥 Record Video (25s)
             </button>
           ) : (
@@ -811,9 +955,15 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
               ■ Stop ({VIDEO_MAX_SECONDS - videoElapsed}s left) <span style={{ color: '#ef4444', animation: 'pulse 1s ease-in-out infinite' }}>● REC</span>
             </button>
           )}
-          <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={e => handleFiles(e.target.files)} />
-          <input ref={fileInputRef} type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={e => handleFiles(e.target.files)} />
+          <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={e => handleFiles(e.target.files, e.target)} />
+          <input ref={fileInputRef} type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={e => handleFiles(e.target.files, e.target)} />
         </div>
+        {processingPhotos && (
+          <p style={{ fontSize: '13px', color: '#0ea5e9', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ display: 'inline-block', width: '12px', height: '12px', border: '2px solid #bae6fd', borderTopColor: '#0ea5e9', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+            Getting your photos ready…
+          </p>
+        )}
         {extractingFrames && (
           <p style={{ fontSize: '13px', color: '#7c3aed', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
             <span style={{ display: 'inline-block', width: '12px', height: '12px', border: '2px solid #c4b5fd', borderTopColor: '#7c3aed', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
@@ -944,8 +1094,10 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
       </div>
 
       <div style={{ display: 'flex', gap: '12px', marginBottom: '16px', flexWrap: 'wrap' }}>
-        <button onClick={runAnalysis} disabled={analyzing} style={{ background: '#7c3aed', color: 'white', border: 'none', padding: '12px 24px', borderRadius: '8px', cursor: analyzing ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '15px' }}>
-          {analyzing ? '⚡ Building estimate…' : '⚡ Generate Instant Estimate'}
+        {/* Blocked while photos are still being processed, so a scan can't go
+            out with only half of them attached. */}
+        <button onClick={runAnalysis} disabled={analyzing || processingPhotos || extractingFrames} style={{ background: '#7c3aed', color: 'white', border: 'none', padding: '12px 24px', borderRadius: '8px', cursor: (analyzing || processingPhotos || extractingFrames) ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '15px' }}>
+          {analyzing ? '⚡ Building estimate…' : processingPhotos ? '⏳ Getting photos ready…' : '⚡ Generate Instant Estimate'}
         </button>
         <button onClick={() => setManualOpen(true)} disabled={analyzing} style={{ background: 'white', color: '#1a1f2e', border: '2px solid #cbd5e1', padding: '12px 24px', borderRadius: '8px', cursor: analyzing ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '15px' }}>
           ✍️ Build Manually
@@ -968,17 +1120,25 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
           <div style={{ fontWeight: 800, color: '#9a3412', fontSize: '16px', marginBottom: '6px' }}>
             Hmm — that one didn’t go through.
           </div>
-          <p style={{ color: '#7c2d12', fontSize: '14px', margin: '0 0 4px', lineHeight: 1.5 }}>
-            We couldn’t finish your estimate just now. Your photos and notes are still here — just tap below to try again.
+          <p style={{ color: '#7c2d12', fontSize: '14px', margin: '0 0 8px', lineHeight: 1.5 }}>
+            {regenError || 'We couldn’t finish your estimate just now.'} Your photos and notes are still here.
           </p>
-          <p style={{ color: '#16a34a', fontSize: '13px', fontWeight: 700, margin: '0 0 14px' }}>
-            ✓ This didn’t use one of your quotes — retrying is free.
-          </p>
+          {regenRetryable ? (
+            <p style={{ color: '#16a34a', fontSize: '13px', fontWeight: 700, margin: '0 0 14px' }}>
+              ✓ This didn’t use one of your quotes — retrying is free.
+            </p>
+          ) : (
+            <p style={{ color: '#7c2d12', fontSize: '13px', fontWeight: 700, margin: '0 0 14px' }}>
+              Retrying as-is will hit the same problem — fix the above first, or build the estimate by hand.
+            </p>
+          )}
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
-            <button onClick={runAnalysis} disabled={analyzing} style={{ background: '#f97316', color: 'white', border: 'none', padding: '12px 24px', borderRadius: '8px', cursor: analyzing ? 'not-allowed' : 'pointer', fontWeight: 800, fontSize: '15px' }}>
-              🔄 Try Again
-            </button>
-            <button onClick={buildBlankShellManually} disabled={analyzing} style={{ background: 'white', color: '#1a1f2e', border: '2px solid #cbd5e1', padding: '12px 20px', borderRadius: '8px', cursor: analyzing ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '14px' }}>
+            {regenRetryable && (
+              <button onClick={runAnalysis} disabled={analyzing} style={{ background: '#f97316', color: 'white', border: 'none', padding: '12px 24px', borderRadius: '8px', cursor: analyzing ? 'not-allowed' : 'pointer', fontWeight: 800, fontSize: '15px' }}>
+                🔄 Try Again
+              </button>
+            )}
+            <button onClick={buildBlankShellManually} disabled={analyzing} style={{ background: regenRetryable ? 'white' : '#f97316', color: regenRetryable ? '#1a1f2e' : 'white', border: regenRetryable ? '2px solid #cbd5e1' : 'none', padding: '12px 20px', borderRadius: '8px', cursor: analyzing ? 'not-allowed' : 'pointer', fontWeight: regenRetryable ? 700 : 800, fontSize: regenRetryable ? '14px' : '15px' }}>
               ✏️ Build it myself instead
             </button>
           </div>

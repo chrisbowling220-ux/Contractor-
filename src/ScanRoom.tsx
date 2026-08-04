@@ -248,6 +248,11 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
   // and narration stay in the form, so retrying costs them nothing extra (the
   // backend already refunds the credit on a failed call).
   const [regenFailed, setRegenFailed] = useState(false)
+  // Set when the backend rejected the call because the user has no quotes left
+  // (free allowance + paid credits both exhausted). This is NOT a failure to
+  // retry — retrying will be refused identically — so it gets its own panel
+  // with the real backend message and a route to buy more.
+  const [outOfQuotes, setOutOfQuotes] = useState('')
   const [videoRecording, setVideoRecording] = useState(false)
   const [videoElapsed, setVideoElapsed] = useState(0)
   const [extractingFrames, setExtractingFrames] = useState(false)
@@ -517,7 +522,7 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
       return
     }
     if (imgs.length === 0 && !transcript.trim()) { setError('Add at least one photo or some narration'); return }
-    setAnalyzing(true); setError(''); setResult(null); setSavedId(null); setUsedFallback(false); setRegenFailed(false)
+    setAnalyzing(true); setError(''); setResult(null); setSavedId(null); setUsedFallback(false); setRegenFailed(false); setOutOfQuotes('')
     // Clean, friendly loading copy only — never expose provider names, retries,
     // or "busy" messaging to the user. Just reassure them it's working.
     setLoadingMessage('Building your estimate…')
@@ -555,15 +560,25 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
       if (saved) setSavedEstimate(saved)
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err)
-      // The estimator couldn't be reached. Do NOT silently save an empty
-      // "offline" shell and do NOT burn the user's quote — the backend already
-      // refunds the credit when the call fails, so the retry below is free.
-      // Surface a clean retry state instead; their photos/narration are still
-      // in the form, so "Try Again" re-runs without re-describing the job.
-      console.warn('Quote generation failed (offering retry):', errMsg)
       setResult(null)
       setUsedFallback(false)
-      setRegenFailed(true)
+      // Out of quotes is NOT a transient failure — the backend refuses before
+      // it ever calls the estimator, so "Try Again" would fail identically and
+      // strand the user in a retry loop. Show the backend's own message (which
+      // explains the $1 top-up / Pro upgrade) and route them to Settings.
+      if ((err as { code?: string }).code === 'functions/resource-exhausted') {
+        console.warn('Quote blocked — no quotes remaining:', errMsg)
+        setOutOfQuotes(errMsg || 'You\'re out of instant quotes.')
+        setRegenFailed(false)
+      } else {
+        // The estimator couldn't be reached. Do NOT silently save an empty
+        // "offline" shell and do NOT burn the user's quote — the backend already
+        // refunds the credit when the call fails, so the retry below is free.
+        // Surface a clean retry state instead; their photos/narration are still
+        // in the form, so "Try Again" re-runs without re-describing the job.
+        console.warn('Quote generation failed (offering retry):', errMsg)
+        setRegenFailed(true)
+      }
     } finally {
       timers.forEach(t => window.clearTimeout(t))
       setAnalyzing(false)
@@ -961,6 +976,26 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
           {loadingMessage}
         </div>
       )}
+      {/* Out of quotes — a hard stop, not a hiccup. Retrying is pointless, so
+          this panel offers the top-up path instead of a Try Again button. */}
+      {outOfQuotes && !analyzing && (
+        <div style={{ ...card, background: '#eff6ff', border: '2px solid #3b82f6' }}>
+          <div style={{ fontWeight: 800, color: '#1e40af', fontSize: '16px', marginBottom: '6px' }}>
+            You're out of instant quotes.
+          </div>
+          <p style={{ color: '#1e3a8a', fontSize: '14px', margin: '0 0 14px', lineHeight: 1.5 }}>
+            {outOfQuotes}
+          </p>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
+            <button onClick={() => onNavigate?.('settings')} style={{ background: '#3b82f6', color: 'white', border: 'none', padding: '12px 24px', borderRadius: '8px', cursor: 'pointer', fontWeight: 800, fontSize: '15px' }}>
+              Get more quotes
+            </button>
+            <button onClick={buildBlankShellManually} style={{ background: 'white', color: '#1a1f2e', border: '2px solid #cbd5e1', padding: '12px 20px', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, fontSize: '14px' }}>
+              ✏️ Build it myself instead
+            </button>
+          </div>
+        </div>
+      )}
       {/* Estimator couldn't be reached — one-tap retry, no re-typing, no charge.
           The user's photos and narration are still in the form above. */}
       {regenFailed && !analyzing && (
@@ -989,7 +1024,7 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
           ⚠ <strong>This is a blank starter estimate you asked to build yourself.</strong> Add your materials, hours, and prices below — or tap 🔄 Regenerate up top to let the estimator try again.
         </div>
       )}
-      {error && !usedFallback && !regenFailed && <div style={{ ...card, background: '#fef2f2', color: '#dc2626' }}>⚠ {error}</div>}
+      {error && !usedFallback && !regenFailed && !outOfQuotes && <div style={{ ...card, background: '#fef2f2', color: '#dc2626' }}>⚠ {error}</div>}
 
       {result && (
         <div style={{ ...card, border: '2px dashed #7c3aed' }}>

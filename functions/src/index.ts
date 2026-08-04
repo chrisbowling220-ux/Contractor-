@@ -905,6 +905,39 @@ export const exchangeFirebaseToken = onCall<{ clerkToken: string }>(
   },
 )
 
+// Budget for the two quote generators. `max_tokens` is a HARD cap on thinking
+// tokens PLUS response text — not just the answer. At 'high' effort the model
+// spends most of a small budget reasoning about the job, and the JSON quote
+// gets cut off mid-string, which used to surface as a cryptic
+// "Unterminated string in JSON" and a dead "Try Again" screen for the user.
+// Both calls stream, so a large ceiling costs nothing when unused — we only
+// pay for tokens actually produced.
+const QUOTE_MAX_TOKENS = 32000
+
+// Pulls the structured quote out of a finished message. Checks stop_reason
+// FIRST so a truncated response is reported as what it is, instead of blowing
+// up inside JSON.parse with a meaningless syntax error.
+function parseQuoteJson(message: Anthropic.Message, label: string): unknown {
+  if (message.stop_reason === 'max_tokens') {
+    console.error(`${label}: response truncated by max_tokens (usage: ${JSON.stringify(message.usage)})`)
+    throw new HttpsError('internal', 'That quote came out longer than expected. Please try again.')
+  }
+  if (message.stop_reason === 'refusal') {
+    console.error(`${label}: refused (${JSON.stringify(message.stop_details ?? null)})`)
+    throw new HttpsError('invalid-argument', 'We couldn\'t build a quote from that. Try describing the job again.')
+  }
+  const textBlock = message.content.find(b => b.type === 'text')
+  if (!textBlock || textBlock.type !== 'text') {
+    throw new HttpsError('internal', 'No content returned. Please try again.')
+  }
+  try {
+    return JSON.parse(textBlock.text)
+  } catch (err) {
+    console.error(`${label}: unparseable JSON (stop_reason=${message.stop_reason}, len=${textBlock.text.length})`, err)
+    throw new HttpsError('internal', 'That quote came back incomplete. Please try again.')
+  }
+}
+
 export const generateAIQuote = onCall<GenerateCallPayload>(
   {
     secrets: [ANTHROPIC_API_KEY, CLERK_SECRET_KEY],
@@ -948,7 +981,7 @@ export const generateAIQuote = onCall<GenerateCallPayload>(
           // hard about the scope before writing the quote. This trades a bit of
           // latency for accuracy; the 540s function timeout has ample room.
           model: 'claude-opus-4-8',
-          max_tokens: 8000,
+          max_tokens: QUOTE_MAX_TOKENS,
           thinking: { type: 'adaptive' },
           output_config: {
             effort: 'high',
@@ -957,12 +990,7 @@ export const generateAIQuote = onCall<GenerateCallPayload>(
           system: GENERATE_SYSTEM_PROMPT + '\n\n' + permitPolicyBlock(input.includePermitText),
           messages: [{ role: 'user', content: buildGenerateUserPrompt(input) + learnedPrices }],
         })
-        const message = await stream.finalMessage()
-        const textBlock = message.content.find(b => b.type === 'text')
-        if (!textBlock || textBlock.type !== 'text') {
-          throw new HttpsError('internal', 'No content returned. Please try again.')
-        }
-        return JSON.parse(textBlock.text)
+        return parseQuoteJson(await stream.finalMessage(), 'generateAIQuote')
       })
     } catch (err) {
       // The gate already charged a credit; refund it so a failure is free.
@@ -1044,7 +1072,7 @@ Analyze the images and the contractor's narration together. Produce the structur
           // photos + narration before producing the material list. The 540s
           // function timeout leaves plenty of room.
           model: 'claude-opus-4-8',
-          max_tokens: 8000,
+          max_tokens: QUOTE_MAX_TOKENS,
           thinking: { type: 'adaptive' },
           output_config: {
             effort: 'high',
@@ -1053,12 +1081,7 @@ Analyze the images and the contractor's narration together. Produce the structur
           system: ANALYZE_SYSTEM_PROMPT + '\n\n' + permitPolicyBlock(input.includePermitText),
           messages: [{ role: 'user', content: userContent }],
         })
-        const message = await stream.finalMessage()
-        const textBlock = message.content.find(b => b.type === 'text')
-        if (!textBlock || textBlock.type !== 'text') {
-          throw new HttpsError('internal', 'No content returned. Please try again.')
-        }
-        return JSON.parse(textBlock.text)
+        return parseQuoteJson(await stream.finalMessage(), 'analyzeScan')
       })
     } catch (err) {
       // The gate already charged a credit; refund it so a failure is free.

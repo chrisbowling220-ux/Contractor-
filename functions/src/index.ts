@@ -905,36 +905,41 @@ export const exchangeFirebaseToken = onCall<{ clerkToken: string }>(
   },
 )
 
-// Budget for the two quote generators. `max_tokens` is a HARD cap on thinking
-// tokens PLUS response text — not just the answer. At 'high' effort the model
-// spends most of a small budget reasoning about the job, and the JSON quote
-// gets cut off mid-string, which used to surface as a cryptic
-// "Unterminated string in JSON" and a dead "Try Again" screen for the user.
-// Both calls stream, so a large ceiling costs nothing when unused — we only
-// pay for tokens actually produced.
-const QUOTE_MAX_TOKENS = 32000
+// Token budgets for the AI generators. `max_tokens` is a HARD cap on thinking
+// tokens PLUS response text — not just the answer. Set it too low and the model
+// spends most of the budget reasoning, then gets cut off mid-JSON; that used to
+// surface as a cryptic "Unterminated string in JSON" and a dead "Try Again"
+// screen. Every one of these calls streams, so a generous ceiling costs nothing
+// when unused — we only pay for tokens actually produced. Sized by output
+// length, with several times the headroom each one needs in practice.
+const QUOTE_MAX_TOKENS = 32000        // full quote: materials, labor, breakdown
+const CHANGE_ORDER_MAX_TOKENS = 16000 // schema-constrained, itemized line items
+const LETTER_MAX_TOKENS = 8000        // proposal / thank-you prose
+const SHORT_COPY_MAX_TOKENS = 6000    // invoice intro + payment terms
+const PARSE_MAX_TOKENS = 4000         // calendar entry: a handful of fields
 
-// Pulls the structured quote out of a finished message. Checks stop_reason
-// FIRST so a truncated response is reported as what it is, instead of blowing
-// up inside JSON.parse with a meaningless syntax error.
-function parseQuoteJson(message: Anthropic.Message, label: string): unknown {
+// Pulls the structured JSON out of a finished message. Checks stop_reason FIRST
+// so a truncated or refused response is reported as what it is, instead of
+// blowing up inside JSON.parse with a meaningless syntax error. `noun` is the
+// user-facing word for what was being generated ("quote", "change order", …).
+function parseModelJson<T = unknown>(message: Anthropic.Message, label: string, noun: string): T {
   if (message.stop_reason === 'max_tokens') {
     console.error(`${label}: response truncated by max_tokens (usage: ${JSON.stringify(message.usage)})`)
-    throw new HttpsError('internal', 'That quote came out longer than expected. Please try again.')
+    throw new HttpsError('internal', `That ${noun} came out longer than expected. Please try again.`)
   }
   if (message.stop_reason === 'refusal') {
     console.error(`${label}: refused (${JSON.stringify(message.stop_details ?? null)})`)
-    throw new HttpsError('invalid-argument', 'We couldn\'t build a quote from that. Try describing the job again.')
+    throw new HttpsError('invalid-argument', `We couldn't build a ${noun} from that. Try describing the job again.`)
   }
   const textBlock = message.content.find(b => b.type === 'text')
   if (!textBlock || textBlock.type !== 'text') {
     throw new HttpsError('internal', 'No content returned. Please try again.')
   }
   try {
-    return JSON.parse(textBlock.text)
+    return JSON.parse(textBlock.text) as T
   } catch (err) {
     console.error(`${label}: unparseable JSON (stop_reason=${message.stop_reason}, len=${textBlock.text.length})`, err)
-    throw new HttpsError('internal', 'That quote came back incomplete. Please try again.')
+    throw new HttpsError('internal', `That ${noun} came back incomplete. Please try again.`)
   }
 }
 
@@ -990,7 +995,7 @@ export const generateAIQuote = onCall<GenerateCallPayload>(
           system: GENERATE_SYSTEM_PROMPT + '\n\n' + permitPolicyBlock(input.includePermitText),
           messages: [{ role: 'user', content: buildGenerateUserPrompt(input) + learnedPrices }],
         })
-        return parseQuoteJson(await stream.finalMessage(), 'generateAIQuote')
+        return parseModelJson(await stream.finalMessage(), 'generateAIQuote', 'quote')
       })
     } catch (err) {
       // The gate already charged a credit; refund it so a failure is free.
@@ -1081,7 +1086,7 @@ Analyze the images and the contractor's narration together. Produce the structur
           system: ANALYZE_SYSTEM_PROMPT + '\n\n' + permitPolicyBlock(input.includePermitText),
           messages: [{ role: 'user', content: userContent }],
         })
-        return parseQuoteJson(await stream.finalMessage(), 'analyzeScan')
+        return parseModelJson(await stream.finalMessage(), 'analyzeScan', 'quote')
       })
     } catch (err) {
       // The gate already charged a credit; refund it so a failure is free.
@@ -1597,7 +1602,7 @@ export const generateChangeOrder = onCall<GenerateChangeOrderPayload>(
       return await withAnthropicRetry('generateChangeOrder', async () => {
         const stream = client.messages.stream({
           model: 'claude-opus-4-8',
-          max_tokens: 4000,
+          max_tokens: CHANGE_ORDER_MAX_TOKENS,
           thinking: { type: 'adaptive' },
           output_config: {
             effort: 'medium',
@@ -1606,12 +1611,7 @@ export const generateChangeOrder = onCall<GenerateChangeOrderPayload>(
           system: CHANGE_ORDER_SYSTEM_PROMPT,
           messages: [{ role: 'user', content: buildChangeOrderUserPrompt(input) }],
         })
-        const message = await stream.finalMessage()
-        const textBlock = message.content.find(b => b.type === 'text')
-        if (!textBlock || textBlock.type !== 'text') {
-          throw new HttpsError('internal', 'No content returned. Please try again.')
-        }
-        return JSON.parse(textBlock.text)
+        return parseModelJson(await stream.finalMessage(), 'generateChangeOrder', 'change order')
       })
     } catch (err) {
       // No quota refund here — change orders don't consume a credit (free for all).
@@ -1718,7 +1718,7 @@ Write the thank-you letter.`
       return await withAnthropicRetry('generateThankYouLetter', async () => {
         const stream = client.messages.stream({
           model: 'claude-opus-4-8',
-          max_tokens: 2000,
+          max_tokens: LETTER_MAX_TOKENS,
           thinking: { type: 'adaptive' },
           output_config: {
             effort: 'medium',
@@ -1727,12 +1727,7 @@ Write the thank-you letter.`
           system: THANK_YOU_SYSTEM_PROMPT,
           messages: [{ role: 'user', content: userPrompt }],
         })
-        const message = await stream.finalMessage()
-        const textBlock = message.content.find(b => b.type === 'text')
-        if (!textBlock || textBlock.type !== 'text') {
-          throw new HttpsError('internal', 'No content returned. Please try again.')
-        }
-        return JSON.parse(textBlock.text) as ThankYouLetter
+        return parseModelJson<ThankYouLetter>(await stream.finalMessage(), 'generateThankYouLetter', 'letter')
       })
     } catch (err) {
       // No quota refund — thank-you letters are Pro-gated, not quota-consuming.
@@ -1861,7 +1856,7 @@ Write the proposal letter.`
       return await withAnthropicRetry('generateProposal', async () => {
         const stream = client.messages.stream({
           model: 'claude-opus-4-8',
-          max_tokens: 2500,
+          max_tokens: LETTER_MAX_TOKENS,
           thinking: { type: 'adaptive' },
           output_config: {
             effort: 'medium',
@@ -1870,12 +1865,7 @@ Write the proposal letter.`
           system: PROPOSAL_SYSTEM_PROMPT,
           messages: [{ role: 'user', content: userPrompt }],
         })
-        const message = await stream.finalMessage()
-        const textBlock = message.content.find(b => b.type === 'text')
-        if (!textBlock || textBlock.type !== 'text') {
-          throw new HttpsError('internal', 'No content returned. Please try again.')
-        }
-        return JSON.parse(textBlock.text) as ProposalLetter
+        return parseModelJson<ProposalLetter>(await stream.finalMessage(), 'generateProposal', 'proposal')
       })
     } catch (err) {
       // No quota to refund. Sending must never be blocked, so the CLIENT has a
@@ -1953,7 +1943,7 @@ Write the invoice cover text.`
       return await withAnthropicRetry('generateInvoiceCopy', async () => {
         const stream = client.messages.stream({
           model: 'claude-opus-4-8',
-          max_tokens: 1500,
+          max_tokens: SHORT_COPY_MAX_TOKENS,
           thinking: { type: 'adaptive' },
           output_config: {
             effort: 'medium',
@@ -1962,12 +1952,7 @@ Write the invoice cover text.`
           system: INVOICE_COPY_SYSTEM_PROMPT,
           messages: [{ role: 'user', content: prompt }],
         })
-        const message = await stream.finalMessage()
-        const textBlock = message.content.find(b => b.type === 'text')
-        if (!textBlock || textBlock.type !== 'text') {
-          throw new HttpsError('internal', 'No content returned. Please try again.')
-        }
-        return JSON.parse(textBlock.text) as { intro_note: string; payment_terms: string }
+        return parseModelJson<{ intro_note: string; payment_terms: string }>(await stream.finalMessage(), 'generateInvoiceCopy', 'invoice note')
       })
     } catch (err) {
       // No quota refund — invoice cover notes don't consume a credit (free for all).
@@ -2043,7 +2028,7 @@ Turn it into a single calendar entry:
       return await withAnthropicRetry('parseCalendarEntry', async () => {
         const stream = client.messages.stream({
           model: 'claude-sonnet-4-6',
-          max_tokens: 1000,
+          max_tokens: PARSE_MAX_TOKENS,
           thinking: { type: 'adaptive' },
           output_config: {
             effort: 'low',
@@ -2052,14 +2037,7 @@ Turn it into a single calendar entry:
           system: 'You convert a contractor\'s spoken sentence into one structured calendar entry. Be literal and accurate about dates — always output a real yyyy-mm-dd. Output JSON only.',
           messages: [{ role: 'user', content: prompt }],
         })
-        const message = await stream.finalMessage()
-        const textBlock = message.content.find(b => b.type === 'text')
-        if (!textBlock || textBlock.type !== 'text') {
-          throw new HttpsError('internal', 'No content returned. Please try again.')
-        }
-        return JSON.parse(textBlock.text) as {
-          kind: 'job' | 'event' | 'reminder'; title: string; date: string; time: string; notes: string; needsDate: boolean
-        }
+        return parseModelJson<{ kind: 'job' | 'event' | 'reminder'; title: string; date: string; time: string; notes: string; needsDate: boolean }>(await stream.finalMessage(), 'parseCalendarEntry', 'calendar entry')
       })
     } catch (err) {
       if (err instanceof HttpsError) throw err

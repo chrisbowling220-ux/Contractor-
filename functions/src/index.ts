@@ -214,6 +214,28 @@ async function loadLearnedPricesBlock(userId: string): Promise<string> {
   }
 }
 
+// "Live market prices" — the static MATERIAL PRICE GUIDE baked into the system
+// prompt is accurate the day it's written and drifts every week after. This
+// reads the most recent web-researched price sheet (refreshed weekly by the
+// refreshMarketPrices schedule below) so the estimator quotes today's shelf
+// price instead of a hardcoded one.
+//
+// Deliberately fail-soft: any problem returns '' and the quote falls back to
+// the static table, exactly as it behaved before. A stale price sheet is also
+// better than none, so we serve it regardless of age and let the model see the
+// date and judge for itself.
+async function loadMarketPricesBlock(): Promise<string> {
+  try {
+    const snap = await getAdminDb().collection('marketPrices').doc('current').get()
+    const data = snap.data() as { priceBlock?: string; refreshedAt?: string } | undefined
+    if (!data?.priceBlock || !data.refreshedAt) return ''
+    return `\nLIVE MARKET PRICE CHECK (researched ${data.refreshedAt} from current Home Depot / Lowe's listings). These are TODAY'S national retail prices and OVERRIDE the static MATERIAL PRICE GUIDE below for any item that matches. Still apply the regional ZIP adjustment on top of them. If an item is not listed here, fall back to the static guide.\n${data.priceBlock}\n`
+  } catch (err) {
+    console.warn('Could not load live market prices', err)
+    return ''
+  }
+}
+
 interface MaterialInput { name: string; quantity: number; unit: string; unitPrice: number }
 interface RentalInput { name: string; days: number; dailyRate: number }
 
@@ -967,7 +989,13 @@ export const generateAIQuote = onCall<GenerateCallPayload>(
     // call, so a failed AI call still counts — but we refund on failure below.)
     const gate = await consumeAiQuoteOrThrow(userId, 'quote')
 
-    const learnedPrices = await loadLearnedPricesBlock(userId)
+    // Live prices first (this week's real shelf price), then the contractor's
+    // OWN saved prices last so theirs win any conflict — nobody knows their
+    // local cost better than they do.
+    const [marketPrices, learnedPrices] = await Promise.all([
+      loadMarketPricesBlock(),
+      loadLearnedPricesBlock(userId),
+    ])
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() })
 
     try {
@@ -993,7 +1021,7 @@ export const generateAIQuote = onCall<GenerateCallPayload>(
             format: { type: 'json_schema', schema: aiQuoteSchema },
           },
           system: GENERATE_SYSTEM_PROMPT + '\n\n' + permitPolicyBlock(input.includePermitText),
-          messages: [{ role: 'user', content: buildGenerateUserPrompt(input) + learnedPrices }],
+          messages: [{ role: 'user', content: buildGenerateUserPrompt(input) + marketPrices + learnedPrices }],
         })
         return parseModelJson(await stream.finalMessage(), 'generateAIQuote', 'quote')
       })
@@ -1035,7 +1063,13 @@ export const analyzeScan = onCall<AnalyzeCallPayload>(
     // counts as one AI quote against the free tier (or a paid $1 credit).
     const gate = await consumeAiQuoteOrThrow(userId, 'quote')
 
-    const learnedPrices = await loadLearnedPricesBlock(userId)
+    // Live prices first (this week's real shelf price), then the contractor's
+    // OWN saved prices last so theirs win any conflict — nobody knows their
+    // local cost better than they do.
+    const [marketPrices, learnedPrices] = await Promise.all([
+      loadMarketPricesBlock(),
+      loadLearnedPricesBlock(userId),
+    ])
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() })
 
     const userContent: Anthropic.ContentBlockParam[] = [
@@ -1058,7 +1092,7 @@ ${transcript || '(no transcript — base the estimate on the images alone)'}
 ${input.hourlyRateOverride && input.hourlyRateOverride > 0 ? `CONTRACTOR OVERRIDE — hourly_rate MUST be exactly $${input.hourlyRateOverride}/hour. Do not change this rate.` : ''}
 ${input.markupPercentOverride != null && input.markupPercentOverride >= 0 ? `CONTRACTOR OVERRIDE — markup_percent MUST be exactly ${input.markupPercentOverride}%. Do not change this markup.` : ''}
 
-Analyze the images and the contractor's narration together. Produce the structured quote document.${learnedPrices}`,
+Analyze the images and the contractor's narration together. Produce the structured quote document.${marketPrices}${learnedPrices}`,
       },
     ]
 
@@ -2941,5 +2975,109 @@ export const onInvoicePaidAlert = onDocumentUpdated(
         `<p style="font-size:15px"><strong>${invName}</strong> chose to pay invoice ${invNo}${after.subtotal ? ` ($${Number(after.subtotal).toLocaleString()})` : ''} in cash/in person.</p>
          <p style="font-size:14px;color:#64748b">Confirm it as paid in the app once you've collected.</p>`)
     }
+  },
+)
+
+// ──────────────────────────────────────────────────────────────────────────
+// Live market price refresh.
+//
+// The MATERIAL PRICE GUIDE in the system prompt is a hand-maintained snapshot:
+// correct when written, progressively wrong as lumber, drywall, and copper move.
+// This job gives the estimator a live source of truth. Once a week it uses the
+// web_search server tool to look up what the core materials actually cost right
+// now at Home Depot / Lowe's, and stores the result for the quote generators to
+// read via loadMarketPricesBlock().
+//
+// Why this runs on a SCHEDULE and not inside the quote call:
+//   1. Latency — a quote already takes ~2 minutes; nobody waits for searches too.
+//   2. Cost — one search sweep per week, not one per quote.
+//   3. Safety — web search always attaches citations, and citations are not
+//      compatible with the json_schema structured output the quote depends on.
+//      Keeping search in a separate, schema-free call means it can never break
+//      quote generation. If this job fails, quotes carry on using the static
+//      table exactly as before.
+const MARKET_PRICE_ITEMS = [
+  '1/2" drywall 4x8 sheet', '5/8" Type X drywall 4x8 sheet', 'joint compound 4.5 gal bucket',
+  '2x4x8 SPF stud', '2x4x10 SPF', '2x6x8 SPF', '1/2" CDX plywood 4x8', '3/4" plywood 4x8',
+  '7/16" OSB 4x8', '3/4" T&G subfloor 4x8', '4x4x8 pressure-treated post', 'pressure-treated 2x4x8',
+  'R-13 fiberglass batt insulation per sqft', 'R-30 fiberglass batt insulation per sqft',
+  'interior latex paint per gallon', 'exterior latex paint per gallon', 'primer per gallon',
+  '30-year architectural asphalt shingles per square', 'roofing felt per roll', 'ice and water shield per roll',
+  '1/2" PEX pipe per foot', '3/4" PVC pipe per foot', '12-2 NM-B romex per foot', '14-2 NM-B romex per foot',
+  '20A GFCI outlet', 'standard duplex outlet', 'single-pole light switch', '15A breaker',
+  'ceramic floor tile per sqft', 'luxury vinyl plank per sqft', 'thinset mortar 50lb bag',
+  'concrete mix 80lb bag', 'construction adhesive tube', 'silicone caulk tube',
+]
+
+export const refreshMarketPrices = onSchedule(
+  {
+    // Mondays 4am Eastern — before anyone starts quoting for the week.
+    schedule: '0 4 * * 1',
+    timeZone: 'America/New_York',
+    secrets: [ANTHROPIC_API_KEY],
+    timeoutSeconds: 540,
+    memory: '512MiB',
+  },
+  async () => {
+    const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() })
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+    console.log(`refreshMarketPrices starting for ${today}`)
+
+    const prompt = `Look up the CURRENT retail price of each building material below at Home Depot and Lowe's in the United States today. Search for the ones whose price moves most (lumber, sheet goods, copper wire, roofing, concrete); for stable commodity items you may rely on recent knowledge rather than spending a search.
+
+Report the typical national retail shelf price — not clearance, not contractor/bulk pricing, not marketplace resellers.
+
+Materials:
+${MARKET_PRICE_ITEMS.map(m => `- ${m}`).join('\n')}
+
+Output ONLY plain lines in exactly this format, one per material, nothing else — no preamble, no commentary, no markdown, no citations list:
+- <material name>: $<price> per <unit>
+
+If you could not establish a current price for an item with reasonable confidence, omit that line entirely. An omitted line is much better than a guessed one.`
+
+    // Server tools run their own loop and can hand back stop_reason
+    // 'pause_turn' partway through. Feed the paused turn back to resume; cap the
+    // continuations so a pathological run can't spin until the 540s timeout.
+    const messages: Anthropic.MessageParam[] = [{ role: 'user', content: prompt }]
+    let message: Anthropic.Message | null = null
+    for (let i = 0; i < 5; i++) {
+      message = await client.messages.create({
+        model: 'claude-opus-4-8',
+        max_tokens: 8000,
+        thinking: { type: 'adaptive' },
+        output_config: { effort: 'medium' },
+        // 'direct' skips dynamic filtering (which routes through code execution).
+        // We want a short, plain answer here, not a filtered research pipeline.
+        tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 12, allowed_callers: ['direct'] }],
+        messages,
+      })
+      if (message.stop_reason !== 'pause_turn') break
+      messages.push({ role: 'assistant', content: message.content })
+    }
+
+    if (!message || message.stop_reason === 'refusal') {
+      console.error('refreshMarketPrices: no usable response', message?.stop_reason)
+      return
+    }
+
+    // Keep only well-formed "- name: $price per unit" lines. Anything the model
+    // wrapped in prose, and any line without a real dollar figure, is dropped —
+    // a short trustworthy sheet beats a long noisy one.
+    const raw = message.content.filter(b => b.type === 'text').map(b => (b as Anthropic.TextBlock).text).join('\n')
+    const lines = raw.split('\n')
+      .map(l => l.trim())
+      .filter(l => /^-\s+.+:\s*\$\d/.test(l))
+    if (lines.length < 5) {
+      console.error(`refreshMarketPrices: only ${lines.length} usable lines parsed — keeping previous sheet`)
+      return
+    }
+
+    await getAdminDb().collection('marketPrices').doc('current').set({
+      priceBlock: lines.join('\n'),
+      refreshedAt: today,
+      itemCount: lines.length,
+      searches: message.usage?.server_tool_use?.web_search_requests ?? 0,
+    })
+    console.log(`refreshMarketPrices: stored ${lines.length} prices (${message.usage?.server_tool_use?.web_search_requests ?? 0} searches)`)
   },
 )

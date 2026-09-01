@@ -175,9 +175,28 @@ function useDashboardCounts(userId: string | undefined, refreshKey = 0) {
         const projDocs = projects.docs.map(d => ({ id: d.id, ...d.data() } as Record<string, unknown> & { id: string }))
         // Which projects already have an invoice? (so we can flag the ones that don't)
         const projectsWithInvoice = new Set(invDocs.map(i => i.projectId as string).filter(Boolean))
+        // ── Guard against STALE reminders. A reminder must point at a project the
+        //    contractor can still act on. Two gates: ──
+        //    • existingProjectIds — the project doc still exists (wasn't deleted).
+        //    • billable() — the project is still an OPEN job worth chasing money
+        //      on (not completed/closed/archived/declined, and not orphaned). We
+        //      use this so "past due on payments" never shows for a job that's
+        //      already done/gone — the #1 source of phantom reminders.
+        const existingProjectIds = new Set(projDocs.map(p => p.id))
+        const projById = new Map(projDocs.map(p => [p.id, p]))
+        const billable = (projectId?: string): boolean => {
+          if (!projectId) return false
+          const p = projById.get(projectId)
+          if (!p) return false
+          if (p.archived || p.declined) return false
+          const s = p.status as string
+          return s !== 'completed' && s !== 'closed'
+        }
 
-        // 1) Unpaid invoices past their due date.
-        invDocs.filter(i => i.status !== 'paid' && !i.customerCashChoice && i.dueDate && new Date(i.dueDate as string).getTime() < now.getTime())
+        // 1) Unpaid invoices past their due date — only for jobs that are still
+        //    open (skips deleted/completed/closed projects & orphan invoices).
+        invDocs.filter(i => i.status !== 'paid' && !i.customerCashChoice && i.dueDate && new Date(i.dueDate as string).getTime() < now.getTime()
+            && billable(i.projectId as string | undefined))
           .forEach(i => attention.push({
             id: `inv-${i.id}`, kind: 'overdue_invoice', goto: 'projects',
             label: `Invoice ${i.invoiceNumber || ''} for ${i.customerName || 'customer'} is past due ($${((i.amountDue as number) || 0).toFixed(2)})`,
@@ -269,8 +288,13 @@ function useDashboardCounts(userId: string | undefined, refreshKey = 0) {
             }
           })
 
+        // Final safety net: drop anything tied to a project that no longer
+        // exists. Catches reminders left behind by a deleted project (e.g. a
+        // stale estimate or cash-to-confirm whose job was removed entirely).
+        const liveAttention = attention.filter(a => !a.projectId || existingProjectIds.has(a.projectId))
+
         // Sort: priority first, then soonest date.
-        attention.sort((a, b) => {
+        liveAttention.sort((a, b) => {
           const pa = ATTENTION_PRIORITY[a.kind], pb = ATTENTION_PRIORITY[b.kind]
           if (pa !== pb) return pa - pb
           return (a.when || '9999').localeCompare(b.when || '9999')
@@ -279,7 +303,7 @@ function useDashboardCounts(userId: string | undefined, refreshKey = 0) {
         // Pop browser notifications for the most time-sensitive reminders (once
         // per day each). Quiet no-op if the user hasn't enabled notifications.
         const NOTIFY_KINDS = new Set<AttentionKind>(['calendar_event', 'starting_soon', 'overdue_invoice', 'date_change_requested', 'cash_to_confirm'])
-        fireDueReminders(attention.filter(a => NOTIFY_KINDS.has(a.kind)).map(a => ({ id: a.id, label: a.label })))
+        fireDueReminders(liveAttention.filter(a => NOTIFY_KINDS.has(a.kind)).map(a => ({ id: a.id, label: a.label })))
 
         // The in-app "6am morning-of" agenda: one consolidated pop-up listing
         // everything scheduled for TODAY (jobs starting today + today's calendar
@@ -297,7 +321,7 @@ function useDashboardCounts(userId: string | undefined, refreshKey = 0) {
 
         setCounts({
           activeJobs, pendingEstimates, customers: customers.size,
-          revenueThisMonth, revenueThisWeek, weeklyRevenue, estimatesWon: won.length, estimatesLost: lost, avgJobSize, attention,
+          revenueThisMonth, revenueThisWeek, weeklyRevenue, estimatesWon: won.length, estimatesLost: lost, avgJobSize, attention: liveAttention,
         })
       } catch (err) {
         console.error('Dashboard counts failed:', err)
@@ -973,7 +997,7 @@ function Dashboard() {
   const dismissBusinessNameBanner = () => {
     setBusinessNameBannerDismissed(true)
     if (user?.id && typeof window !== 'undefined') {
-      try { window.sessionStorage.setItem(`bp_business_banner_dismissed_${user.id}`, '1') } catch {}
+      try { window.sessionStorage.setItem(`bp_business_banner_dismissed_${user.id}`, '1') } catch { /* sessionStorage unavailable (private mode) — banner just reappears */ }
     }
   }
 

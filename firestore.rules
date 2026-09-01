@@ -168,6 +168,24 @@ service cloud.firestore {
       allow update, delete: if isOwner(resource.data);
     }
 
+    // voiceUsage/{userId}/months/{YYYY-MM}: how much text-to-speech this
+    // contractor has spent this month. Written ONLY by synthesizeSpeech via the
+    // Admin SDK — if the client could write here it could reset its own spend
+    // cap. Read-only, own docs only, so the app can show "you're near the limit".
+    // (Subcollection rather than a compound doc id on purpose: Clerk user ids
+    // contain underscores, so a "{userId}_{month}" id can't be split safely.)
+    match /voiceUsage/{userId}/months/{month} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      allow write: if false;
+    }
+
+    // voiceUsageTotals/{YYYY-MM}: account-wide voice spend against the shared
+    // ElevenLabs monthly budget. Server-only, both directions — one user has no
+    // business reading how much everyone else has used.
+    match /voiceUsageTotals/{month} {
+      allow read, write: if false;
+    }
+
     // Everything else: denied.
     match /{document=**} {
       allow read, write: if false;

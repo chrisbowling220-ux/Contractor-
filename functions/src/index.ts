@@ -1,4 +1,4 @@
-// deploy-marker: proposal-letter-v41
+// deploy-marker: clerk-production-instance-v42
 import { onCall, onRequest, HttpsError } from 'firebase-functions/v2/https'
 import { onSchedule } from 'firebase-functions/v2/scheduler'
 import { onDocumentUpdated } from 'firebase-functions/v2/firestore'
@@ -50,6 +50,7 @@ function getAdminAuth(): Auth {
 
 const ANTHROPIC_API_KEY = defineSecret('ANTHROPIC_API_KEY')
 const CLERK_SECRET_KEY = defineSecret('CLERK_SECRET_KEY')
+const ELEVENLABS_API_KEY = defineSecret('ELEVENLABS_API_KEY')
 const RESEND_API_KEY = defineSecret('RESEND_API_KEY')
 const STRIPE_SECRET_KEY = defineSecret('STRIPE_SECRET_KEY')
 const STRIPE_WEBHOOK_SECRET = defineSecret('STRIPE_WEBHOOK_SECRET')
@@ -1216,6 +1217,164 @@ export const transcribeAudio = onCall<TranscribeCallPayload>(
       console.error('Speech-to-Text failed', err)
       const msg = err instanceof Error ? err.message : String(err)
       throw new HttpsError('internal', `Transcription failed: ${msg}`)
+    }
+  },
+)
+
+// ──────────────────────────────────────────────────────────────────────────
+// Text-to-speech via ElevenLabs — the app reads the day back to the contractor
+// so they can hear what's on without looking at the phone (gloves on, driving,
+// hands full). The reverse direction of transcribeAudio above.
+//
+// COST SHAPE — read before touching the caps below. ElevenLabs bills per
+// CHARACTER, and the free tier's 10,000 chars/month is an ACCOUNT ceiling, not
+// a per-user allowance. One chatty user could burn the whole month for every
+// other user. So we cap TWICE: per user, and account-wide. When either ceiling
+// is hit we refuse the call instead of quietly spending — the client catches
+// the refusal and speaks with the phone's own built-in voice, so the feature
+// degrades in quality rather than breaking. Nothing here can generate a bill
+// without the caps being raised deliberately.
+// ──────────────────────────────────────────────────────────────────────────
+
+// One voice for everything the app says out loud. Keep this as the single
+// source of truth — a consistent voice is a brand detail, and it also means
+// swapping voices is a one-line change. Browse elevenlabs.io/voice-library and
+// paste a different id here to change how the app sounds.
+const ELEVENLABS_VOICE_ID = 'pqHfZKP75CvOlQylNhV4'   // "Bill" — older American male, warm and grounded
+const ELEVENLABS_MODEL_ID = 'eleven_flash_v2_5'      // lowest latency; quality is fine for readbacks
+// Low bitrate on purpose: this is spoken word over a weak job-site signal, not music.
+const ELEVENLABS_OUTPUT_FORMAT = 'mp3_22050_32'
+
+const TTS_MAX_CHARS_PER_CALL = 1200        // ~90 seconds of speech
+const TTS_USER_MONTHLY_CHARS = 3000        // per contractor, per month
+const TTS_ACCOUNT_MONTHLY_CHARS = 9000     // whole account — stays under the 10k free tier
+
+interface SynthesizeInput {
+  text: string
+}
+
+interface SynthesizeCallPayload {
+  clerkToken: string
+  input: SynthesizeInput
+}
+
+// Usage buckets are keyed by calendar month in UTC. Month boundaries only need
+// to be consistent, not local — they're a budget guard, not a billing record.
+function usageMonthKey(): string {
+  const d = new Date()
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`
+}
+
+// Trim to the character cap at a sentence break where possible, then a word
+// break, so a long readback ends cleanly instead of mid-syllable.
+function truncateForSpeech(text: string, max: number): string {
+  if (text.length <= max) return text
+  const clipped = text.slice(0, max)
+  const lastStop = Math.max(clipped.lastIndexOf('. '), clipped.lastIndexOf('! '), clipped.lastIndexOf('? '))
+  if (lastStop > max * 0.6) return clipped.slice(0, lastStop + 1)
+  const lastSpace = clipped.lastIndexOf(' ')
+  return (lastSpace > 0 ? clipped.slice(0, lastSpace) : clipped).trim()
+}
+
+export const synthesizeSpeech = onCall<SynthesizeCallPayload>(
+  {
+    secrets: [CLERK_SECRET_KEY, ELEVENLABS_API_KEY],
+    timeoutSeconds: 60,
+    memory: '512MiB',
+    cors: true,
+  },
+  async (request) => {
+    const { clerkToken, input } = request.data ?? ({} as SynthesizeCallPayload)
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    const raw = typeof input?.text === 'string' ? input.text.trim() : ''
+    if (!raw) throw new HttpsError('invalid-argument', 'Nothing to read out')
+
+    const userId = await verifyClerk(clerkToken)
+
+    const text = truncateForSpeech(raw, TTS_MAX_CHARS_PER_CALL)
+    const characters = text.length
+
+    const adminDb = getAdminDb()
+    const month = usageMonthKey()
+    // Subcollection, not a "{userId}_{month}" doc id — Clerk ids contain
+    // underscores, so security rules can't split a compound id back apart.
+    const userRef = adminDb.collection('voiceUsage').doc(userId).collection('months').doc(month)
+    const accountRef = adminDb.collection('voiceUsageTotals').doc(month)
+
+    const [userSnap, accountSnap] = await Promise.all([userRef.get(), accountRef.get()])
+    const userUsed = Number(userSnap.data()?.chars) || 0
+    const accountUsed = Number(accountSnap.data()?.chars) || 0
+
+    // Refuse BEFORE spending. 'resource-exhausted' is the client's signal to
+    // fall back to the built-in phone voice rather than show an error.
+    if (accountUsed + characters > TTS_ACCOUNT_MONTHLY_CHARS) {
+      console.warn(`synthesizeSpeech account cap hit month=${month} used=${accountUsed}`)
+      throw new HttpsError('resource-exhausted', 'Read-aloud has used its budget for this month.')
+    }
+    if (userUsed + characters > TTS_USER_MONTHLY_CHARS) {
+      console.warn(`synthesizeSpeech user cap hit user=${userId} month=${month} used=${userUsed}`)
+      throw new HttpsError('resource-exhausted', 'You have used this month\'s read-aloud.')
+    }
+
+    console.log(`synthesizeSpeech user=${userId} chars=${characters} userUsed=${userUsed} acctUsed=${accountUsed}`)
+
+    let audioBase64: string
+    try {
+      const res = await fetch(
+        `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}?output_format=${ELEVENLABS_OUTPUT_FORMAT}`,
+        {
+          method: 'POST',
+          headers: {
+            'xi-api-key': ELEVENLABS_API_KEY.value(),
+            'Content-Type': 'application/json',
+            Accept: 'audio/mpeg',
+          },
+          body: JSON.stringify({
+            text,
+            model_id: ELEVENLABS_MODEL_ID,
+            voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+          }),
+        },
+      )
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '')
+        console.error(`ElevenLabs TTS failed ${res.status}: ${detail.slice(0, 500)}`)
+        // 401 = bad/missing key, 422 = bad voice id, 429 = out of ElevenLabs
+        // quota. All of them mean "use the phone voice instead", not "error".
+        throw new HttpsError('resource-exhausted', 'Voice service unavailable right now.')
+      }
+      audioBase64 = Buffer.from(await res.arrayBuffer()).toString('base64')
+    } catch (err) {
+      if (err instanceof HttpsError) throw err
+      console.error('ElevenLabs TTS request threw', err)
+      throw new HttpsError('resource-exhausted', 'Voice service unreachable right now.')
+    }
+
+    // Only bill the budget once the audio actually came back.
+    const stamp = new Date().toISOString()
+    await Promise.all([
+      userRef.set({
+        userId, month, app: 'buildpro-plus',
+        chars: FieldValue.increment(characters),
+        calls: FieldValue.increment(1),
+        updatedAt: stamp,
+      }, { merge: true }),
+      accountRef.set({
+        month, app: 'buildpro-plus',
+        chars: FieldValue.increment(characters),
+        calls: FieldValue.increment(1),
+        updatedAt: stamp,
+      }, { merge: true }),
+    ])
+
+    return {
+      audioBase64,
+      mimeType: 'audio/mpeg',
+      characters,
+      truncated: characters < raw.length,
+      // Client uses these to warn the contractor before they hit the wall.
+      remainingUserChars: Math.max(0, TTS_USER_MONTHLY_CHARS - (userUsed + characters)),
+      remainingAccountChars: Math.max(0, TTS_ACCOUNT_MONTHLY_CHARS - (accountUsed + characters)),
     }
   },
 )

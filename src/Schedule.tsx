@@ -3,6 +3,8 @@ import { useUser } from '@clerk/clerk-react'
 import { collection, query, where, onSnapshot, addDoc, updateDoc, deleteDoc, doc } from 'firebase/firestore'
 import { db } from './firebase'
 import type { Project, CalendarEvent } from './data/types'
+import ReadAloudButton from './lib/ReadAloudButton'
+import { buildDayRundown } from './lib/spokenSummary'
 
 const ORANGE = '#f97316'
 const NAVY = '#1a1f2e'
@@ -71,7 +73,20 @@ export default function Schedule({ onOpenProject }: { onOpenProject?: (projectId
   return (
     <div style={{ padding: 'clamp(12px, 3vw, 28px)', maxWidth: '1000px', margin: '0 auto' }}>
       <h2 style={{ fontSize: '24px', fontWeight: 800, margin: '0 0 4px', color: NAVY }}>📅 Schedule</h2>
-      <p style={{ margin: '0 0 16px', color: '#64748b', fontSize: '14px' }}>Tap any day to add a job, appointment, or reminder. Scheduled jobs show automatically.</p>
+      <p style={{ margin: '0 0 12px', color: '#64748b', fontSize: '14px' }}>Tap any day to add a job, appointment, or reminder. Scheduled jobs show automatically.</p>
+
+      {/* Hear the day instead of reading it — for the truck, before the boots hit the ground. */}
+      <div style={{ marginBottom: '16px' }}>
+        <ReadAloudButton
+          label="Read me today"
+          getText={() => buildDayRundown({
+            dateISO: todayStr,
+            projects: itemsByDate.get(todayStr)?.projects || [],
+            events: itemsByDate.get(todayStr)?.events || [],
+            spokenLabel: 'Today',
+          })}
+        />
+      </div>
 
       {/* Month nav */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px', gap: '8px' }}>
@@ -198,6 +213,19 @@ function DayModal({ date, items, userId, onClose, onOpenProject }: {
         </div>
 
         <div style={{ padding: '16px' }}>
+          {((items?.projects.length || 0) + (items?.events.length || 0)) > 0 && (
+            <div style={{ marginBottom: '14px' }}>
+              <ReadAloudButton
+                compact
+                label="Read this day"
+                getText={() => buildDayRundown({
+                  dateISO: date,
+                  projects: items?.projects || [],
+                  events: items?.events || [],
+                })}
+              />
+            </div>
+          )}
           {/* Scheduled jobs (from projects) */}
           {items?.projects && items.projects.length > 0 && (
             <div style={{ marginBottom: '16px' }}>

@@ -30,3 +30,15 @@ scripts/serviceAccountKey.json
 *.njsproj
 *.sln
 *.sw?
+
+# Firebase local deploy cache + debug logs (build output, not source)
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+
+# Cloudflare wrangler scratch
+.wrangler/
+
+# Expo leftovers (this is a Vite web app)
+.expo/

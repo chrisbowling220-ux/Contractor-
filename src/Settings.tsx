@@ -7,8 +7,8 @@ import { db, storage, functions, firebaseAuth } from './firebase'
 import { useUser, useAuth } from '@clerk/clerk-react'
 import { notificationsBlocked, requestNotificationPermission, alertsEnabled, setAlertsEnabled, playAlertCue } from './lib/reminders'
 import PayoutSetup from './PayoutSetup'
+import { FREE_TIER_AI_LIMIT } from './lib/useTier'
 
-const FREE_TIER_AI_LIMIT = 10
 
 const subscriptionCheckoutCallable = httpsCallable<{ clerkToken: string; email?: string; plan?: string }, { url: string }>(functions, 'createSubscriptionCheckout')
 const portalSessionCallable = httpsCallable<{ clerkToken: string }, { url: string }>(functions, 'createPortalSession')

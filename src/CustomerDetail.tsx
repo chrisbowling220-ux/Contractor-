@@ -148,7 +148,7 @@ export default function CustomerDetail({ customer, onBack }: Props) {
     if (!confirm('Delete this photo? This cannot be undone.')) return
     try {
       // Best-effort storage delete — even if it fails, remove the Firestore record.
-      try { await deleteObject(storageRef(storage, p.storagePath)) } catch {}
+      try { await deleteObject(storageRef(storage, p.storagePath)) } catch { /* best-effort: the storage object may already be gone */ }
       await deleteDoc(doc(db, 'customerPhotos', p.id))
       setPhotos(prev => prev.filter(x => x.id !== p.id))
     } catch (err) {

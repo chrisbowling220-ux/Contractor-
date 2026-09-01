@@ -83,7 +83,7 @@ export default function ProjectPhotos({ project, onCountChange }: Props) {
   const deletePhoto = async (p: ProjectPhoto) => {
     if (!confirm('Delete this photo? This cannot be undone.')) return
     try {
-      try { await deleteObject(storageRef(storage, p.storagePath)) } catch {}
+      try { await deleteObject(storageRef(storage, p.storagePath)) } catch { /* best-effort: the storage object may already be gone */ }
       await deleteDoc(doc(db, 'projectPhotos', p.id))
       setPhotos(prev => prev.filter(x => x.id !== p.id))
       onCountChange?.(photos.length - 1)

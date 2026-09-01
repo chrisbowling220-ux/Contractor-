@@ -3,7 +3,7 @@ import { useUser } from '@clerk/clerk-react'
 import { doc, onSnapshot } from 'firebase/firestore'
 import { db } from '../firebase'
 
-const FREE_TIER_AI_LIMIT = 10
+export const FREE_TIER_AI_LIMIT = 10
 
 // Live read of the signed-in contractor's subscription tier + quote usage +
 // pay-as-you-go credits. Mirrors what Settings shows, so any screen can Pro-gate

@@ -186,6 +186,35 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // ── PROPERTY ADVISOR ──
+    // propertyAdvisorSessions/{id}: one property the contractor is asking
+    // about. They own it outright — create, rename, delete. The property
+    // context is theirs to edit; the conversation under it is not.
+    match /propertyAdvisorSessions/{sessionId} {
+      allow read, update, delete: if isOwner(resource.data);
+      allow create: if isSignedIn() && request.resource.data.createdBy == request.auth.uid;
+
+      // messages/{id}: the transcript. Readable by the owner, written ONLY by
+      // askPropertyAdvisor through the Admin SDK. If the client could append
+      // here it could forge assistant turns — advice "the advisor already
+      // gave" — and the next question would be answered on top of them.
+      match /messages/{messageId} {
+        allow read, delete: if isSignedIn()
+          && get(/databases/$(database)/documents/propertyAdvisorSessions/$(sessionId)).data.createdBy == request.auth.uid;
+        // create/update stay closed: only askPropertyAdvisor (Admin SDK) adds turns.
+        allow create, update: if false;
+      }
+    }
+
+    // advisorUsage/{userId}/…: how many advisor questions this contractor has
+    // asked this month and today. The free allowance is enforced against these,
+    // so they are server-write-only — a client that could edit them would have
+    // an unlimited free tier. Readable by the owner so the UI can show what's left.
+    match /advisorUsage/{userId}/{period}/{key} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      allow write: if false;
+    }
+
     // Everything else: denied.
     match /{document=**} {
       allow read, write: if false;

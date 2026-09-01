@@ -3240,3 +3240,264 @@ If you could not establish a current price for an item with reasonable confidenc
     console.log(`refreshMarketPrices: stored ${lines.length} prices (${message.usage?.server_tool_use?.web_search_requests ?? 0} searches)`)
   },
 )
+
+// ──────────────────────────────────────────────────────────────────────────
+// PROPERTY ADVISOR — "ask someone who's done this a few hundred times".
+//
+// A threaded conversation about ONE property the contractor is looking to buy,
+// sell or flip. Three domains in one place: structural/condition, the deal
+// math, and how to market it. The value is that they don't have to keep
+// re-explaining the house — the session holds the context.
+//
+// Shape of the feature:
+//   propertyAdvisorSessions/{id}          — one property, owned by createdBy
+//   propertyAdvisorSessions/{id}/messages — the transcript, SERVER-WRITTEN ONLY
+//
+// The client creates the session (its own doc, allowed by rules) but never
+// writes messages. Both sides of the conversation are written here, in this
+// function, so the history we later feed back to the model is history WE
+// recorded — a client that could append assistant turns could put words in the
+// advisor's mouth and then quote them back.
+//
+// Cost shape, since this is a chat and chats are where token bills come from:
+//   • Free tier gets ADVISOR_FREE_MESSAGES_PER_MONTH questions a month, then
+//     the upgrade card. Pro is unlimited but still hits the daily ceiling.
+//   • Only the last ADVISOR_HISTORY_MESSAGES turns are sent, not the whole
+//     thread — a long session costs the same per question as a short one.
+//   • The static half of the system prompt is marked for prompt caching, so
+//     the second and later questions in a session read it at ~10% of price.
+// ──────────────────────────────────────────────────────────────────────────
+
+/** Free-tier questions per calendar month before the upgrade card appears. */
+const ADVISOR_FREE_MESSAGES_PER_MONTH = 5
+/** Hard ceiling for EVERY user, Pro included — a runaway loop can't bill the account into the ground. */
+const ADVISOR_DAILY_MESSAGE_CAP = 40
+/** How many prior turns travel with each question. 12 = six exchanges of memory. */
+const ADVISOR_HISTORY_MESSAGES = 12
+/** A question longer than this is a document, not a question. */
+const ADVISOR_MAX_QUESTION_CHARS = 4000
+const ADVISOR_MAX_TOKENS = 8000
+
+// The advisor's knowledge and manner. Kept as one frozen string: it is the
+// cache prefix, so editing it costs a cache miss for everyone mid-conversation.
+// Property-specific context is appended as a SEPARATE block below, after the
+// cache breakpoint, so it can change per session without invalidating this.
+const ADVISOR_SYSTEM_PROMPT = `You are the Property Advisor inside BuildPro+, built by a team with 20+ years of hands-on general contracting experience combined with real estate investment and resale/marketing expertise. Users come to you with a specific property they are buying, selling, or flipping, and they want direct, usable answers — not vague hedging.
+
+RULES:
+
+1. If a numeric answer depends on missing details (e.g. square footage, condition specifics, local price context), ask ONE focused follow-up question before giving a specific number. Don't block on minor missing details — give your best estimate with a stated assumption instead.
+
+2. STRUCTURAL / CONDITION guidance:
+   - Classify issues into: "walk away" red flags, "negotiate the price" items, and "cosmetic — ignore" items.
+   - Reference typical lifespans and cost ranges: roofing (~20-25 yr asphalt shingle life), electrical panel age/type (Federal Pacific / Zinsco panels = red flag), galvanized or polybutylene plumbing = red flag, foundation cracks (hairline vertical vs. horizontal/stair-step significance), HVAC age (~15-20 yr typical life).
+   - Always name the likely repair cost RANGE, not just "it depends."
+
+3. FINANCIAL guidance:
+   - For flips, apply the 70% rule as a starting screen: Maximum Offer = (ARV x 0.70) - Estimated Repair Costs. Explain this is a screening tool, not gospel, and adjust for local market strength.
+   - For rentals, use cap rate (NOI / purchase price) and cash-on-cash return (annual pre-tax cash flow / total cash invested) and the 1% rule as a rough screen.
+   - Always account for holding costs (financing, property taxes, insurance, utilities) in flip timeline math, not just purchase + repair.
+   - Give ranges, show your math inline, and state your assumptions plainly.
+
+4. MARKETING / SALE guidance:
+   - Pricing: anchor to comparable sales, warn against emotional pricing.
+   - Highest-ROI cosmetic priorities before selling, typically in this order: paint, curb appeal/landscaping, kitchen updates, bathroom updates.
+   - Listing/photo guidance: lead with the best feature, natural light, decluttered rooms.
+   - Note seasonality and local market timing considerations when relevant.
+
+5. Give the most direct, concrete, numbers-driven answer you can support with the information provided. Do not pad the answer with generic disclaimers in the middle of it.
+
+6. End any answer that involves a financial estimate, structural judgment call, or "should I buy/sell" type question with one short line:
+   "This is educational guidance, not a substitute for a licensed inspector, appraiser, contractor, or real estate attorney — verify anything deal-critical before you commit."
+
+7. Tone: direct, plain-spoken, contractor-to-contractor. Skip corporate hedging. Format with short paragraphs or bullets so numbers and recommendations are scannable, not buried in prose.
+
+8. The domains overlap on purpose. A structural finding usually has a dollar consequence and often a resale consequence — say so in one line rather than answering only the question's narrowest reading. Stay on this property; if asked something unrelated to real estate, say that's outside what you do here.`
+
+interface AdvisorPropertyContext {
+  location?: string | null
+  propertyType?: string | null
+  yearBuilt?: number | null
+  priceContext?: number | null
+  userGoal?: 'buying' | 'selling' | 'flipping' | 'researching'
+  conditionNotes?: string | null
+}
+
+interface AdvisorSessionDoc {
+  createdBy?: string
+  propertyContext?: AdvisorPropertyContext
+}
+
+// The property, written the way a person would say it out loud. Only the fields
+// the contractor actually filled in — a wall of "not provided" teaches the model
+// that blanks are normal and makes it hedge.
+function advisorContextBlock(ctx: AdvisorPropertyContext | undefined): string {
+  const c = ctx ?? {}
+  const goalLine: Record<string, string> = {
+    buying: 'The user is considering BUYING this property.',
+    selling: 'The user is SELLING this property.',
+    flipping: 'The user is looking to FLIP this property (buy, renovate, resell).',
+    researching: 'The user is researching this property, not committed either way.',
+  }
+  const bits: string[] = [goalLine[c.userGoal ?? 'researching'] ?? goalLine.researching]
+  if (c.location) bits.push(`Location: ${c.location}`)
+  if (c.propertyType) bits.push(`Property type: ${c.propertyType}`)
+  if (typeof c.yearBuilt === 'number' && c.yearBuilt > 1500) bits.push(`Year built: ${c.yearBuilt} (about ${new Date().getFullYear() - c.yearBuilt} years old)`)
+  if (typeof c.priceContext === 'number' && c.priceContext > 0) bits.push(`Price on the table: $${c.priceContext.toLocaleString('en-US')}`)
+  if (c.conditionNotes) bits.push(`What they've told you about its condition: ${c.conditionNotes}`)
+  bits.push('Details not listed above were not provided — assume and state, or ask one focused question, per the rules.')
+  return `THIS PROPERTY:\n${bits.join('\n')}`
+}
+
+// Two ceilings, both counted in one transaction so a double-tap can't slip
+// through: the free monthly allowance (which Pro skips) and a daily cap that
+// applies to everyone. Counters live in their own collection rather than on the
+// user doc so a chatty month can't collide with the quote counters.
+async function refundAdvisorMessage(userId: string): Promise<void> {
+  const db = getAdminDb()
+  const now = new Date()
+  const month = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`
+  const day = now.toISOString().slice(0, 10)
+  try {
+    await Promise.all([
+      db.collection('advisorUsage').doc(userId).collection('months').doc(month).set({ messages: FieldValue.increment(-1) }, { merge: true }),
+      db.collection('advisorUsage').doc(userId).collection('days').doc(day).set({ messages: FieldValue.increment(-1) }, { merge: true }),
+    ])
+  } catch (err) {
+    // A failed refund must never mask the failure the user is actually seeing.
+    console.error('refundAdvisorMessage failed:', err)
+  }
+}
+
+async function consumeAdvisorMessageOrThrow(userId: string): Promise<{ tier: 'free' | 'pro'; monthlyRemaining: number | null }> {
+  const db = getAdminDb()
+  const now = new Date()
+  const month = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`
+  const day = now.toISOString().slice(0, 10)
+  const userRef = db.collection('users').doc(userId)
+  const monthRef = db.collection('advisorUsage').doc(userId).collection('months').doc(month)
+  const dayRef = db.collection('advisorUsage').doc(userId).collection('days').doc(day)
+
+  return db.runTransaction(async tx => {
+    const [userSnap, monthSnap, daySnap] = await Promise.all([tx.get(userRef), tx.get(monthRef), tx.get(dayRef)])
+    const tier: 'free' | 'pro' = (userSnap.data() as UserDoc | undefined)?.tier === 'pro' ? 'pro' : 'free'
+    const monthUsed = (monthSnap.data()?.messages as number | undefined) ?? 0
+    const dayUsed = (daySnap.data()?.messages as number | undefined) ?? 0
+
+    if (dayUsed >= ADVISOR_DAILY_MESSAGE_CAP) {
+      throw new HttpsError('resource-exhausted', `That's ${ADVISOR_DAILY_MESSAGE_CAP} advisor questions today — the daily limit. It resets tomorrow.`)
+    }
+    if (tier !== 'pro' && monthUsed >= ADVISOR_FREE_MESSAGES_PER_MONTH) {
+      throw new HttpsError(
+        'permission-denied',
+        `You've used your ${ADVISOR_FREE_MESSAGES_PER_MONTH} free Property Advisor questions this month. Go Pro for unlimited questions about every property you're looking at.`,
+      )
+    }
+
+    tx.set(monthRef, { messages: FieldValue.increment(1), updatedAt: new Date().toISOString() }, { merge: true })
+    tx.set(dayRef, { messages: FieldValue.increment(1), updatedAt: new Date().toISOString() }, { merge: true })
+    return {
+      tier,
+      monthlyRemaining: tier === 'pro' ? null : Math.max(0, ADVISOR_FREE_MESSAGES_PER_MONTH - monthUsed - 1),
+    }
+  })
+}
+
+export const askPropertyAdvisor = onCall<{ clerkToken: string; input: { sessionId: string; message: string } }>(
+  {
+    secrets: [ANTHROPIC_API_KEY, CLERK_SECRET_KEY],
+    timeoutSeconds: 300,
+    memory: '512MiB',
+    cors: true,
+  },
+  async (request) => {
+    const { clerkToken, input } = request.data ?? {} as { clerkToken: string; input: { sessionId: string; message: string } }
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    const sessionId = (input?.sessionId || '').trim()
+    const question = (input?.message || '').trim()
+    if (!sessionId) throw new HttpsError('invalid-argument', 'Missing property session')
+    if (!question) throw new HttpsError('invalid-argument', 'Ask a question first')
+    if (question.length > ADVISOR_MAX_QUESTION_CHARS) {
+      throw new HttpsError('invalid-argument', 'That question is too long — trim it down and ask again.')
+    }
+
+    const userId = await verifyClerk(clerkToken)
+    const db = getAdminDb()
+    const sessionRef = db.collection('propertyAdvisorSessions').doc(sessionId)
+    const sessionSnap = await sessionRef.get()
+    if (!sessionSnap.exists) throw new HttpsError('not-found', 'That property session no longer exists')
+    const session = sessionSnap.data() as AdvisorSessionDoc
+    // Rules already scope reads to the owner; this is the server-side half of
+    // the same check, because this function writes with the Admin SDK and the
+    // Admin SDK does not consult rules.
+    if (session.createdBy !== userId) throw new HttpsError('permission-denied', 'That property session belongs to someone else')
+
+    const gate = await consumeAdvisorMessageOrThrow(userId)
+
+    // Recent turns only — newest N, flipped back into chronological order.
+    const historySnap = await sessionRef.collection('messages')
+      .orderBy('createdAt', 'desc')
+      .limit(ADVISOR_HISTORY_MESSAGES)
+      .get()
+    const history: Anthropic.MessageParam[] = historySnap.docs
+      .reverse()
+      .map(d => d.data() as { role?: string; content?: string })
+      .filter(m => (m.role === 'user' || m.role === 'assistant') && !!m.content)
+      .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content as string }))
+
+    console.log(`askPropertyAdvisor user=${userId} session=${sessionId} tier=${gate.tier} history=${history.length} q="${question.slice(0, 100)}"`)
+
+    const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() })
+    let answer: string
+    try {
+      answer = await withAnthropicRetry('askPropertyAdvisor', async () => {
+        const stream = client.messages.stream({
+          model: 'claude-opus-5',
+          max_tokens: ADVISOR_MAX_TOKENS,
+          thinking: { type: 'adaptive' },
+          output_config: { effort: 'medium' },
+          system: [
+            // Everything up to this breakpoint is identical on every request
+            // from every user, so it is worth caching.
+            { type: 'text', text: ADVISOR_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
+            // Per-session, so it sits AFTER the breakpoint.
+            { type: 'text', text: advisorContextBlock(session.propertyContext) },
+          ],
+          messages: [...history, { role: 'user', content: question }],
+        })
+        const message = await stream.finalMessage()
+        if (message.stop_reason === 'refusal') {
+          throw new HttpsError('failed-precondition', 'The advisor couldn\'t answer that one. Try rephrasing it.')
+        }
+        return message.content
+          .filter(b => b.type === 'text')
+          .map(b => (b as Anthropic.TextBlock).text)
+          .join('\n')
+          .trim()
+      })
+    } catch (err) {
+      // The question was already counted against their allowance; they got no
+      // answer for it, so hand it back before surfacing the failure.
+      await refundAdvisorMessage(userId)
+      if (err instanceof HttpsError) throw err
+      console.error('askPropertyAdvisor failed:', err)
+      throw new HttpsError('internal', friendlyAnthropicError(err))
+    }
+
+    if (!answer) {
+      await refundAdvisorMessage(userId)
+      throw new HttpsError('internal', 'The advisor came back empty. Please try again.')
+    }
+
+    // Both turns land together, so a failure mid-call never leaves a question
+    // in the transcript with no answer under it.
+    const batch = db.batch()
+    const nowISO = new Date().toISOString()
+    batch.set(sessionRef.collection('messages').doc(), { role: 'user', content: question, createdAt: nowISO })
+    batch.set(sessionRef.collection('messages').doc(), { role: 'assistant', content: answer, createdAt: new Date(Date.now() + 1).toISOString() })
+    batch.set(sessionRef, { updatedAt: nowISO, lastMessagePreview: answer.slice(0, 140) }, { merge: true })
+    await batch.commit()
+
+    return { reply: answer, monthlyRemaining: gate.monthlyRemaining, tier: gate.tier }
+  },
+)

@@ -8,6 +8,7 @@ import ScanRoom from './ScanRoom'
 import Projects from './Projects'
 import Estimates from './Estimates'
 import Schedule from './Schedule'
+import PropertyAdvisor from './PropertyAdvisor'
 import PublicEstimate from './PublicEstimate'
 import PublicPhotoLog from './PublicPhotoLog'
 import PublicChangeOrder from './PublicChangeOrder'
@@ -351,6 +352,7 @@ const NAV_ITEMS: Tile[] = [
   ...TILES,
   { key: 'estimates', label: 'Estimates', icon: '📝', blurb: 'Pending, approved & declined' },
   { key: 'schedule', label: 'Schedule', icon: '📅', blurb: 'Upcoming jobs by start date' },
+  { key: 'property-advisor', label: 'Property Advisor', icon: '🏚️', blurb: 'Buying, selling or flipping — ask before you commit' },
   { key: 'settings', label: 'Settings', icon: '⚙️', blurb: 'Business profile' },
 ]
 
@@ -358,6 +360,7 @@ const TITLE_MAP: Record<string, string> = {
   dashboard: 'Dashboard',
   estimates: 'Estimates',
   schedule: 'Schedule',
+  'property-advisor': 'Property Advisor',
   ...Object.fromEntries(TILES.map(t => [t.key, t.label])),
 }
 
@@ -1174,6 +1177,7 @@ function Dashboard() {
         {page === 'schedule' && <Schedule onOpenProject={() => go('projects')} />}
         {page === 'customers' && <Customers />}
         {page === 'scan-room' && <ScanRoom onNavigate={go} />}
+        {page === 'property-advisor' && <PropertyAdvisor />}
         {page === 'settings' && <Settings />}
       </div>
     </div>

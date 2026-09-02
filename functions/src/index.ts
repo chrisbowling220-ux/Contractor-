@@ -3277,8 +3277,8 @@ const ADVISOR_HISTORY_MESSAGES = 12
 /** A question longer than this is a document, not a question. */
 const ADVISOR_MAX_QUESTION_CHARS = 4000
 const ADVISOR_MAX_TOKENS = 8000
-/** Web searches allowed per question. Enough to check a rate and a couple of local comps; not a research project. */
-const ADVISOR_MAX_SEARCHES = 6
+/** Web searches allowed per question. Enough for a rate check or a look at local comps — it has to spend them on what the question actually turns on. */
+const ADVISOR_MAX_SEARCHES = 3
 
 // The advisor's knowledge and manner. Kept as one frozen string: it is the
 // cache prefix, so editing it costs a cache miss for everyone mid-conversation.

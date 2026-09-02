@@ -3355,7 +3355,18 @@ RULES:
 
    STABLE — answer from knowledge, don't waste a search. How long a roof or an HVAC system lasts. Which panels and pipe materials are red flags. What a stair-step crack means. The 70% rule, cap rate, cash-on-cash, the 1% rule. Which cosmetic work returns the most at resale. These don't change year to year.
 
-   Search when the answer turns on today's conditions; skip it when it doesn't. If you searched, say what you found and roughly when it's from ("30-year fixed is running about X% as of this week"). If a search comes back empty or unhelpful, say plainly that you couldn't confirm current numbers and give your best estimate with the assumption stated — never present stale figures as current, and never let a failed search stop you from answering the rest.`
+   Search when the answer turns on today's conditions; skip it when it doesn't. If you searched, say what you found and roughly when it's from ("30-year fixed is running about X% as of this week"). If a search comes back empty or unhelpful, say plainly that you couldn't confirm current numbers and give your best estimate with the assumption stated — never present stale figures as current, and never let a failed search stop you from answering the rest.
+
+11. SPOKEN SUMMARY — every answer ends with a short spoken version of itself, because the person asking may be driving, up a ladder, or under the house with a flashlight in their teeth. Put the marker <<<SPOKEN>>> on its own line at the very end, and after it write what you would SAY to them if they had asked you this on the phone.
+
+   - It is the LAST thing in your message. Nothing comes after it.
+   - Two to four sentences, and never more than about 80 words. A long spoken answer is a worse answer — nobody holds ten numbers in their head at 60mph.
+   - SIMPLE question — one fact, one number, a yes or no — just answer it out loud and stop. Don't point them at the screen for something you already told them.
+   - COMPLEX answer — several numbers, an itemized budget, a multi-step calculation, a list of things to go check — give the ONE bottom line that actually decides something, then hand them off to the screen: "the full breakdown's on your screen." Name in a few words what's up there, so they know whether it's worth pulling over for.
+   - Speak it, don't write it. No bullets, no headings, no bold, no dashes as separators. Say numbers the way a person says them: "about nine to fifteen thousand," not "$9,000-$15,000"; "around six and a half percent," not "6.53%."
+   - Round hard. Spoken numbers are for orientation — the screen carries the precision.
+   - Do not read the full disclaimer aloud. On a financial or structural judgment call, a short "verify that before you commit" is enough; the written answer and the screen carry the full version.
+   - The written answer above the marker does NOT get shorter because of this. Keep it as complete and detailed as the question deserves. The spoken version is a summary OF it, never a replacement FOR it.`
 
 interface AdvisorPropertyContext {
   location?: string | null
@@ -3394,6 +3405,54 @@ function advisorContextBlock(ctx: AdvisorPropertyContext | undefined): string {
   // the model's own sense of "now" is its training cutoff, not the calendar.
   const today = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', dateStyle: 'full' }).format(new Date())
   return `TODAY IS ${today}. Your training data ends well before this; treat anything rate- or market-related in it as out of date and look it up.\n\nTHIS PROPERTY:\n${bits.join('\n')}`
+}
+
+// ── The spoken half of an answer ──────────────────────────────────────────
+// Rule 11 has the model write a short, say-it-out-loud version of every answer
+// after a marker. Two reasons it's the model's job and not a second API call:
+// it already has the reasoning in hand (a summariser would have to re-derive
+// what mattered), and it costs a couple hundred output tokens instead of a
+// whole second request.
+//
+// Nothing downstream may depend on the marker being there. A model that
+// forgets it, or an answer cut short by max_tokens, still has to produce a
+// usable spoken line — so the fallback below builds one from the opening
+// sentences rather than leaving the contractor with silence.
+const SPOKEN_MARKER = '<<<SPOKEN>>>'
+/** Hard ceiling on the spoken half. ~40 seconds of speech, and it keeps one answer from eating a month of the TTS budget. */
+const ADVISOR_SPOKEN_MAX_CHARS = 700
+
+// Strip what reads fine and speaks badly: markdown emphasis, bullet glyphs,
+// heading hashes. The model is told not to use them; this is the belt to that
+// suspenders, because "star star nine thousand star star" is unlistenable.
+function cleanForSpeech(text: string): string {
+  return text
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/^\s*[#>]+\s*/gm, '')
+    .replace(/^\s*[-*•]\s+/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function splitSpokenAnswer(raw: string): { written: string; spoken: string } {
+  const idx = raw.lastIndexOf(SPOKEN_MARKER)
+  if (idx !== -1) {
+    const written = raw.slice(0, idx).trim()
+    const spoken = cleanForSpeech(raw.slice(idx + SPOKEN_MARKER.length))
+    // A marker with nothing usable after it is the same as no marker at all.
+    if (written && spoken) {
+      return { written, spoken: spoken.slice(0, ADVISOR_SPOKEN_MAX_CHARS) }
+    }
+  }
+  // Fallback: the first couple of sentences. The advisor is told to lead with
+  // the answer, so the top of the reply is the closest thing to a summary
+  // available without asking the model again.
+  const written = raw.replace(SPOKEN_MARKER, '').trim()
+  const flat = cleanForSpeech(written)
+  const sentences = flat.match(/[^.!?]+[.!?]+/g) ?? []
+  const lead = (sentences.slice(0, 2).join(' ').trim() || flat).slice(0, 320)
+  const spoken = lead ? `${lead} The full answer's on your screen.` : ''
+  return { written, spoken }
 }
 
 // Two ceilings, both counted in one transaction so a double-tap can't slip
@@ -3565,15 +3624,30 @@ export const askPropertyAdvisor = onCall<{ clerkToken: string; input: { sessionI
       throw new HttpsError('internal', 'The advisor came back empty. Please try again.')
     }
 
+    // Split before anything is stored. What goes in the transcript — and so
+    // what comes back as history on the next turn — is the written answer with
+    // the marker gone, or the model would learn its own scaffolding is part of
+    // how an advisor talks.
+    const { written, spoken } = splitSpokenAnswer(answer)
+    console.log(`askPropertyAdvisor user=${userId} written=${written.length} spoken=${spoken.length}`)
+
     // Both turns land together, so a failure mid-call never leaves a question
     // in the transcript with no answer under it.
     const batch = db.batch()
     const nowISO = new Date().toISOString()
     batch.set(sessionRef.collection('messages').doc(), { role: 'user', content: question, createdAt: nowISO })
-    batch.set(sessionRef.collection('messages').doc(), { role: 'assistant', content: answer, createdAt: new Date(Date.now() + 1).toISOString() })
-    batch.set(sessionRef, { updatedAt: nowISO, lastMessagePreview: answer.slice(0, 140) }, { merge: true })
+    batch.set(sessionRef.collection('messages').doc(), {
+      role: 'assistant',
+      content: written,
+      // Stored, not just returned: the speaker button on an old answer has to
+      // work after a reload, and re-asking the model to summarise itself would
+      // cost another question.
+      spokenContent: spoken,
+      createdAt: new Date(Date.now() + 1).toISOString(),
+    })
+    batch.set(sessionRef, { updatedAt: nowISO, lastMessagePreview: written.slice(0, 140) }, { merge: true })
     await batch.commit()
 
-    return { reply: answer, monthlyRemaining: gate.monthlyRemaining, tier: gate.tier }
+    return { reply: written, spoken, monthlyRemaining: gate.monthlyRemaining, tier: gate.tier }
   },
 )

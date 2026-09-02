@@ -4,6 +4,7 @@ import { collection, query, where, onSnapshot, addDoc, deleteDoc, doc, getDocs, 
 import { httpsCallable } from 'firebase/functions'
 import { db, functions } from './firebase'
 import { useTier } from './lib/useTier'
+import { useVoiceOutput } from './lib/useVoiceOutput'
 
 const ORANGE = '#f97316'
 const NAVY = '#1a1f2e'
@@ -14,8 +15,34 @@ const FREE_QUESTIONS_PER_MONTH = 5
 
 const askCallable = httpsCallable<
   { clerkToken: string; input: { sessionId: string; message: string } },
-  { reply: string; monthlyRemaining: number | null; tier: 'free' | 'pro' }
+  { reply: string; spoken: string; monthlyRemaining: number | null; tier: 'free' | 'pro' }
 >(functions, 'askPropertyAdvisor')
+
+const transcribeCallable = httpsCallable<
+  { clerkToken: string; input: { audioBase64: string; mimeType: string } },
+  { transcript: string }
+>(functions, 'transcribeAudio')
+
+// A spoken question is a question, not a monologue. Long enough to describe a
+// problem out loud, short enough that a phone left recording in a pocket can't
+// run up a Speech-to-Text bill.
+const VOICE_MAX_SECONDS = 25
+
+function fileToBase64(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => resolve(((r.result as string).split(',')[1]) || '')
+    r.onerror = () => reject(r.error)
+    r.readAsDataURL(file)
+  })
+}
+
+function pickRecorderMimeType(): string {
+  const candidates = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/mpeg']
+  if (typeof MediaRecorder === 'undefined') return ''
+  for (const c of candidates) if (MediaRecorder.isTypeSupported(c)) return c
+  return ''
+}
 
 type Goal = 'buying' | 'selling' | 'flipping' | 'researching'
 
@@ -41,6 +68,10 @@ interface AdvisorMessage {
   id: string
   role: 'user' | 'assistant'
   content: string
+  // The say-it-out-loud version of this answer, written by the advisor at the
+  // same time as the long one. Absent on answers from before voice existed —
+  // those fall back to reading the top of the written answer.
+  spokenContent?: string
   createdAt?: string
 }
 
@@ -134,7 +165,37 @@ export default function PropertyAdvisor() {
   const [goal, setGoal] = useState<Goal>('buying')
   const [conditionNotes, setConditionNotes] = useState('')
 
+  // ── Voice ───────────────────────────────────────────────────────────────
+  // One useVoiceOutput for the whole screen, not one per message: two hooks
+  // means two voices talking over each other the moment someone taps a second
+  // speaker button.
+  const { speak, stop: stopSpeaking, isSpeaking, isLoading: voiceLoading, needsTap, engine, remainingChars } = useVoiceOutput()
+  const [voicePhase, setVoicePhase] = useState<'idle' | 'listening' | 'transcribing'>('idle')
+  const [elapsed, setElapsed] = useState(0)
+  const [heard, setHeard] = useState('')
+  const [voiceError, setVoiceError] = useState('')
+  // Only ever read alongside isSpeaking, so a stale id after playback ends is
+  // harmless — it saves an effect that would just be resetting state.
+  const [speakingId, setSpeakingId] = useState<string | null>(null)
+  // Kept so a blocked autoplay can be retried on a tap. The hook reports the
+  // block; it doesn't hold the words.
+  const [lastSpoken, setLastSpoken] = useState('')
+
   const transcriptRef = useRef<HTMLDivElement | null>(null)
+  const recRef = useRef<MediaRecorder | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const chunksRef = useRef<Blob[]>([])
+  const tickRef = useRef<number | null>(null)
+  const autoStopRef = useRef<number | null>(null)
+
+  const micSupported = typeof MediaRecorder !== 'undefined' && typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia
+
+  // Never leave the mic hot or a timer running after this screen is gone.
+  useEffect(() => () => {
+    if (tickRef.current) clearInterval(tickRef.current)
+    if (autoStopRef.current) clearTimeout(autoStopRef.current)
+    streamRef.current?.getTracks().forEach(t => t.stop())
+  }, [])
 
   // Sessions. Sorted here rather than in the query so this doesn't need a
   // composite index — same approach as the rest of the app.
@@ -212,7 +273,7 @@ export default function PropertyAdvisor() {
     setActiveId(ref.id)
   }
 
-  const send = async (text: string) => {
+  const send = async (text: string, speakBack = false) => {
     const question = text.trim()
     if (!question || !activeId || busy) return
     setBusy(true); setError(''); setNeedsUpgrade(false); setDraft('')
@@ -221,6 +282,17 @@ export default function PropertyAdvisor() {
       if (!clerkToken) throw new Error('Sign in again to ask the advisor.')
       const res = await askCallable({ clerkToken, input: { sessionId: activeId, message: question } })
       setRemaining(res.data.monthlyRemaining)
+      // Asked out loud, answered out loud. The long version is already on
+      // screen behind this — the spoken half is deliberately the short one.
+      const spoken = (res.data.spoken || '').trim()
+      if (speakBack && spoken) {
+        setLastSpoken(spoken)
+        setSpeakingId(null)
+        // A phone may refuse to start audio this long after the tap that
+        // started the recording. The hook catches that and asks for one more
+        // tap rather than failing silently.
+        void speak(spoken)
+      }
     } catch (err) {
       const code = (err as { code?: string })?.code || ''
       const message = (err as { message?: string })?.message || 'Something went wrong. Try again.'
@@ -230,6 +302,77 @@ export default function PropertyAdvisor() {
     } finally {
       setBusy(false)
     }
+  }
+
+  // Tap to talk, tap to stop — walkie-talkie, not a phone call. Holding a
+  // button down is wrong for this: the questions are long enough that a thumb
+  // slipping mid-sentence loses the whole thing.
+  const startListening = async () => {
+    setVoiceError(''); setError(''); setHeard('')
+    stopSpeaking()   // don't record the advisor answering the last question
+    if (!micSupported) { setVoiceError('This browser can\'t use the mic — type the question instead.'); return }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      streamRef.current = stream
+      const mimeType = pickRecorderMimeType()
+      const rec = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream)
+      chunksRef.current = []
+      rec.ondataavailable = e => { if (e.data && e.data.size > 0) chunksRef.current.push(e.data) }
+      rec.onstart = () => {
+        setVoicePhase('listening')
+        setElapsed(0)
+        tickRef.current = window.setInterval(() => setElapsed(n => n + 1), 1000)
+        autoStopRef.current = window.setTimeout(() => stopListening(), VOICE_MAX_SECONDS * 1000)
+      }
+      rec.onstop = async () => {
+        if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null }
+        if (autoStopRef.current) { clearTimeout(autoStopRef.current); autoStopRef.current = null }
+        stream.getTracks().forEach(t => t.stop())
+        streamRef.current = null
+        const blob = new Blob(chunksRef.current, { type: rec.mimeType || mimeType || 'audio/webm' })
+        if (blob.size === 0) { setVoiceError('Didn\'t catch that — try again.'); setVoicePhase('idle'); return }
+        await askByVoice(blob, rec.mimeType || mimeType)
+      }
+      rec.onerror = () => { setVoiceError('Recording error — try again.'); setVoicePhase('idle') }
+      recRef.current = rec
+      rec.start(1000)
+    } catch {
+      setVoiceError('Couldn\'t get to the mic. Allow microphone access, or type the question.')
+      setVoicePhase('idle')
+    }
+  }
+
+  const stopListening = () => {
+    if (recRef.current && recRef.current.state !== 'inactive') recRef.current.stop()
+  }
+
+  // Speech in, the same question the Ask button sends, speech back out.
+  const askByVoice = async (blob: Blob, mimeType: string) => {
+    setVoicePhase('transcribing')
+    try {
+      const clerkToken = await getToken()
+      if (!clerkToken) throw new Error('Sign in again to ask the advisor.')
+      const audioBase64 = await fileToBase64(blob)
+      const res = await transcribeCallable({ clerkToken, input: { audioBase64, mimeType } })
+      const question = (res.data.transcript || '').trim()
+      setVoicePhase('idle')
+      if (!question) { setVoiceError('Couldn\'t make that out. Try again, or type it.'); return }
+      setHeard(question)
+      await send(question, true)
+    } catch (err) {
+      setVoicePhase('idle')
+      setVoiceError(err instanceof Error ? err.message : 'That didn\'t go through. Try typing it.')
+    }
+  }
+
+  // The short version, on demand, for any answer on screen — including ones
+  // answered by typing, and ones from before voice existed.
+  const speakAnswer = (m: AdvisorMessage) => {
+    if (isSpeaking && speakingId === m.id) { stopSpeaking(); return }
+    const text = (m.spokenContent || '').trim() || m.content.replace(/\*\*/g, '').slice(0, 600)
+    setSpeakingId(m.id)
+    setLastSpoken(text)
+    void speak(text)
   }
 
   const removeSession = async (s: AdvisorSession) => {
@@ -374,6 +517,9 @@ export default function PropertyAdvisor() {
               Structure, the deal math, or how to sell it — it'll tell you which problems are walk-aways,
               which are price negotiations, and which to ignore.
             </div>
+            <div style={{ fontSize: '13px', color: '#7c2d12', marginTop: '8px' }}>
+              Hands full? Tap 🎤 and just ask. You get the short answer out loud and the whole thing in writing here.
+            </div>
           </div>
         )}
 
@@ -389,9 +535,25 @@ export default function PropertyAdvisor() {
               color: m.role === 'user' ? 'white' : NAVY,
             }}
           >
-            {m.role === 'user'
-              ? <div style={{ fontSize: '14px', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{m.content}</div>
-              : <AnswerText text={m.content} />}
+            {m.role === 'user' ? (
+              <div style={{ fontSize: '14px', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{m.content}</div>
+            ) : (
+              <>
+                <AnswerText text={m.content} />
+                <button
+                  onClick={() => speakAnswer(m)}
+                  disabled={voiceLoading && speakingId === m.id}
+                  style={speakerBtn}
+                  aria-label={isSpeaking && speakingId === m.id ? 'Stop reading' : 'Hear the short version'}
+                >
+                  {isSpeaking && speakingId === m.id
+                    ? '⏹ Stop'
+                    : voiceLoading && speakingId === m.id
+                      ? '⏳ Getting it…'
+                      : '🔊 Hear the short version'}
+                </button>
+              </>
+            )}
           </div>
         ))}
 
@@ -444,10 +606,40 @@ export default function PropertyAdvisor() {
           disabled={busy}
           style={{ ...input, flex: 1, resize: 'vertical', fontFamily: 'inherit' }}
         />
-        <button onClick={() => send(draft)} disabled={busy || !draft.trim()} style={{ ...primaryBtn, opacity: busy || !draft.trim() ? 0.5 : 1 }}>
+        {micSupported && (
+          <button
+            onClick={voicePhase === 'listening' ? stopListening : startListening}
+            disabled={busy || voicePhase === 'transcribing'}
+            aria-label={voicePhase === 'listening' ? 'Stop recording and ask' : 'Ask out loud'}
+            title={voicePhase === 'listening' ? 'Tap when you\'re done talking' : 'Ask out loud'}
+            style={{
+              ...primaryBtn,
+              minWidth: '58px',
+              background: voicePhase === 'listening' ? '#dc2626' : 'white',
+              color: voicePhase === 'listening' ? 'white' : NAVY,
+              border: voicePhase === 'listening' ? 'none' : `2px solid ${ORANGE}`,
+              opacity: busy || voicePhase === 'transcribing' ? 0.5 : 1,
+            }}
+          >
+            {voicePhase === 'listening' ? `⏹ ${elapsed}s` : voicePhase === 'transcribing' ? '⏳' : '🎤'}
+          </button>
+        )}
+        <button onClick={() => send(draft)} disabled={busy || voicePhase !== 'idle' || !draft.trim()} style={{ ...primaryBtn, opacity: busy || voicePhase !== 'idle' || !draft.trim() ? 0.5 : 1 }}>
           {busy ? '…' : 'Ask'}
         </button>
       </div>
+
+      <VoiceStatus
+        phase={voicePhase}
+        elapsed={elapsed}
+        heard={heard}
+        error={voiceError}
+        needsTap={needsTap}
+        onPlay={() => { if (lastSpoken) void speak(lastSpoken) }}
+        engine={engine}
+        remainingChars={remainingChars}
+        micSupported={micSupported}
+      />
 
       {!isPro && remaining !== null && (
         <div style={{ fontSize: '12px', color: remaining > 1 ? '#64748b' : '#b45309', marginTop: '8px', fontWeight: remaining > 1 ? 400 : 700 }}>
@@ -456,6 +648,51 @@ export default function PropertyAdvisor() {
       )}
 
       <Disclaimer />
+    </div>
+  )
+}
+
+// The one strip under the composer that says what voice is doing. Kept in a
+// single place so the mic, the transcription and the playback can't each grow
+// their own status line in a different corner of the screen.
+function VoiceStatus({
+  phase, elapsed, heard, error, needsTap, onPlay, engine, remainingChars, micSupported,
+}: {
+  phase: 'idle' | 'listening' | 'transcribing'
+  elapsed: number
+  heard: string
+  error: string
+  needsTap: boolean
+  onPlay: () => void
+  engine: 'elevenlabs' | 'browser' | null
+  remainingChars: number | null
+  micSupported: boolean
+}) {
+  // A blocked autoplay is the common case on a phone: the tap that started the
+  // recording is long expired by the time the answer comes back. The audio is
+  // already downloaded, so this tap plays instantly.
+  if (needsTap) {
+    return (
+      <button onClick={onPlay} style={{ ...primaryBtn, marginTop: '10px', display: 'block' }}>
+        ▶ Hear the answer
+      </button>
+    )
+  }
+
+  const line =
+    phase === 'listening' ? `🎙 Listening… tap ⏹ when you're done (${VOICE_MAX_SECONDS - elapsed}s left)`
+      : phase === 'transcribing' ? '⏳ Getting that down…'
+        : error ? `⚠ ${error}`
+          : heard ? `You asked: "${heard}"`
+            : engine === 'browser' ? 'The good voice is used up for the month — this is the phone\'s own.'
+              : remainingChars !== null && remainingChars < 600 ? 'Spoken answers are nearly out for the month.'
+                : micSupported ? 'Or tap 🎤 to ask out loud — short answer spoken, full detail here.'
+                  : ''
+
+  if (!line) return null
+  return (
+    <div style={{ fontSize: '12px', color: error ? '#b45309' : '#64748b', marginTop: '10px', lineHeight: 1.5 }}>
+      {line}
     </div>
   )
 }
@@ -488,4 +725,6 @@ const card: React.CSSProperties = { background: 'white', border: '1px solid #e8e
 const input: React.CSSProperties = { width: '100%', padding: '10px 12px', borderRadius: '10px', border: '1px solid #e8ecf1', fontSize: '14px', color: NAVY, background: 'white', boxSizing: 'border-box' }
 const primaryBtn: React.CSSProperties = { background: ORANGE, color: 'white', border: 'none', borderRadius: '10px', padding: '12px 18px', fontSize: '14px', fontWeight: 800, cursor: 'pointer' }
 const secondaryBtn: React.CSSProperties = { background: 'white', color: NAVY, border: '1px solid #e8ecf1', borderRadius: '10px', padding: '10px 14px', fontSize: '13px', fontWeight: 700, cursor: 'pointer' }
+// Deliberately quiet — it sits under every answer, and the answer is the point.
+const speakerBtn: React.CSSProperties = { marginTop: '4px', background: 'none', border: 'none', padding: 0, color: '#64748b', fontSize: '12px', fontWeight: 700, cursor: 'pointer' }
 const chipBtn: React.CSSProperties = { background: 'white', color: NAVY, border: '1px solid #e8ecf1', borderRadius: '999px', padding: '8px 14px', fontSize: '13px', fontWeight: 600, cursor: 'pointer' }

@@ -3277,6 +3277,28 @@ const ADVISOR_HISTORY_MESSAGES = 12
 /** A question longer than this is a document, not a question. */
 const ADVISOR_MAX_QUESTION_CHARS = 4000
 const ADVISOR_MAX_TOKENS = 8000
+// The advisor's cost reference IS the quote generator's. Same price book, same
+// trades knowledge, one copy — a forked copy would drift, and the day Chris
+// corrects a price for the quote generator is the day the advisor should stop
+// being wrong about it too. Sits inside the cached system block: ~15k tokens
+// that would be expensive per-question at full price, and roughly a tenth of
+// that on a cache read.
+const ADVISOR_COST_REFERENCE = `
+
+────────────────────────────────────────────────────────────────────────
+YOUR COST REFERENCE
+This is the same pricing and trade knowledge this app's quote generator
+runs on — a working contractor's numbers. Use it to answer repair and
+rehab cost questions per rule 9. It was written to produce itemized
+customer quotes, so it contains instructions about JSON output, line
+items, contractor_notes and fixture placeholders: those do not apply to
+you. Take the prices and the trade knowledge; ignore the output format.
+────────────────────────────────────────────────────────────────────────
+
+${NC_PRICING_GUIDANCE}
+
+${TRADES_KNOWLEDGE}`
+
 /** Web searches allowed per question. Enough for a rate check or a look at local comps — it has to spend them on what the question actually turns on. */
 const ADVISOR_MAX_SEARCHES = 3
 
@@ -3316,7 +3338,18 @@ RULES:
 
 8. The domains overlap on purpose. A structural finding usually has a dollar consequence and often a resale consequence — say so in one line rather than answering only the question's narrowest reading. Stay on this property; if asked something unrelated to real estate, say that's outside what you do here.
 
-9. CURRENT DATA — you have web search, and real estate is the kind of subject where being a year out of date makes an answer wrong rather than merely vague. Two categories:
+9. REPAIR COSTS — you have the same price book the app's quote generator uses, appended below. It is a contractor's real pricing, not internet averages, and it is the reason you can answer "what's that going to cost me" instead of deflecting. Use it whenever a repair, a system replacement, or a rehab budget comes up, and note that what an investor needs from you is shaped differently from a quote:
+
+   - Give an INSTALLED range — materials plus labor, what it costs to have it done — not a material total. If they're doing the work themselves, say what the material-only figure is instead, and that their labor is the spread.
+   - Range, not a point estimate. A roof is "$9-15K on a house this size," and say what moves it within that range (pitch, layers to tear off, deck condition, steepness, access).
+   - Price the WHOLE repair. A crawlspace isn't a vapor barrier; it's drainage, grading, maybe a sump, maybe joist or subfloor repair once it's open, maybe encapsulation. Investors get hurt by the part they didn't see coming, so name it.
+   - Say what's likely hiding behind it. On anything water-related or on a pre-1980 house, name the thing that commonly turns up once it's opened up and what that adds.
+   - Carry contingency and say so out loud: 10-15% on a clean cosmetic rehab, 20-25% on an older house or anything involving water, foundation, or unknowns behind walls.
+   - Distinguish what has to be done now from what can wait a few years, because that's the difference between a deal-breaker and a negotiation.
+   - The appended price book is written for producing itemized customer quotes — it talks about line items, contractor_notes, ZIP multipliers and $0 fixture placeholders. IGNORE that formatting guidance entirely. You are having a conversation, not writing a quote. Take the numbers and the trade knowledge; leave the output format.
+   - Adjust for where the property actually is. The book's baseline is central North Carolina; the regional guidance in it tells you how to shift for other markets.
+
+10. CURRENT DATA — you have web search, and real estate is the kind of subject where being a year out of date makes an answer wrong rather than merely vague. Two categories:
 
    PERISHABLE — search before you put a number on it. Mortgage and HELOC rates. Whether the local market favors buyers or sellers right now, and how fast homes there are moving (days on market). Recent comparable sales and current price-per-square-foot for the area. Median prices and their direction. Material and labor cost swings big enough to move a repair estimate. Anything where the honest answer is "it depends what the market's doing."
 
@@ -3448,6 +3481,11 @@ export const askPropertyAdvisor = onCall<{ clerkToken: string; input: { sessionI
 
     const gate = await consumeAdvisorMessageOrThrow(userId)
 
+    // The weekly-refreshed price sheet, the same one the quote generators get,
+    // so a lumber or roofing swing shows up in repair estimates too. Empty
+    // string if it has never run — the static price book still stands.
+    const marketPrices = await loadMarketPricesBlock()
+
     // Recent turns only — newest N, flipped back into chronological order.
     const historySnap = await sessionRef.collection('messages')
       .orderBy('createdAt', 'desc')
@@ -3484,10 +3522,14 @@ export const askPropertyAdvisor = onCall<{ clerkToken: string; input: { sessionI
             tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: ADVISOR_MAX_SEARCHES, allowed_callers: ['direct'] }],
             system: [
               // Everything up to this breakpoint is identical on every request
-              // from every user, so it is worth caching.
-              { type: 'text', text: ADVISOR_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
-              // Per-session and per-day, so it sits AFTER the breakpoint.
-              { type: 'text', text: advisorContextBlock(session.propertyContext) },
+              // from every user. It's ~16k tokens now that the price book is in
+              // it, so a MISS is the expensive case, not the read. The 1h TTL
+              // costs 2x to write instead of 1.25x but survives twelve times as
+              // long — on an app this size, questions arrive minutes to hours
+              // apart, and one write an hour beats a write every five minutes.
+              { type: 'text', text: ADVISOR_SYSTEM_PROMPT + ADVISOR_COST_REFERENCE, cache_control: { type: 'ephemeral', ttl: '1h' } },
+              // Per-session, per-day and per-week, so it sits AFTER the breakpoint.
+              { type: 'text', text: marketPrices + advisorContextBlock(session.propertyContext) },
             ],
             messages: turns,
           })

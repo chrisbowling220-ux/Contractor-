@@ -1227,13 +1227,24 @@ export const transcribeAudio = onCall<TranscribeCallPayload>(
 // hands full). The reverse direction of transcribeAudio above.
 //
 // COST SHAPE — read before touching the caps below. ElevenLabs bills per
-// CHARACTER, and the free tier's 10,000 chars/month is an ACCOUNT ceiling, not
-// a per-user allowance. One chatty user could burn the whole month for every
-// other user. So we cap TWICE: per user, and account-wide. When either ceiling
-// is hit we refuse the call instead of quietly spending — the client catches
-// the refusal and speaks with the phone's own built-in voice, so the feature
-// degrades in quality rather than breaking. Nothing here can generate a bill
-// without the caps being raised deliberately.
+// CHARACTER against an ACCOUNT ceiling, not a per-user allowance, so one chatty
+// user could otherwise burn the whole month for everyone else. We cap TWICE:
+// per user, and account-wide. When either ceiling is hit we refuse the call
+// instead of quietly spending — the client catches the refusal and speaks with
+// the phone's own built-in voice, so the feature degrades in quality rather
+// than breaking.
+//
+// The account is on ElevenLabs' pay-as-you-go tier with a hard ceiling of
+// ~37,000 characters per billing cycle and overage extension turned OFF
+// (can_extend_character_limit: false). That matters for anyone raising these
+// numbers: past that ceiling ElevenLabs simply refuses, and refusal is already
+// the phone-voice path — so the caps below cannot generate a charge beyond
+// what the plan already costs, whatever they are set to.
+//
+// The same ElevenLabs account is shared with other projects, and BuildPro+
+// cannot see what they've spent. That's why the account cap here is a SHARE of
+// the plan, not the whole plan: leaving headroom is the only way the other
+// consumers don't get starved by a busy month here.
 // ──────────────────────────────────────────────────────────────────────────
 
 // One voice for everything the app says out loud. Keep this as the single
@@ -1246,8 +1257,12 @@ const ELEVENLABS_MODEL_ID = 'eleven_flash_v2_5'      // lowest latency; quality 
 const ELEVENLABS_OUTPUT_FORMAT = 'mp3_22050_32'
 
 const TTS_MAX_CHARS_PER_CALL = 1200        // ~90 seconds of speech
-const TTS_USER_MONTHLY_CHARS = 3000        // per contractor, per month
-const TTS_ACCOUNT_MONTHLY_CHARS = 9000     // whole account — stays under the 10k free tier
+// ~20 spoken advisor answers a month (they run about 400 chars each), on top of
+// schedule readbacks — enough that a normal week of use never hits the wall.
+const TTS_USER_MONTHLY_CHARS = 8000        // per contractor, per month
+// Roughly half the plan's cycle allowance. The rest is headroom for the other
+// projects on this key; raise it if BuildPro+ ends up the only consumer.
+const TTS_ACCOUNT_MONTHLY_CHARS = 20000    // whole account, per month
 
 interface SynthesizeInput {
   text: string

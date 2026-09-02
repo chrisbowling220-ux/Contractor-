@@ -3277,6 +3277,8 @@ const ADVISOR_HISTORY_MESSAGES = 12
 /** A question longer than this is a document, not a question. */
 const ADVISOR_MAX_QUESTION_CHARS = 4000
 const ADVISOR_MAX_TOKENS = 8000
+/** Web searches allowed per question. Enough to check a rate and a couple of local comps; not a research project. */
+const ADVISOR_MAX_SEARCHES = 6
 
 // The advisor's knowledge and manner. Kept as one frozen string: it is the
 // cache prefix, so editing it costs a cache miss for everyone mid-conversation.
@@ -3312,7 +3314,15 @@ RULES:
 
 7. Tone: direct, plain-spoken, contractor-to-contractor. Skip corporate hedging. Format with short paragraphs or bullets so numbers and recommendations are scannable, not buried in prose.
 
-8. The domains overlap on purpose. A structural finding usually has a dollar consequence and often a resale consequence — say so in one line rather than answering only the question's narrowest reading. Stay on this property; if asked something unrelated to real estate, say that's outside what you do here.`
+8. The domains overlap on purpose. A structural finding usually has a dollar consequence and often a resale consequence — say so in one line rather than answering only the question's narrowest reading. Stay on this property; if asked something unrelated to real estate, say that's outside what you do here.
+
+9. CURRENT DATA — you have web search, and real estate is the kind of subject where being a year out of date makes an answer wrong rather than merely vague. Two categories:
+
+   PERISHABLE — search before you put a number on it. Mortgage and HELOC rates. Whether the local market favors buyers or sellers right now, and how fast homes there are moving (days on market). Recent comparable sales and current price-per-square-foot for the area. Median prices and their direction. Material and labor cost swings big enough to move a repair estimate. Anything where the honest answer is "it depends what the market's doing."
+
+   STABLE — answer from knowledge, don't waste a search. How long a roof or an HVAC system lasts. Which panels and pipe materials are red flags. What a stair-step crack means. The 70% rule, cap rate, cash-on-cash, the 1% rule. Which cosmetic work returns the most at resale. These don't change year to year.
+
+   Search when the answer turns on today's conditions; skip it when it doesn't. If you searched, say what you found and roughly when it's from ("30-year fixed is running about X% as of this week"). If a search comes back empty or unhelpful, say plainly that you couldn't confirm current numbers and give your best estimate with the assumption stated — never present stale figures as current, and never let a failed search stop you from answering the rest.`
 
 interface AdvisorPropertyContext {
   location?: string | null
@@ -3346,7 +3356,11 @@ function advisorContextBlock(ctx: AdvisorPropertyContext | undefined): string {
   if (typeof c.priceContext === 'number' && c.priceContext > 0) bits.push(`Price on the table: $${c.priceContext.toLocaleString('en-US')}`)
   if (c.conditionNotes) bits.push(`What they've told you about its condition: ${c.conditionNotes}`)
   bits.push('Details not listed above were not provided — assume and state, or ask one focused question, per the rules.')
-  return `THIS PROPERTY:\n${bits.join('\n')}`
+  // Rule 4 asks for seasonality and market-timing judgment, and rule 9 asks it
+  // to date what it finds. Neither is possible without knowing today's date —
+  // the model's own sense of "now" is its training cutoff, not the calendar.
+  const today = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', dateStyle: 'full' }).format(new Date())
+  return `TODAY IS ${today}. Your training data ends well before this; treat anything rate- or market-related in it as out of date and look it up.\n\nTHIS PROPERTY:\n${bits.join('\n')}`
 }
 
 // Two ceilings, both counted in one transaction so a double-tap can't slip
@@ -3451,24 +3465,44 @@ export const askPropertyAdvisor = onCall<{ clerkToken: string; input: { sessionI
     let answer: string
     try {
       answer = await withAnthropicRetry('askPropertyAdvisor', async () => {
-        const stream = client.messages.stream({
-          model: 'claude-opus-5',
-          max_tokens: ADVISOR_MAX_TOKENS,
-          thinking: { type: 'adaptive' },
-          output_config: { effort: 'medium' },
-          system: [
-            // Everything up to this breakpoint is identical on every request
-            // from every user, so it is worth caching.
-            { type: 'text', text: ADVISOR_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
-            // Per-session, so it sits AFTER the breakpoint.
-            { type: 'text', text: advisorContextBlock(session.propertyContext) },
-          ],
-          messages: [...history, { role: 'user', content: question }],
-        })
-        const message = await stream.finalMessage()
+        // Web search runs its own loop server-side and can hand back
+        // 'pause_turn' partway through. Feed the paused turn straight back to
+        // resume it, and cap the continuations so a pathological run can't
+        // spin until the 300s function timeout.
+        const turns: Anthropic.MessageParam[] = [...history, { role: 'user', content: question }]
+        let message: Anthropic.Message | null = null
+        for (let i = 0; i < 4; i++) {
+          const stream = client.messages.stream({
+            model: 'claude-opus-5',
+            max_tokens: ADVISOR_MAX_TOKENS,
+            thinking: { type: 'adaptive' },
+            output_config: { effort: 'medium' },
+            // Rates, comps and local market conditions are the whole reason
+            // this advice is worth anything, and all three are perishable.
+            // 'direct' skips dynamic filtering, which would route the search
+            // through code execution — heavier than this needs.
+            tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: ADVISOR_MAX_SEARCHES, allowed_callers: ['direct'] }],
+            system: [
+              // Everything up to this breakpoint is identical on every request
+              // from every user, so it is worth caching.
+              { type: 'text', text: ADVISOR_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
+              // Per-session and per-day, so it sits AFTER the breakpoint.
+              { type: 'text', text: advisorContextBlock(session.propertyContext) },
+            ],
+            messages: turns,
+          })
+          message = await stream.finalMessage()
+          if (message.stop_reason !== 'pause_turn') break
+          turns.push({ role: 'assistant', content: message.content })
+        }
+        if (!message) throw new HttpsError('internal', 'The advisor didn\'t respond. Please try again.')
         if (message.stop_reason === 'refusal') {
           throw new HttpsError('failed-precondition', 'The advisor couldn\'t answer that one. Try rephrasing it.')
         }
+        const searches = message.usage?.server_tool_use?.web_search_requests ?? 0
+        if (searches) console.log(`askPropertyAdvisor user=${userId} searches=${searches}`)
+        // Text blocks only — the search result blocks are the model's raw
+        // working, not something to store or show.
         return message.content
           .filter(b => b.type === 'text')
           .map(b => (b as Anthropic.TextBlock).text)

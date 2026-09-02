@@ -450,10 +450,11 @@ function DashboardHome({ counts, onPick, onBox, onPhotos, onQuickAdd, userName }
         <p style={{ margin: 0, color: '#64748b', fontSize: isMobile ? '14px' : '15px' }}>Here's where things stand today.</p>
       </div>
 
-      {/* Quick actions — Quick Add (voice) + Schedule, as two slim secondary
-          bars. Kept visually QUIET (no heavy gradients) so the orange Quick
-          Quote hero further down stays the single primary anchor on the page. */}
-      <div className="bp-rise" style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: isMobile ? '12px' : '16px', marginBottom: isMobile ? '28px' : '36px', animationDelay: '0.09s' }}>
+      {/* Quick actions — Quick Add (voice), Schedule and Property Advisor, as
+          three slim secondary bars. Kept visually QUIET (no heavy gradients) so
+          the orange Quick Quote hero further down stays the single primary
+          anchor on the page. */}
+      <div className="bp-rise" style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, 1fr)', gap: isMobile ? '12px' : '16px', marginBottom: isMobile ? '28px' : '36px', animationDelay: '0.09s' }}>
         {/* Voice Quick-Add — tap, talk, and it lands on the calendar. */}
         <button
           onClick={onQuickAdd}
@@ -495,6 +496,29 @@ function DashboardHome({ counts, onPick, onBox, onPhotos, onQuickAdd, userName }
             <div>
               <div style={{ fontWeight: 700, fontSize: isMobile ? '15px' : '16px', color: NAVY }}>Schedule</div>
               <div style={{ fontSize: isMobile ? '12px' : '13px', color: '#64748b' }}>See & set your upcoming job dates</div>
+            </div>
+          </div>
+          <span style={{ color: ORANGE, fontWeight: 800, fontSize: '18px' }}>›</span>
+        </button>
+
+        {/* Property Advisor — the buy/sell/flip second opinion. */}
+        <button
+          onClick={() => onPick('property-advisor')}
+          style={{
+            width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            gap: '12px', background: 'white', color: NAVY,
+            border: '1px solid #e8ecf1', borderRadius: '12px', padding: isMobile ? '14px 16px' : '16px 18px',
+            cursor: 'pointer', boxShadow: '0 1px 2px rgba(15,23,42,0.04), 0 8px 24px rgba(15,23,42,0.06)',
+            transition: 'transform 0.1s, border-color 0.1s',
+          }}
+          onMouseOver={e => { e.currentTarget.style.borderColor = ORANGE; e.currentTarget.style.transform = 'translateY(-1px)' }}
+          onMouseOut={e => { e.currentTarget.style.borderColor = '#e8ecf1'; e.currentTarget.style.transform = 'translateY(0)' }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', textAlign: 'left' }}>
+            <span style={{ fontSize: isMobile ? '24px' : '28px' }}>🏚️</span>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: isMobile ? '15px' : '16px', color: NAVY }}>Property Advisor</div>
+              <div style={{ fontSize: isMobile ? '12px' : '13px', color: '#64748b' }}>Buying, selling or flipping — ask before you commit</div>
             </div>
           </div>
           <span style={{ color: ORANGE, fontWeight: 800, fontSize: '18px' }}>›</span>

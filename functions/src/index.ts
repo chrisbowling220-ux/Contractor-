@@ -1241,10 +1241,20 @@ export const transcribeAudio = onCall<TranscribeCallPayload>(
 // the phone-voice path — so the caps below cannot generate a charge beyond
 // what the plan already costs, whatever they are set to.
 //
-// The same ElevenLabs account is shared with other projects, and BuildPro+
-// cannot see what they've spent. That's why the account cap here is a SHARE of
-// the plan, not the whole plan: leaving headroom is the only way the other
-// consumers don't get starved by a busy month here.
+// The account-wide ceiling is NOT a number we pick. It used to be, and a
+// guessed number was wrong in both directions at once:
+//
+//   • Our counter resets on the 1st (calendar month, UTC). The plan resets on
+//     the 8th. A cap of N per calendar month can therefore spend 2N inside a
+//     single billing cycle, because two of our months overlap one of theirs.
+//     Every fixed number we could pick was either too low to use the plan or
+//     too high to be a real limit.
+//   • Other things share this ElevenLabs account, and a hardcoded share can't
+//     see what they've actually spent.
+//
+// So we ask ElevenLabs what's left and cap against THAT, cached briefly so it's
+// one extra call every few minutes rather than one per readback. The fixed
+// number below survives only as the fallback for when that lookup fails.
 // ──────────────────────────────────────────────────────────────────────────
 
 // One voice for everything the app says out loud. Keep this as the single
@@ -1257,12 +1267,43 @@ const ELEVENLABS_MODEL_ID = 'eleven_flash_v2_5'      // lowest latency; quality 
 const ELEVENLABS_OUTPUT_FORMAT = 'mp3_22050_32'
 
 const TTS_MAX_CHARS_PER_CALL = 1200        // ~90 seconds of speech
-// ~20 spoken advisor answers a month (they run about 400 chars each), on top of
-// schedule readbacks — enough that a normal week of use never hits the wall.
-const TTS_USER_MONTHLY_CHARS = 8000        // per contractor, per month
-// Roughly half the plan's cycle allowance. The rest is headroom for the other
-// projects on this key; raise it if BuildPro+ ends up the only consumer.
-const TTS_ACCOUNT_MONTHLY_CHARS = 20000    // whole account, per month
+// ~30 spoken advisor answers a month (they run about 400 chars each), on top of
+// schedule readbacks. This one is about fairness between contractors, not about
+// the bill — the plan's own remaining balance is what actually stops us.
+const TTS_USER_MONTHLY_CHARS = 12000       // per contractor, per month
+// Used ONLY when ElevenLabs can't be reached for the real number.
+const TTS_ACCOUNT_FALLBACK_CHARS = 18000   // 2x this still fits one billing cycle
+// Left unspent on the plan for anything else sharing this account, so a busy
+// month here can't take the last of it.
+const TTS_PLAN_RESERVE_CHARS = 2000
+const TTS_QUOTA_CACHE_MS = 5 * 60 * 1000
+
+// What the plan has left, straight from ElevenLabs. Cached in module scope: a
+// warm instance answers from memory, and a cold one pays one extra request.
+// Decremented locally after each synthesis so several readbacks inside the
+// cache window still count down instead of all seeing the same stale number.
+let planQuota: { remaining: number; fetchedAt: number } | null = null
+
+async function elevenLabsRemainingChars(): Promise<number | null> {
+  const now = Date.now()
+  if (planQuota && now - planQuota.fetchedAt < TTS_QUOTA_CACHE_MS) return planQuota.remaining
+  try {
+    const res = await fetch('https://api.elevenlabs.io/v1/user/subscription', {
+      headers: { 'xi-api-key': ELEVENLABS_API_KEY.value() },
+    })
+    if (!res.ok) return null
+    const sub = await res.json() as { character_count?: number; character_limit?: number }
+    if (typeof sub.character_count !== 'number' || typeof sub.character_limit !== 'number') return null
+    const remaining = Math.max(0, sub.character_limit - sub.character_count)
+    planQuota = { remaining, fetchedAt: now }
+    return remaining
+  } catch (err) {
+    // Never let a quota lookup be the thing that breaks read-aloud — the
+    // fallback cap covers us, and the caller degrades to the phone voice.
+    console.error('ElevenLabs quota lookup failed:', err)
+    return null
+  }
+}
 
 interface SynthesizeInput {
   text: string
@@ -1322,9 +1363,20 @@ export const synthesizeSpeech = onCall<SynthesizeCallPayload>(
 
     // Refuse BEFORE spending. 'resource-exhausted' is the client's signal to
     // fall back to the built-in phone voice rather than show an error.
-    if (accountUsed + characters > TTS_ACCOUNT_MONTHLY_CHARS) {
-      console.warn(`synthesizeSpeech account cap hit month=${month} used=${accountUsed}`)
-      throw new HttpsError('resource-exhausted', 'Read-aloud has used its budget for this month.')
+    const planRemaining = await elevenLabsRemainingChars()
+    let accountRemaining: number
+    if (planRemaining !== null) {
+      accountRemaining = Math.max(0, planRemaining - TTS_PLAN_RESERVE_CHARS)
+      if (characters > accountRemaining) {
+        console.warn(`synthesizeSpeech plan quota hit planRemaining=${planRemaining} need=${characters}`)
+        throw new HttpsError('resource-exhausted', 'Read-aloud has used its budget for this month.')
+      }
+    } else {
+      accountRemaining = Math.max(0, TTS_ACCOUNT_FALLBACK_CHARS - accountUsed)
+      if (accountUsed + characters > TTS_ACCOUNT_FALLBACK_CHARS) {
+        console.warn(`synthesizeSpeech fallback cap hit month=${month} used=${accountUsed}`)
+        throw new HttpsError('resource-exhausted', 'Read-aloud has used its budget for this month.')
+      }
     }
     if (userUsed + characters > TTS_USER_MONTHLY_CHARS) {
       console.warn(`synthesizeSpeech user cap hit user=${userId} month=${month} used=${userUsed}`)
@@ -1366,6 +1418,7 @@ export const synthesizeSpeech = onCall<SynthesizeCallPayload>(
     }
 
     // Only bill the budget once the audio actually came back.
+    if (planQuota) planQuota.remaining = Math.max(0, planQuota.remaining - characters)
     const stamp = new Date().toISOString()
     await Promise.all([
       userRef.set({
@@ -1389,7 +1442,7 @@ export const synthesizeSpeech = onCall<SynthesizeCallPayload>(
       truncated: characters < raw.length,
       // Client uses these to warn the contractor before they hit the wall.
       remainingUserChars: Math.max(0, TTS_USER_MONTHLY_CHARS - (userUsed + characters)),
-      remainingAccountChars: Math.max(0, TTS_ACCOUNT_MONTHLY_CHARS - (accountUsed + characters)),
+      remainingAccountChars: Math.max(0, accountRemaining - characters),
     }
   },
 )

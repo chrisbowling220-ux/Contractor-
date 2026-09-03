@@ -11,6 +11,7 @@ import { initializeApp } from 'firebase-admin/app'
 import { getFirestore, FieldValue, Firestore } from 'firebase-admin/firestore'
 import { getAuth, Auth } from 'firebase-admin/auth'
 import { aiQuoteSchema, changeOrderSchema, ARITHMETIC_RULES } from './aiQuoteSchema'
+import { PROPERTY_LOOKUP_PROMPT, PROPERTY_EXTRACT_PROMPT, PROPERTY_RECORD_SCHEMA, PropertyRecord } from './propertyLookup'
 
 // Lazy-init Firebase Admin — do NOT initialize at module load. The Firebase
 // deploy tool parses this file before runtime env vars are available, and
@@ -3448,6 +3449,9 @@ interface AdvisorPropertyContext {
 interface AdvisorSessionDoc {
   createdBy?: string
   propertyContext?: AdvisorPropertyContext
+  // Written by lookupProperty, not by the user. Absent on sessions started from
+  // the describe-it-yourself form, and on everything created before lookups existed.
+  propertyRecord?: PropertyRecord
 }
 
 // The property, written the way a person would say it out loud. Only the fields
@@ -3577,6 +3581,191 @@ async function consumeAdvisorMessageOrThrow(userId: string): Promise<{ tier: 'fr
   })
 }
 
+// ── Address lookup ────────────────────────────────────────────────────────
+// The advisor's front door for an agent or a buyer standing in the driveway:
+// type the address, get the house. What's it listed for, what is it, what
+// sold nearby, what should you know before you walk in — without opening the
+// MLS, calling the listing agent, or filling out a six-field form first.
+//
+// Two model calls on purpose. The research pass needs web search, and search
+// answers come back carrying citations, which structured outputs reject with a
+// 400. So the search pass writes notes in prose, and a second, cheap, tool-free
+// pass turns those notes into the typed record the card renders from. The split
+// also keeps the extraction honest — it can only fill a field the research pass
+// actually wrote down, so a blank stays blank instead of becoming a guess.
+
+/** Generous next to the advisor's 3: a house is a listing site AND county records AND comps AND the local market, and this runs once per property rather than once per question. */
+const LOOKUP_MAX_SEARCHES = 8
+const LOOKUP_MAX_TOKENS = 8000
+const LOOKUP_MAX_ADDRESS_CHARS = 200
+
+// What the chat advisor is told about the house, once a lookup has run. Written
+// as lines a person would say rather than as JSON: the model reads it as
+// context, and a wall of nulls would only teach it that blanks are normal here.
+function propertyRecordBlock(rec: PropertyRecord | undefined): string {
+  if (!rec || !rec.found) return ''
+  const L: string[] = []
+  const money = (n: number | null) => (typeof n === 'number' && n > 0 ? `$${Math.round(n).toLocaleString('en-US')}` : null)
+  const statusWord: Record<string, string> = {
+    for_sale: 'ACTIVE — on the market now', pending: 'PENDING', contingent: 'UNDER CONTRACT (contingent)',
+    sold: 'SOLD — off the market', off_market: 'NOT currently listed', for_rent: 'listed FOR RENT', unknown: 'market status unconfirmed',
+  }
+  if (rec.normalizedAddress) L.push(`Address of record: ${rec.normalizedAddress}`)
+  L.push(`Status: ${statusWord[rec.status] ?? rec.status}${rec.statusNote ? ` (${rec.statusNote})` : ''}`)
+  if (rec.listPrice) L.push(`ASKING price: ${money(rec.listPrice)}${rec.daysOnMarket !== null ? ` · ${rec.daysOnMarket} days on market` : ''}`)
+  if (rec.priceHistoryNote) L.push(`Price history: ${rec.priceHistoryNote}`)
+  if (rec.estimatedValue) L.push(`Published ESTIMATE (not the asking price): ${money(rec.estimatedValue)}${rec.estimateSource ? ` per ${rec.estimateSource}` : ''}`)
+  if (rec.lastSoldPrice) L.push(`Last SOLD for ${money(rec.lastSoldPrice)}${rec.lastSoldDate ? ` in ${rec.lastSoldDate}` : ''}`)
+  const shape = [
+    rec.beds !== null ? `${rec.beds} bed` : null,
+    rec.baths !== null ? `${rec.baths} bath` : null,
+    rec.sqft !== null ? `${rec.sqft.toLocaleString('en-US')} sq ft` : null,
+    rec.lotSizeAcres !== null ? `${rec.lotSizeAcres} acre lot` : null,
+    rec.yearBuilt !== null ? `built ${rec.yearBuilt}` : null,
+    rec.propertyType,
+  ].filter(Boolean)
+  if (shape.length) L.push(`The house: ${shape.join(' · ')}`)
+  if (rec.listPrice && rec.sqft) L.push(`Price per square foot: $${Math.round(rec.listPrice / rec.sqft)}`)
+  const carry = [
+    rec.annualTaxes ? `taxes ${money(rec.annualTaxes)}/yr` : null,
+    rec.hoaMonthly ? `HOA ${money(rec.hoaMonthly)}/mo` : null,
+    rec.taxAssessedValue ? `assessed at ${money(rec.taxAssessedValue)}` : null,
+    rec.parcelId ? `parcel ${rec.parcelId}` : null,
+  ].filter(Boolean)
+  if (carry.length) L.push(`Carrying costs and records: ${carry.join(' · ')}`)
+  if (rec.extraFacts.length) L.push(`Also on record: ${rec.extraFacts.map(f => `${f.label}: ${f.value}`).join(' · ')}`)
+  if (rec.highlights.length) L.push(`Selling points: ${rec.highlights.join(' · ')}`)
+  if (rec.watchOuts.length) L.push(`Worth a hard look: ${rec.watchOuts.join(' · ')}`)
+  if (rec.comps.length) {
+    L.push('Nearby comparable sales:')
+    for (const c of rec.comps.slice(0, 6)) L.push(`  - ${c.address} — ${c.detail}`)
+  }
+  if (rec.marketNote) L.push(`Local market: ${rec.marketNote}`)
+  if (rec.unconfirmed.length) L.push(`NOT confirmed by the lookup — treat as unknown, and say so rather than assuming: ${rec.unconfirmed.join('; ')}`)
+
+  return `\n\nWHAT THE ADDRESS LOOKUP FOUND (public listings and county records, pulled ${rec.lookedUpAt ? `on ${rec.lookedUpAt.slice(0, 10)}` : 'recently'}, confidence ${rec.confidence}):
+${L.join('\n')}
+
+Use these numbers as the starting point for anything you're asked about this property — you do not need to search again for what's already listed here, and you should not contradict it without saying why. A field listed as not confirmed is genuinely unknown: name it as a call they still need to make instead of filling it in with what's typical.`
+}
+
+export const lookupProperty = onCall<{ clerkToken: string; input: { address: string; sessionId?: string } }>(
+  {
+    secrets: [ANTHROPIC_API_KEY, CLERK_SECRET_KEY],
+    timeoutSeconds: 300,
+    memory: '512MiB',
+    cors: true,
+  },
+  async (request) => {
+    const { clerkToken, input } = request.data ?? {} as { clerkToken: string; input: { address: string; sessionId?: string } }
+    if (!clerkToken) throw new HttpsError('unauthenticated', 'Missing Clerk token')
+    const address = (input?.address || '').trim()
+    if (!address) throw new HttpsError('invalid-argument', 'Enter an address to look up')
+    if (address.length > LOOKUP_MAX_ADDRESS_CHARS) throw new HttpsError('invalid-argument', 'That address is too long — street, city and state is enough.')
+
+    const userId = await verifyClerk(clerkToken)
+    const db = getAdminDb()
+
+    // A lookup is two model calls and up to eight searches — more expensive
+    // than a question, and metered on the same allowance so a free account
+    // can't loop it.
+    const gate = await consumeAdvisorMessageOrThrow(userId)
+
+    const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() })
+    const today = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', dateStyle: 'full' }).format(new Date())
+    let record: PropertyRecord
+    try {
+      const notes = await withAnthropicRetry('lookupProperty:research', async () => {
+        const turns: Anthropic.MessageParam[] = [{ role: 'user', content: `Look up this property: ${address}` }]
+        let message: Anthropic.Message | null = null
+        // Web search runs its own loop server-side and can hand back
+        // 'pause_turn' partway through; feed the paused turn straight back.
+        for (let i = 0; i < 4; i++) {
+          const stream = client.messages.stream({
+            model: 'claude-opus-5',
+            max_tokens: LOOKUP_MAX_TOKENS,
+            thinking: { type: 'adaptive' },
+            output_config: { effort: 'medium' },
+            tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: LOOKUP_MAX_SEARCHES, allowed_callers: ['direct'] }],
+            system: [{ type: 'text', text: PROPERTY_LOOKUP_PROMPT, cache_control: { type: 'ephemeral', ttl: '1h' } },
+              { type: 'text', text: `TODAY IS ${today}. Anything you remember about this market is out of date — look it up.` }],
+            messages: turns,
+          })
+          message = await stream.finalMessage()
+          if (message.stop_reason !== 'pause_turn') break
+          turns.push({ role: 'assistant', content: message.content })
+        }
+        if (!message) throw new HttpsError('internal', 'The lookup didn\'t come back. Try again.')
+        if (message.stop_reason === 'refusal') throw new HttpsError('failed-precondition', 'The lookup couldn\'t run on that address.')
+        console.log(`lookupProperty user=${userId} searches=${message.usage?.server_tool_use?.web_search_requests ?? 0}`)
+        return message.content.filter(b => b.type === 'text').map(b => (b as Anthropic.TextBlock).text).join('\n').trim()
+      })
+
+      if (!notes) throw new HttpsError('internal', 'The lookup came back empty. Try again.')
+
+      // Second pass: notes in, typed record out. No tools, so no citations, so
+      // structured output is allowed to constrain it.
+      record = await withAnthropicRetry('lookupProperty:extract', async () => {
+        const stream = client.messages.stream({
+          model: 'claude-sonnet-5',
+          max_tokens: LOOKUP_MAX_TOKENS,
+          output_config: { effort: 'low', format: { type: 'json_schema', schema: PROPERTY_RECORD_SCHEMA as unknown as Record<string, unknown> } },
+          system: PROPERTY_EXTRACT_PROMPT,
+          messages: [{ role: 'user', content: `Address as the user typed it: ${address}\n\nRESEARCH NOTES:\n${notes}` }],
+        })
+        const message = await stream.finalMessage()
+        const text = message.content.filter(b => b.type === 'text').map(b => (b as Anthropic.TextBlock).text).join('').trim()
+        return JSON.parse(text) as PropertyRecord
+      })
+    } catch (err) {
+      await refundAdvisorMessage(userId)
+      if (err instanceof HttpsError) throw err
+      console.error('lookupProperty failed:', err)
+      throw new HttpsError('internal', friendlyAnthropicError(err))
+    }
+
+    record.lookedUpAt = new Date().toISOString()
+    console.log(`lookupProperty user=${userId} found=${record.found} status=${record.status} list=${record.listPrice ?? 'null'} conf=${record.confidence}`)
+
+    // The lookup is also the intake form: what it found becomes the property
+    // context the chat advisor already had, so the first question can be asked
+    // without filling anything in.
+    const context: AdvisorPropertyContext = {
+      location: record.normalizedAddress || address,
+      propertyType: record.propertyType,
+      yearBuilt: record.yearBuilt,
+      priceContext: record.listPrice ?? record.lastSoldPrice ?? record.estimatedValue,
+      userGoal: 'buying',
+      conditionNotes: record.watchOuts.length ? record.watchOuts.join('; ') : null,
+    }
+
+    const nowISO = new Date().toISOString()
+    let sessionId = (input?.sessionId || '').trim()
+    if (sessionId) {
+      const ref = db.collection('propertyAdvisorSessions').doc(sessionId)
+      const snap = await ref.get()
+      if (!snap.exists) throw new HttpsError('not-found', 'That property session no longer exists')
+      if ((snap.data() as AdvisorSessionDoc).createdBy !== userId) throw new HttpsError('permission-denied', 'That property session belongs to someone else')
+      // Re-running a lookup replaces the record but leaves the goal and any
+      // condition notes the user typed themselves — those are theirs, not ours.
+      const existing = (snap.data() as AdvisorSessionDoc).propertyContext ?? {}
+      await ref.set({
+        propertyRecord: record,
+        propertyContext: { ...context, userGoal: existing.userGoal ?? context.userGoal, conditionNotes: existing.conditionNotes ?? context.conditionNotes },
+        updatedAt: nowISO,
+      }, { merge: true })
+    } else {
+      const ref = await db.collection('propertyAdvisorSessions').add({
+        createdBy: userId, createdAt: nowISO, updatedAt: nowISO,
+        propertyContext: context, propertyRecord: record,
+      })
+      sessionId = ref.id
+    }
+
+    return { sessionId, record, monthlyRemaining: gate.monthlyRemaining, tier: gate.tier }
+  },
+)
+
 export const askPropertyAdvisor = onCall<{ clerkToken: string; input: { sessionId: string; message: string } }>(
   {
     secrets: [ANTHROPIC_API_KEY, CLERK_SECRET_KEY],
@@ -3656,7 +3845,7 @@ export const askPropertyAdvisor = onCall<{ clerkToken: string; input: { sessionI
               // apart, and one write an hour beats a write every five minutes.
               { type: 'text', text: ADVISOR_SYSTEM_PROMPT + ADVISOR_COST_REFERENCE, cache_control: { type: 'ephemeral', ttl: '1h' } },
               // Per-session, per-day and per-week, so it sits AFTER the breakpoint.
-              { type: 'text', text: marketPrices + advisorContextBlock(session.propertyContext) },
+              { type: 'text', text: marketPrices + advisorContextBlock(session.propertyContext) + propertyRecordBlock(session.propertyRecord) },
             ],
             messages: turns,
           })

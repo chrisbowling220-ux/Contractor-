@@ -18,6 +18,49 @@ const askCallable = httpsCallable<
   { reply: string; spoken: string; monthlyRemaining: number | null; tier: 'free' | 'pro' }
 >(functions, 'askPropertyAdvisor')
 
+// Mirrors the record schema in functions/src/propertyLookup.ts. Numbers are
+// nullable because a blank and a zero mean different things; text fields use an
+// empty string for "not confirmed", which is what the schema's union budget
+// allowed.
+export interface PropertyRecord {
+  found: boolean
+  confidence: 'high' | 'medium' | 'low'
+  normalizedAddress: string
+  status: 'for_sale' | 'pending' | 'contingent' | 'sold' | 'off_market' | 'for_rent' | 'unknown'
+  statusNote: string
+  listPrice: number | null
+  priceHistoryNote: string
+  estimatedValue: number | null
+  estimateSource: string
+  lastSoldPrice: number | null
+  lastSoldDate: string
+  beds: number | null
+  baths: number | null
+  sqft: number | null
+  lotSizeAcres: number | null
+  yearBuilt: number | null
+  propertyType: string
+  daysOnMarket: number | null
+  hoaMonthly: number | null
+  annualTaxes: number | null
+  taxAssessedValue: number | null
+  parcelId: string
+  extraFacts: { label: string; value: string }[]
+  highlights: string[]
+  watchOuts: string[]
+  comps: { address: string; detail: string }[]
+  marketNote: string
+  unconfirmed: string[]
+  sources: { label: string; url: string; asOf: string }[]
+  summary: string
+  lookedUpAt?: string
+}
+
+const lookupCallable = httpsCallable<
+  { clerkToken: string; input: { address: string; sessionId?: string } },
+  { sessionId: string; record: PropertyRecord; monthlyRemaining: number | null; tier: 'free' | 'pro' }
+>(functions, 'lookupProperty')
+
 const transcribeCallable = httpsCallable<
   { clerkToken: string; input: { audioBase64: string; mimeType: string } },
   { transcript: string }
@@ -62,6 +105,8 @@ interface AdvisorSession {
   updatedAt?: string
   lastMessagePreview?: string
   propertyContext?: PropertyContext
+  // Present once an address lookup has run against this property.
+  propertyRecord?: PropertyRecord
 }
 
 interface AdvisorMessage {
@@ -82,6 +127,17 @@ const GOALS: { key: Goal; label: string; hint: string }[] = [
   { key: 'researching', label: 'Just looking', hint: 'Getting a feel for it' },
 ]
 
+// Shown in order while a lookup runs, ~14s apart. They are the real steps, not
+// filler — someone watching should be able to tell where it got to if it fails.
+const LOOKUP_STAGES = [
+  'Finding the property…',
+  'Checking the listing sites…',
+  'Pulling county and tax records…',
+  'Looking at what sold nearby…',
+  'Reading the local market…',
+  'Putting it together…',
+]
+
 // The three domains, one button each, so the first question is never a blank page.
 const QUICK_PROMPTS = [
   { label: 'Is this a good deal?', text: 'Is this a good deal? Walk me through the numbers.' },
@@ -93,6 +149,7 @@ const QUICK_PROMPTS = [
 // enough of the other details to tell two houses apart.
 function sessionTitle(s: AdvisorSession): string {
   const c = s.propertyContext ?? {}
+  if (s.propertyRecord?.normalizedAddress) return s.propertyRecord.normalizedAddress
   if (c.location) return c.location
   const parts = [c.propertyType, c.yearBuilt ? `built ${c.yearBuilt}` : null].filter(Boolean)
   return parts.length ? parts.join(' · ') : 'Untitled property'
@@ -135,6 +192,211 @@ function inline(s: string) {
   )
 }
 
+// ── The property card ────────────────────────────────────────────────────
+// What the lookup found, laid out the way someone reads it standing in the
+// driveway: what they're asking, what the house is, then everything else
+// folded away until they want it. Two rules the layout enforces —
+//
+//   1. Asking price, published estimate and last sold price never share a
+//      styling. Confusing those three is the expensive mistake.
+//   2. What the lookup could NOT confirm gets its own block, as prominent as
+//      the facts. A gap the buyer knows about is worth as much as a fact.
+
+const STATUS_STYLE: Record<PropertyRecord['status'], { label: string; bg: string; fg: string }> = {
+  for_sale: { label: 'On the market', bg: '#dcfce7', fg: '#166534' },
+  pending: { label: 'Pending', bg: '#fef3c7', fg: '#92400e' },
+  contingent: { label: 'Under contract', bg: '#fef3c7', fg: '#92400e' },
+  sold: { label: 'Sold', bg: '#e2e8f0', fg: '#334155' },
+  off_market: { label: 'Not listed', bg: '#e2e8f0', fg: '#334155' },
+  for_rent: { label: 'For rent', bg: '#dbeafe', fg: '#1e40af' },
+  unknown: { label: 'Status unconfirmed', bg: '#f1f5f9', fg: '#64748b' },
+}
+
+function usd(n: number | null | undefined): string {
+  return typeof n === 'number' && n > 0 ? `$${Math.round(n).toLocaleString('en-US')}` : ''
+}
+
+function Fold({ title, count, children }: { title: string; count?: number; children: React.ReactNode }) {
+  return (
+    <details style={{ borderTop: '1px solid #eef2f6', paddingTop: '10px', marginTop: '10px' }}>
+      <summary style={{ cursor: 'pointer', fontSize: '13px', fontWeight: 700, color: NAVY, listStyle: 'revert' }}>
+        {title}{typeof count === 'number' && count > 0 ? ` (${count})` : ''}
+      </summary>
+      <div style={{ marginTop: '8px' }}>{children}</div>
+    </details>
+  )
+}
+
+function Bullets({ items, color }: { items: string[]; color: string }) {
+  return (
+    <ul style={{ margin: 0, paddingLeft: '18px', display: 'grid', gap: '5px' }}>
+      {items.map((t, i) => <li key={i} style={{ fontSize: '13px', lineHeight: 1.5, color }}>{t}</li>)}
+    </ul>
+  )
+}
+
+function PropertyCard({ rec, onRefresh, refreshing }: { rec: PropertyRecord; onRefresh: () => void; refreshing: boolean }) {
+  const st = STATUS_STYLE[rec.status] ?? STATUS_STYLE.unknown
+  const shape = [
+    rec.beds !== null ? `${rec.beds} bed` : '',
+    rec.baths !== null ? `${rec.baths} bath` : '',
+    rec.sqft !== null ? `${rec.sqft.toLocaleString('en-US')} sq ft` : '',
+    rec.lotSizeAcres !== null ? `${rec.lotSizeAcres} ac lot` : '',
+    rec.yearBuilt !== null ? `built ${rec.yearBuilt}` : '',
+    rec.propertyType,
+  ].filter(Boolean).join('  ·  ')
+  const perSqft = rec.listPrice && rec.sqft ? Math.round(rec.listPrice / rec.sqft) : null
+
+  // Every money figure that isn't the asking price, kept visually subordinate
+  // to it and always labelled with what kind of number it is.
+  const moneyRows: { k: string; v: string }[] = [
+    { k: 'Published estimate', v: rec.estimatedValue ? `${usd(rec.estimatedValue)}${rec.estimateSource ? ` · ${rec.estimateSource}` : ''}` : '' },
+    { k: 'Last sold', v: rec.lastSoldPrice ? `${usd(rec.lastSoldPrice)}${rec.lastSoldDate ? ` · ${rec.lastSoldDate}` : ''}` : '' },
+    { k: 'Taxes', v: rec.annualTaxes ? `${usd(rec.annualTaxes)}/yr` : '' },
+    { k: 'HOA', v: rec.hoaMonthly ? `${usd(rec.hoaMonthly)}/mo` : '' },
+    { k: 'County assessed', v: usd(rec.taxAssessedValue) },
+    { k: 'Parcel', v: rec.parcelId },
+  ].filter(r => r.v)
+
+  if (!rec.found) {
+    return (
+      <div style={{ ...card, marginBottom: '14px', borderColor: '#fed7aa', background: '#fff7ed' }}>
+        <div style={{ fontWeight: 800, color: '#9a3412', fontSize: '15px' }}>Couldn't find that address</div>
+        <p style={{ fontSize: '13px', color: '#7c2d12', lineHeight: 1.55, margin: '6px 0 0' }}>{rec.summary}</p>
+        <p style={{ fontSize: '12px', color: '#9a3412', margin: '8px 0 0' }}>
+          Check the street spelling and the city, or just describe the place and ask anyway — the advisor
+          works fine without a record.
+        </p>
+        <button onClick={onRefresh} disabled={refreshing} style={{ ...secondaryBtn, marginTop: '10px' }}>
+          {refreshing ? 'Looking…' : 'Try the lookup again'}
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ ...card, marginBottom: '14px', padding: '16px' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', flexWrap: 'wrap' }}>
+        <div style={{ flex: '1 1 220px', minWidth: 0 }}>
+          <div style={{ fontWeight: 800, fontSize: '16px', color: NAVY, lineHeight: 1.3 }}>
+            {rec.normalizedAddress || 'This property'}
+          </div>
+          {shape && <div style={{ fontSize: '13px', color: '#64748b', marginTop: '4px' }}>{shape}</div>}
+        </div>
+        <span style={{ background: st.bg, color: st.fg, borderRadius: '999px', padding: '5px 11px', fontSize: '12px', fontWeight: 800, whiteSpace: 'nowrap' }}>
+          {st.label}
+        </span>
+      </div>
+
+      {rec.listPrice ? (
+        <div style={{ marginTop: '12px' }}>
+          <div style={{ fontSize: '28px', fontWeight: 800, color: NAVY, lineHeight: 1.1 }}>{usd(rec.listPrice)}</div>
+          <div style={{ fontSize: '12px', color: '#64748b', marginTop: '3px' }}>
+            {['asking', perSqft ? `$${perSqft}/sq ft` : '', rec.daysOnMarket !== null ? `${rec.daysOnMarket} days on market` : ''].filter(Boolean).join('  ·  ')}
+          </div>
+        </div>
+      ) : (
+        <div style={{ marginTop: '12px', fontSize: '14px', fontWeight: 700, color: '#475569' }}>
+          {rec.statusNote || 'No asking price found — it is not on the market right now.'}
+        </div>
+      )}
+      {rec.listPrice && rec.statusNote && (
+        <div style={{ fontSize: '12px', color: '#64748b', marginTop: '4px' }}>{rec.statusNote}</div>
+      )}
+      {rec.priceHistoryNote && (
+        <div style={{ fontSize: '12px', color: '#b45309', marginTop: '6px', fontWeight: 600 }}>{rec.priceHistoryNote}</div>
+      )}
+
+      {rec.summary && (
+        <p style={{ fontSize: '13px', lineHeight: 1.6, color: '#334155', margin: '12px 0 0', paddingTop: '12px', borderTop: '1px solid #eef2f6' }}>
+          {rec.summary}
+        </p>
+      )}
+
+      {moneyRows.length > 0 && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '8px', marginTop: '12px' }}>
+          {moneyRows.map(r => (
+            <div key={r.k} style={{ background: '#f8fafc', borderRadius: '10px', padding: '8px 10px' }}>
+              <div style={{ fontSize: '11px', color: '#94a3b8', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.03em' }}>{r.k}</div>
+              <div style={{ fontSize: '13px', color: NAVY, fontWeight: 700, marginTop: '2px' }}>{r.v}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {rec.watchOuts.length > 0 && (
+        <div style={{ marginTop: '12px', background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: '12px', padding: '10px 12px' }}>
+          <div style={{ fontSize: '12px', fontWeight: 800, color: '#9a3412', marginBottom: '6px' }}>Look at these hard</div>
+          <Bullets items={rec.watchOuts} color="#7c2d12" />
+        </div>
+      )}
+
+      {rec.unconfirmed.length > 0 && (
+        <Fold title="Still needs a call — the lookup could not confirm this" count={rec.unconfirmed.length}>
+          <Bullets items={rec.unconfirmed} color="#64748b" />
+        </Fold>
+      )}
+      {rec.highlights.length > 0 && (
+        <Fold title="What is good about it" count={rec.highlights.length}>
+          <Bullets items={rec.highlights} color="#334155" />
+        </Fold>
+      )}
+      {rec.extraFacts.length > 0 && (
+        <Fold title="On the record" count={rec.extraFacts.length}>
+          <div style={{ display: 'grid', gap: '6px' }}>
+            {rec.extraFacts.map((f, i) => (
+              <div key={i} style={{ fontSize: '13px', lineHeight: 1.5 }}>
+                <span style={{ color: '#64748b', fontWeight: 700 }}>{f.label}: </span>
+                <span style={{ color: NAVY }}>{f.value}</span>
+              </div>
+            ))}
+          </div>
+        </Fold>
+      )}
+      {rec.comps.length > 0 && (
+        <Fold title="Nearby sales" count={rec.comps.length}>
+          <div style={{ display: 'grid', gap: '8px' }}>
+            {rec.comps.map((c, i) => (
+              <div key={i}>
+                <div style={{ fontSize: '13px', fontWeight: 700, color: NAVY }}>{c.address}</div>
+                <div style={{ fontSize: '12px', color: '#64748b', lineHeight: 1.5 }}>{c.detail}</div>
+              </div>
+            ))}
+          </div>
+        </Fold>
+      )}
+      {rec.marketNote && (
+        <Fold title="The local market">
+          <p style={{ fontSize: '13px', lineHeight: 1.6, color: '#334155', margin: 0 }}>{rec.marketNote}</p>
+        </Fold>
+      )}
+      {rec.sources.length > 0 && (
+        <Fold title="Where this came from" count={rec.sources.length}>
+          <div style={{ display: 'grid', gap: '6px' }}>
+            {rec.sources.map((src, i) => (
+              <div key={i} style={{ fontSize: '12px', color: '#64748b', lineHeight: 1.5 }}>
+                {src.url
+                  ? <a href={src.url} target="_blank" rel="noreferrer" style={{ color: '#2563eb', fontWeight: 700 }}>{src.label}</a>
+                  : <span style={{ fontWeight: 700, color: '#475569' }}>{src.label}</span>}
+                {src.asOf ? ` — ${src.asOf}` : ''}
+              </div>
+            ))}
+          </div>
+        </Fold>
+      )}
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginTop: '12px', paddingTop: '10px', borderTop: '1px solid #eef2f6' }}>
+        <span style={{ fontSize: '11px', color: '#94a3b8' }}>
+          Pulled from public listings and county records{rec.lookedUpAt ? ` on ${new Date(rec.lookedUpAt).toLocaleDateString()}` : ''} · {rec.confidence} confidence
+        </span>
+        <button onClick={onRefresh} disabled={refreshing} style={{ ...speakerBtn, marginTop: 0, marginLeft: 'auto' }}>
+          {refreshing ? 'Refreshing…' : '↻ Look it up again'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ── Property Advisor ──────────────────────────────────────────────────────
 // Describe a property once, then keep asking about it. The advisor answers
 // across structure, deal math and resale — the three things you otherwise have
@@ -165,6 +427,17 @@ export default function PropertyAdvisor() {
   const [goal, setGoal] = useState<Goal>('buying')
   const [conditionNotes, setConditionNotes] = useState('')
 
+  // ── Address lookup ──────────────────────────────────────────────────────
+  const [addressInput, setAddressInput] = useState('')
+  const [lookingUp, setLookingUp] = useState(false)
+  const [lookupStage, setLookupStage] = useState('')
+  const [lookupError, setLookupError] = useState('')
+  const stageRef = useRef<number | null>(null)
+  // The mic is shared between asking a question and dictating an address, and
+  // the recorder's onstop fires long after the tap that started it — a ref, not
+  // state, so the handler reads what was true when recording began.
+  const voiceForRef = useRef<'question' | 'address'>('question')
+
   // ── Voice ───────────────────────────────────────────────────────────────
   // One useVoiceOutput for the whole screen, not one per message: two hooks
   // means two voices talking over each other the moment someone taps a second
@@ -194,6 +467,7 @@ export default function PropertyAdvisor() {
   useEffect(() => () => {
     if (tickRef.current) clearInterval(tickRef.current)
     if (autoStopRef.current) clearTimeout(autoStopRef.current)
+    if (stageRef.current) clearInterval(stageRef.current)
     streamRef.current?.getTracks().forEach(t => t.stop())
   }, [])
 
@@ -273,6 +547,40 @@ export default function PropertyAdvisor() {
     setActiveId(ref.id)
   }
 
+  // A lookup is eight searches, two model calls and a read of the county
+  // records — a minute and a half is normal. A bare spinner reads as hung at
+  // that length, so the stages say what it is actually off doing.
+  const runLookup = async (raw: string, sessionId?: string) => {
+    const address = raw.trim()
+    if (!address || lookingUp) return
+    setLookingUp(true); setLookupError(''); setError(''); setNeedsUpgrade(false)
+    let i = 0
+    setLookupStage(LOOKUP_STAGES[0])
+    stageRef.current = window.setInterval(() => {
+      i = Math.min(i + 1, LOOKUP_STAGES.length - 1)
+      setLookupStage(LOOKUP_STAGES[i])
+    }, 14000)
+    try {
+      const clerkToken = await getToken()
+      if (!clerkToken) throw new Error('Sign in again to look up a property.')
+      // With no sessionId this creates the property for us — the lookup is the
+      // intake form, so there is nothing to fill in first.
+      const res = await lookupCallable({ clerkToken, input: { address, sessionId } })
+      setRemaining(res.data.monthlyRemaining)
+      setAddressInput('')
+      setCreating(false)
+      setActiveId(res.data.sessionId)
+    } catch (err) {
+      const code = (err as { code?: string })?.code || ''
+      if (code.includes('permission-denied')) setNeedsUpgrade(true)
+      else setLookupError((err as { message?: string })?.message || 'That lookup didn\'t go through. Try again.')
+    } finally {
+      if (stageRef.current) { clearInterval(stageRef.current); stageRef.current = null }
+      setLookupStage('')
+      setLookingUp(false)
+    }
+  }
+
   const send = async (text: string, speakBack = false) => {
     const question = text.trim()
     if (!question || !activeId || busy) return
@@ -307,7 +615,8 @@ export default function PropertyAdvisor() {
   // Tap to talk, tap to stop — walkie-talkie, not a phone call. Holding a
   // button down is wrong for this: the questions are long enough that a thumb
   // slipping mid-sentence loses the whole thing.
-  const startListening = async () => {
+  const startListening = async (target: 'question' | 'address' = 'question') => {
+    voiceForRef.current = target
     setVoiceError(''); setError(''); setHeard('')
     stopSpeaking()   // don't record the advisor answering the last question
     if (!micSupported) { setVoiceError('This browser can\'t use the mic — type the question instead.'); return }
@@ -354,11 +663,18 @@ export default function PropertyAdvisor() {
       if (!clerkToken) throw new Error('Sign in again to ask the advisor.')
       const audioBase64 = await fileToBase64(blob)
       const res = await transcribeCallable({ clerkToken, input: { audioBase64, mimeType } })
-      const question = (res.data.transcript || '').trim()
+      const said = (res.data.transcript || '').trim()
       setVoicePhase('idle')
-      if (!question) { setVoiceError('Couldn\'t make that out. Try again, or type it.'); return }
-      setHeard(question)
-      await send(question, true)
+      if (!said) { setVoiceError('Couldn\'t make that out. Try again, or type it.'); return }
+      // An address goes in the box and straight into a lookup; a question goes
+      // to the advisor and comes back spoken.
+      if (voiceForRef.current === 'address') {
+        setAddressInput(said)
+        await runLookup(said)
+        return
+      }
+      setHeard(said)
+      await send(said, true)
     } catch (err) {
       setVoicePhase('idle')
       setVoiceError(err instanceof Error ? err.message : 'That didn\'t go through. Try typing it.')
@@ -395,9 +711,73 @@ export default function PropertyAdvisor() {
       <div style={page}>
         <h2 style={h2}>🏚️ Property Advisor</h2>
         <p style={sub}>
-          Describe the property once. Then ask anything about it — what's wrong with it, whether the
-          numbers work, how to sell it. Everything's optional except what you're trying to do.
+          Pull up to a house and put the address in. It goes and finds the place — what they're asking,
+          what the house actually is, what sold nearby, and what nobody has told you yet. Then you can
+          keep asking about it.
         </p>
+
+        <div style={{ ...card, padding: '16px', marginBottom: '14px' }}>
+          <Field label="Property address" hint="Street, city and state. The closer to exact, the better it finds the right house.">
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <input
+                value={addressInput}
+                onChange={e => setAddressInput(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') void runLookup(addressInput) }}
+                placeholder="3400 Brunswick Rd, Greensboro, NC"
+                disabled={lookingUp}
+                style={{ ...input, flex: 1 }}
+              />
+              {micSupported && (
+                <button
+                  onClick={() => (voicePhase === 'listening' ? stopListening() : startListening('address'))}
+                  disabled={lookingUp || voicePhase === 'transcribing'}
+                  aria-label={voicePhase === 'listening' ? 'Stop and look it up' : 'Say the address'}
+                  title={voicePhase === 'listening' ? 'Tap when you\'re done' : 'Say the address'}
+                  style={{ ...primaryBtn, padding: '10px 14px', background: voicePhase === 'listening' ? '#dc2626' : ORANGE }}
+                >
+                  {voicePhase === 'listening' ? '⏹' : '🎤'}
+                </button>
+              )}
+            </div>
+          </Field>
+
+          <button
+            onClick={() => void runLookup(addressInput)}
+            disabled={lookingUp || !addressInput.trim()}
+            style={{ ...primaryBtn, marginTop: '12px', width: '100%', opacity: lookingUp || !addressInput.trim() ? 0.6 : 1 }}
+          >
+            {lookingUp ? 'Looking it up…' : 'Look up this address →'}
+          </button>
+
+          {lookingUp && (
+            <div style={{ fontSize: '13px', color: '#9a3412', marginTop: '10px', fontWeight: 700 }}>
+              {lookupStage}
+              <div style={{ fontSize: '12px', color: '#94a3b8', fontWeight: 400, marginTop: '3px' }}>
+                Takes a minute or two — it's reading listings and county records, not guessing.
+              </div>
+            </div>
+          )}
+          {voicePhase === 'listening' && (
+            <div style={{ fontSize: '12px', color: '#64748b', marginTop: '8px' }}>
+              🎙 Listening — say the address, then tap ⏹ ({VOICE_MAX_SECONDS - elapsed}s left)
+            </div>
+          )}
+          {voicePhase === 'transcribing' && (
+            <div style={{ fontSize: '12px', color: '#64748b', marginTop: '8px' }}>⏳ Getting that down…</div>
+          )}
+          {voiceError && <div style={{ fontSize: '12px', color: '#b45309', marginTop: '8px' }}>⚠ {voiceError}</div>}
+          {lookupError && <div style={{ fontSize: '12px', color: '#b45309', marginTop: '8px' }}>⚠ {lookupError}</div>}
+          {needsUpgrade && (
+            <div style={{ fontSize: '13px', color: '#9a3412', marginTop: '8px', fontWeight: 700 }}>
+              That's your {FREE_QUESTIONS_PER_MONTH} free advisor pulls for the month. Pro makes it unlimited.
+            </div>
+          )}
+        </div>
+
+        <details style={{ marginBottom: '4px' }}>
+          <summary style={{ cursor: 'pointer', fontSize: '13px', fontWeight: 700, color: NAVY, marginBottom: '10px' }}>
+            No address, or it's not on the market? Describe it instead
+          </summary>
 
         <div style={{ ...card, display: 'grid', gap: '14px' }}>
           <Field label="Address or area" hint="City and state is plenty — no full address needed">
@@ -453,6 +833,7 @@ export default function PropertyAdvisor() {
             )}
           </div>
         </div>
+        </details>
 
         <Disclaimer />
       </div>
@@ -473,7 +854,11 @@ export default function PropertyAdvisor() {
               <button onClick={() => setActiveId(s.id)} style={{ flex: 1, textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
                 <div style={{ fontWeight: 800, fontSize: '15px', color: NAVY }}>{sessionTitle(s)}</div>
                 <div style={{ fontSize: '12px', color: '#64748b', marginTop: '2px' }}>
-                  {[s.propertyContext?.userGoal, money(s.propertyContext?.priceContext)].filter(Boolean).join(' · ')}
+                  {[
+                    s.propertyRecord?.listPrice ? `${money(s.propertyRecord.listPrice)} asking` : money(s.propertyContext?.priceContext),
+                    s.propertyRecord ? STATUS_STYLE[s.propertyRecord.status]?.label : '',
+                    s.propertyContext?.userGoal,
+                  ].filter(Boolean).join(' · ')}
                 </div>
                 {s.lastMessagePreview && (
                   <div style={{ fontSize: '12px', color: '#94a3b8', marginTop: '6px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -497,17 +882,37 @@ export default function PropertyAdvisor() {
     <div style={page}>
       <button onClick={() => setActiveId(null)} style={{ ...secondaryBtn, marginBottom: '12px' }}>← All properties</button>
 
-      <div style={{ ...card, padding: '14px 16px', marginBottom: '14px' }}>
-        <div style={{ fontWeight: 800, fontSize: '16px', color: NAVY }}>{active ? sessionTitle(active) : 'Property'}</div>
-        <div style={{ fontSize: '12px', color: '#64748b', marginTop: '4px' }}>
-          {[
-            ctx.userGoal,
-            ctx.propertyType,
-            ctx.yearBuilt ? `built ${ctx.yearBuilt}` : '',
-            money(ctx.priceContext),
-          ].filter(Boolean).join(' · ')}
+      {active?.propertyRecord ? (
+        <PropertyCard
+          rec={active.propertyRecord}
+          refreshing={lookingUp}
+          onRefresh={() => void runLookup(active.propertyRecord?.normalizedAddress || ctx.location || '', active.id)}
+        />
+      ) : (
+        <div style={{ ...card, padding: '14px 16px', marginBottom: '14px' }}>
+          <div style={{ fontWeight: 800, fontSize: '16px', color: NAVY }}>{active ? sessionTitle(active) : 'Property'}</div>
+          <div style={{ fontSize: '12px', color: '#64748b', marginTop: '4px' }}>
+            {[
+              ctx.userGoal,
+              ctx.propertyType,
+              ctx.yearBuilt ? `built ${ctx.yearBuilt}` : '',
+              money(ctx.priceContext),
+            ].filter(Boolean).join(' · ')}
+          </div>
+          {/* Described by hand, so nothing has been looked up yet. If what they
+              typed reads like a street address, offer to go find the house. */}
+          {/\d/.test(ctx.location || '') && (
+            <button
+              onClick={() => void runLookup(ctx.location || '', active?.id)}
+              disabled={lookingUp}
+              style={{ ...secondaryBtn, marginTop: '10px' }}
+            >
+              {lookingUp ? (lookupStage || 'Looking…') : '🔎 Look this address up'}
+            </button>
+          )}
+          {lookupError && <div style={{ fontSize: '12px', color: '#b45309', marginTop: '8px' }}>⚠ {lookupError}</div>}
         </div>
-      </div>
+      )}
 
       <div ref={transcriptRef} style={{ display: 'grid', gap: '12px', maxHeight: '58vh', overflowY: 'auto', paddingRight: '4px' }}>
         {messages.length === 0 && !busy && (
@@ -608,7 +1013,7 @@ export default function PropertyAdvisor() {
         />
         {micSupported && (
           <button
-            onClick={voicePhase === 'listening' ? stopListening : startListening}
+            onClick={() => (voicePhase === 'listening' ? stopListening() : startListening('question'))}
             disabled={busy || voicePhase === 'transcribing'}
             aria-label={voicePhase === 'listening' ? 'Stop recording and ask' : 'Ask out loud'}
             title={voicePhase === 'listening' ? 'Tap when you\'re done talking' : 'Ask out loud'}

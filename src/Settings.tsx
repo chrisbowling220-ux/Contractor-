@@ -7,7 +7,7 @@ import { db, storage, functions, firebaseAuth } from './firebase'
 import { useUser, useAuth } from '@clerk/clerk-react'
 import { notificationsBlocked, requestNotificationPermission, alertsEnabled, setAlertsEnabled, playAlertCue } from './lib/reminders'
 import PayoutSetup from './PayoutSetup'
-import { FREE_TIER_AI_LIMIT } from './lib/useTier'
+import { FREE_TIER_AI_LIMIT, effectiveAiQuotesUsed, type QuotaFields } from './lib/useTier'
 
 
 const subscriptionCheckoutCallable = httpsCallable<{ clerkToken: string; email?: string; plan?: string }, { url: string }>(functions, 'createSubscriptionCheckout')
@@ -80,8 +80,7 @@ export default function Settings() {
             logoUrl?: string
             logoStoragePath?: string
             tier?: 'free' | 'pro'
-            aiQuotesUsed?: number
-          }
+          } & QuotaFields
           setBusinessName(data.businessName || '')
           setBusinessPhone(data.businessPhone || '')
           setBusinessEmail(data.businessEmail || '')
@@ -89,7 +88,7 @@ export default function Settings() {
           setLogoUrl(data.logoUrl || '')
           setLogoStoragePath(data.logoStoragePath || '')
           setTier(data.tier === 'pro' ? 'pro' : 'free')
-          setAiQuotesUsed(data.aiQuotesUsed || 0)
+          setAiQuotesUsed(effectiveAiQuotesUsed(data))
         }
       } catch (err) {
         console.error('Settings load failed:', err)
@@ -105,10 +104,10 @@ export default function Settings() {
   useEffect(() => {
     if (!user?.id) return
     const unsub = onSnapshot(doc(db, 'users', user.id), snap => {
-      const data = snap.data() as { tier?: 'free' | 'pro'; aiQuotesUsed?: number; paidQuoteCredits?: number; subscriptionCurrentPeriodEnd?: number; cancelAtPeriodEnd?: boolean } | undefined
+      const data = snap.data() as ({ tier?: 'free' | 'pro'; paidQuoteCredits?: number; subscriptionCurrentPeriodEnd?: number; cancelAtPeriodEnd?: boolean } & QuotaFields) | undefined
       if (!data) return
       setTier(data.tier === 'pro' ? 'pro' : 'free')
-      setAiQuotesUsed(data.aiQuotesUsed || 0)
+      setAiQuotesUsed(effectiveAiQuotesUsed(data))
       setPaidQuoteCredits(Math.max(0, data.paidQuoteCredits || 0))
       setPeriodEnd(typeof data.subscriptionCurrentPeriodEnd === 'number' ? data.subscriptionCurrentPeriodEnd : null)
       setCancelAtPeriodEnd(!!data.cancelAtPeriodEnd)

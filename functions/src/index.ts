@@ -113,16 +113,23 @@ const FREE_TIER_AI_LIMIT = 10
 
 interface UserDoc {
   tier?: 'free' | 'pro'
-  aiQuotesUsed?: number
+  aiQuotesUsed?: number       // FREE-allowance counter ONLY. Never touched while Pro.
+  proQuotesUsed?: number      // lifetime usage while subscribed — stats only, never gates
   paidQuoteCredits?: number   // pay-as-you-go: $1-per-use quote credits bought in packs
+  stripeSubscriptionId?: string
+  freeAllowanceRepairedAt?: string  // set once by the migration below; also its guard
 }
+
+// Which bucket a quote was drawn from, so a failed generation is refunded to
+// the same place it was taken from.
+type QuoteBucket = 'pro' | 'free' | 'paid'
 
 // Ensures the user's gate check passes BEFORE we burn an Anthropic call.
 // Order of access for a FREE user: (1) their free allowance, then (2) any
 // pay-as-you-go credits they bought ($1 each). Pro = unlimited. Throws
 // HttpsError('resource-exhausted') only when BOTH free + paid are used up.
 // All increments/decrements happen atomically in a transaction.
-async function consumeAiQuoteOrThrow(userId: string, featureName: string): Promise<{ tier: 'free' | 'pro'; remaining: number | null; spentPaid: boolean }> {
+async function consumeAiQuoteOrThrow(userId: string, featureName: string): Promise<{ tier: 'free' | 'pro'; remaining: number | null; bucket: QuoteBucket }> {
   const db = getAdminDb()
   const userRef = db.collection('users').doc(userId)
   const result = await db.runTransaction(async tx => {
@@ -133,20 +140,43 @@ async function consumeAiQuoteOrThrow(userId: string, featureName: string): Promi
     const paid = Math.max(0, data.paidQuoteCredits ?? 0)
 
     if (tier === 'pro') {
-      tx.set(userRef, { tier, aiQuotesUsed: FieldValue.increment(1), lastAiAt: new Date().toISOString() }, { merge: true })
-      return { tier, remaining: null as number | null, spentPaid: false }
+      // Count Pro usage in its OWN counter. Spending `aiQuotesUsed` here would
+      // silently drain the free allowance while the user is paying, so the
+      // moment a card fails they'd drop to free with zero quotes and get walled
+      // mid-job. Their 10 free quotes stay untouched as a lapse buffer.
+      tx.set(userRef, { tier, proQuotesUsed: FieldValue.increment(1), lastAiAt: new Date().toISOString() }, { merge: true })
+      return { tier, remaining: null as number | null, bucket: 'pro' as QuoteBucket }
+    }
+
+    // ── One-time repair for accounts that predate the split ──────────────
+    // Until now Pro usage was charged to `aiQuotesUsed`, so anyone who ever
+    // subscribed has a free-allowance counter inflated by quotes they PAID for.
+    // Their real free balance is unknowable after the fact, so a subscriber
+    // gets the benefit of the doubt once: the counter is moved to the Pro
+    // bucket where it always belonged. Runs at most once per user, and only
+    // for someone who actually held a subscription.
+    if (!data.freeAllowanceRepairedAt && data.proQuotesUsed === undefined && data.stripeSubscriptionId && used > 0) {
+      console.log(`Free-allowance repair: user=${userId} moved aiQuotesUsed=${used} → proQuotesUsed`)
+      tx.set(userRef, {
+        tier,
+        aiQuotesUsed: 1,                 // this very quote
+        proQuotesUsed: used,             // historical Pro usage, re-filed
+        freeAllowanceRepairedAt: new Date().toISOString(),
+        lastAiAt: new Date().toISOString(),
+      }, { merge: true })
+      return { tier, remaining: (FREE_TIER_AI_LIMIT - 1) + paid, bucket: 'free' as QuoteBucket }
     }
 
     const freeLeft = Math.max(0, FREE_TIER_AI_LIMIT - used)
     if (freeLeft > 0) {
       // Spend a FREE quote.
       tx.set(userRef, { tier, aiQuotesUsed: FieldValue.increment(1), lastAiAt: new Date().toISOString() }, { merge: true })
-      return { tier, remaining: (freeLeft - 1) + paid, spentPaid: false }
+      return { tier, remaining: (freeLeft - 1) + paid, bucket: 'free' as QuoteBucket }
     }
     if (paid > 0) {
       // Free used up → spend a PAID ($1) credit.
       tx.set(userRef, { paidQuoteCredits: FieldValue.increment(-1), lastAiAt: new Date().toISOString() }, { merge: true })
-      return { tier, remaining: paid - 1, spentPaid: true }
+      return { tier, remaining: paid - 1, bucket: 'paid' as QuoteBucket }
     }
     // Nothing left at all.
     throw new HttpsError(
@@ -154,7 +184,7 @@ async function consumeAiQuoteOrThrow(userId: string, featureName: string): Promi
       `You're out of instant quotes. Buy more for $1 each, or go Pro for unlimited. (Change orders and invoice notes are always free.)`,
     )
   })
-  console.log(`AI gate: user=${userId} feature=${featureName} tier=${result.tier} remaining=${result.remaining} spentPaid=${result.spentPaid}`)
+  console.log(`AI gate: user=${userId} feature=${featureName} tier=${result.tier} remaining=${result.remaining} bucket=${result.bucket}`)
   return result
 }
 
@@ -176,20 +206,24 @@ async function requireProOrThrow(userId: string, featureName: string): Promise<v
 }
 
 // Refund one consumed credit when a generation fails AFTER the gate charged it,
-// so a transient outage doesn't cost a user a quote. `spentPaid` says which
-// bucket to restore: a pay-as-you-go credit (true) or a free quote (false).
-// Never lets either counter go negative.
-async function refundAiQuote(userId: string, spentPaid: boolean): Promise<void> {
+// so a transient outage doesn't cost a user a quote. `bucket` says which counter
+// to restore — it must match the one the gate actually spent, or a failure would
+// hand back a credit the user never had. Never lets a counter go negative.
+// A 'pro' quote costs nothing to refund: the counter is stats-only, not a gate.
+async function refundAiQuote(userId: string, bucket: QuoteBucket): Promise<void> {
   try {
     const db = getAdminDb()
     const userRef = db.collection('users').doc(userId)
     await db.runTransaction(async tx => {
       const data = (await tx.get(userRef)).data() as UserDoc | undefined
-      if (spentPaid) {
+      if (bucket === 'paid') {
         tx.set(userRef, { paidQuoteCredits: FieldValue.increment(1) }, { merge: true })
-      } else {
+      } else if (bucket === 'free') {
         const used = data?.aiQuotesUsed ?? 0
         if (used > 0) tx.set(userRef, { aiQuotesUsed: used - 1 }, { merge: true })
+      } else {
+        const used = data?.proQuotesUsed ?? 0
+        if (used > 0) tx.set(userRef, { proQuotesUsed: used - 1 }, { merge: true })
       }
     })
   } catch (err) {
@@ -1029,7 +1063,7 @@ export const generateAIQuote = onCall<GenerateCallPayload>(
       })
     } catch (err) {
       // The gate already charged a credit; refund it so a failure is free.
-      await refundAiQuote(userId, gate.spentPaid)
+      await refundAiQuote(userId, gate.bucket)
       if (err instanceof HttpsError) throw err
       console.error('Anthropic call failed after retries', err)
       throw new HttpsError('unavailable', friendlyAnthropicError(err))
@@ -1126,7 +1160,7 @@ Analyze the images and the contractor's narration together. Produce the structur
       })
     } catch (err) {
       // The gate already charged a credit; refund it so a failure is free.
-      await refundAiQuote(userId, gate.spentPaid)
+      await refundAiQuote(userId, gate.bucket)
       if (err instanceof HttpsError) throw err
       console.error('Anthropic scan analysis failed after retries', err)
       throw new HttpsError('unavailable', friendlyAnthropicError(err))

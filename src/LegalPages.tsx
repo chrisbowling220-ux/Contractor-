@@ -27,9 +27,10 @@ function Shell({ title, children }: { title: string; children: React.ReactNode }
         <h1 style={{ fontSize: '28px', fontWeight: 800, color: NAVY, margin: '0 0 4px' }}>{title}</h1>
         <p style={{ color: '#64748b', fontSize: '13px', margin: '0 0 24px' }}>Effective {EFFECTIVE_DATE}</p>
         <div style={{ color: '#1a1f2e', fontSize: '15px', lineHeight: 1.65 }}>{children}</div>
-        <div style={{ marginTop: '40px', paddingTop: '20px', borderTop: '1px solid #e2e8f0', display: 'flex', gap: '16px', fontSize: '13px' }}>
+        <div style={{ marginTop: '40px', paddingTop: '20px', borderTop: '1px solid #e2e8f0', display: 'flex', flexWrap: 'wrap', gap: '16px', fontSize: '13px' }}>
           <a href="/terms" style={{ color: ORANGE, textDecoration: 'none', fontWeight: 600 }}>Terms of Service</a>
           <a href="/privacy" style={{ color: ORANGE, textDecoration: 'none', fontWeight: 600 }}>Privacy Policy</a>
+          <a href="/safe-to-spend" style={{ color: ORANGE, textDecoration: 'none', fontWeight: 600 }}>Free Tools → Safe-to-Spend Calculator</a>
           <a href={`https://${SITE}`} style={{ color: '#64748b', textDecoration: 'none' }}>Back to {SITE}</a>
         </div>
       </div>

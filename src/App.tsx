@@ -21,6 +21,7 @@ import QuickPhotoCapture from './QuickPhotoCapture'
 import QuickAddVoice from './QuickAddVoice'
 import WelcomeTour from './WelcomeTour'
 import { TermsPage, PrivacyPage } from './LegalPages'
+import SafeToSpend from './SafeToSpend'
 import { fireDueReminders, fireMorningAgenda, requestNotificationPermission, alertsEnabled, setAlertsEnabled, playAlertCue } from './lib/reminders'
 import { tipOfTheDay } from './data/contractorTips'
 import type { ProjectStatus } from './data/types'
@@ -1245,6 +1246,12 @@ function legalPageFromUrl(): 'terms' | 'privacy' | null {
   return null
 }
 
+// Public free tool — /safe-to-spend (no sign-in).
+function isSafeToSpendUrl(): boolean {
+  if (typeof window === 'undefined') return false
+  return window.location.pathname.replace(/\/$/, '') === '/safe-to-spend'
+}
+
 // Match /inv/<id> — public invoice viewer.
 function publicInvoiceIdFromUrl(): string | null {
   if (typeof window === 'undefined') return null
@@ -1278,6 +1285,8 @@ function App() {
   const legal = legalPageFromUrl()
   if (legal === 'terms') return <TermsPage />
   if (legal === 'privacy') return <PrivacyPage />
+
+  if (isSafeToSpendUrl()) return <SafeToSpend />
 
   return (
     <div>
@@ -1326,6 +1335,10 @@ function App() {
                 By creating an account or signing in, you agree to our{' '}
                 <a href="/terms" style={{ color: ORANGE, textDecoration: 'underline' }}>Terms of Service</a>{' '}and{' '}
                 <a href="/privacy" style={{ color: ORANGE, textDecoration: 'underline' }}>Privacy Policy</a>.
+              </p>
+              <p style={{ marginTop: '12px', fontSize: '13px', color: '#94a3b8', maxWidth: '420px', marginLeft: isMobile ? 'auto' : 0, marginRight: isMobile ? 'auto' : 0 }}>
+                Free Tools →{' '}
+                <a href="/safe-to-spend" style={{ color: ORANGE, textDecoration: 'underline', fontWeight: 600 }}>Safe-to-Spend Calculator</a>
               </p>
             </div>
 

@@ -215,6 +215,41 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // setaside_waitlist/{id}: 1099 Set-Aside early-access signups from the
+    // public /safe-to-spend page. Anyone may CREATE one well-formed signup;
+    // nobody can read, change or delete them from a client (view them in the
+    // Firebase console). The doc id is sha256(lowercased email), so a repeat
+    // signup hits an existing doc, counts as an update, and is denied.
+    function isSetasideSignup(id) {
+      let d = request.resource.data;
+      let trades = ['Handyman', 'General contractor', 'Carpenter', 'Electrician',
+                    'Plumber', 'HVAC', 'Painter', 'Roofer', 'Landscaping/lawn',
+                    'Flooring', 'Other'];
+      return d.keys().hasAll(['email', 'emailLower', 'trade', 'source', 'filingStatus',
+                              'state', 'annualNetBucket', 'createdAt'])
+        && d.keys().hasOnly(['email', 'emailLower', 'trade', 'firstName', 'source',
+                             'filingStatus', 'state', 'annualNetBucket', 'utm_source',
+                             'utm_medium', 'utm_campaign', 'createdAt'])
+        && d.email is string && d.email.size() < 254
+        && d.email.matches('^[^@\\s]+@[^@\\s]+[.][^@\\s]+$')
+        && d.emailLower == d.email.trim().lower()
+        && id == hashing.sha256(d.emailLower).toHexString().lower()
+        && d.trade in trades
+        && d.source == 'safe-to-spend-calculator'
+        && d.filingStatus in ['single', 'mfj', 'hoh']
+        && d.state in ['nc', 'none', 'other']
+        && d.annualNetBucket is string && d.annualNetBucket.size() <= 12
+        && (!('firstName' in d) || (d.firstName is string && d.firstName.size() <= 60))
+        && (!('utm_source' in d) || (d.utm_source is string && d.utm_source.size() <= 100))
+        && (!('utm_medium' in d) || (d.utm_medium is string && d.utm_medium.size() <= 100))
+        && (!('utm_campaign' in d) || (d.utm_campaign is string && d.utm_campaign.size() <= 100))
+        && d.createdAt == request.time;
+    }
+    match /setaside_waitlist/{id} {
+      allow create: if isSetasideSignup(id);
+      allow read, update, delete: if false;
+    }
+
     // Everything else: denied.
     match /{document=**} {
       allow read, write: if false;

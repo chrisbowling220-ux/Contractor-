@@ -256,3 +256,41 @@ FCP 1.4 s, LCP 1.4 s, TBT 130 ms, CLS 0.
   - Set NC to 3.49% if the revenue trigger is confirmed. The NCDOR page doesn't list a 2027 rate yet.
   - Register it in `taxYears/index.ts`, then build and deploy hosting.
 - **Exporting the list:** the console view is enough for now. When you want to email the list, a small Admin-SDK script or a BigQuery export will pull it.
+
+## Automatic tax updates
+
+A scheduled job keeps the numbers in `src/lib/setaside/taxYears/` current.
+
+**How it works**
+- **When:** 6:10 AM Eastern on the 1st and 15th of every month. A systemd user timer (`setaside-tax-check.timer`) runs it.
+  - `Persistent=true`: if the PC is off or asleep at 6:10, the job runs as soon as it's back.
+  - Linger is on, so the job runs even when you aren't logged in.
+- **What runs:** `scripts/setaside-tax-check.sh` runs Claude Code headless (`claude -p`), using the job instructions in `scripts/setaside-tax-check.md`.
+  - It checks irs.gov, ssa.gov and ncdor.gov. It updates the tax year files and tests only when a number has officially changed or a new year is published.
+  - Then it runs `npm test` and `npm run build`.
+  - Only when both pass, it commits, pushes to `master`, runs `firebase deploy --only hosting --project contractors-office-96731` (never Firestore rules) and checks the live pages.
+- **Guard rails:**
+  - Claude may only edit `src/lib/setaside/taxYears/**`, `src/lib/setaside/*.test.ts` and `SETASIDE_UPDATES.md`.
+  - It may only fetch from irs.gov, ssa.gov and ncdor.gov, and run the specific test, build, git, deploy and curl commands.
+  - Anything else is denied automatically (`--permission-prompts none`), so it never hangs waiting on you.
+  - It runs with `--safe-mode` and `--setting-sources project`, so the broad allow rules in `~/.claude/settings.json`, hooks, plugins and MCP servers don't apply.
+  - The script won't start unless the repo is on `master` with a clean tree. It runs `git pull --ff-only` first and uses a lock file, so two runs never overlap.
+  - Afterwards it flags any commit that touched files outside the tax-year area, and discards any changes left uncommitted.
+- **Where to look:**
+  - `logs/setaside-tax-check.log` has every run: Claude's report, any denied actions, and any diffs.
+  - `logs/setaside-tax-check-<timestamp>.jsonl` is the full transcript of each run.
+  - `SETASIDE_UPDATES.md` has a dated entry per run. It stays an uncommitted local file unless a run commits it along with a change.
+
+**Pause it**
+```bash
+systemctl --user disable --now setaside-tax-check.timer   # pause
+systemctl --user enable --now setaside-tax-check.timer    # resume
+systemctl --user list-timers setaside-tax-check.timer      # next run time
+```
+
+**Run it by hand**
+```bash
+DRY_RUN=1 ~/buildpro-plus/scripts/setaside-tax-check.sh    # check and report only
+~/buildpro-plus/scripts/setaside-tax-check.sh              # real run (may commit, push, deploy)
+systemctl --user start setaside-tax-check.service          # real run, the way the timer does it
+```

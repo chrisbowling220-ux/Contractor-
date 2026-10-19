@@ -281,6 +281,10 @@ A scheduled job keeps the numbers in `src/lib/setaside/taxYears/` current.
   - `logs/setaside-tax-check-<timestamp>.jsonl` is the full transcript of each run.
   - `SETASIDE_UPDATES.md` has a dated entry per run. It stays an uncommitted local file unless a run commits it along with a change.
 
+- **Known quirks:**
+  - www.ssa.gov returns 403 to this machine, so the job confirms the Social Security wage base on irs.gov (Pub. 15 or Tax Topic 751).
+  - The page copy (`content.ts`) reads the year from the registry. Adding `taxYears/<year>.ts` and registering it in `taxYears/index.ts` updates the FAQ, the write-offs and the "about N%" example. They change at the next build in that calendar year.
+
 **Pause it**
 ```bash
 systemctl --user disable --now setaside-tax-check.timer   # pause

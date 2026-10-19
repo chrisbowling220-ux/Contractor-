@@ -83,6 +83,7 @@ allowed=(
   "Bash(npm test)" "Bash(npm test *)" "Bash(npm run build)"
   "Bash(git status*)" "Bash(git diff*)" "Bash(git log*)" "Bash(git show*)" "Bash(git restore*)"
   "Bash(curl *)" "Bash(pdftotext *)" "Bash(date*)"
+  "Bash(grep *)" "Bash(head *)" "Bash(tail *)" "Bash(wc *)" "Bash(ls *)"
 )
 if [[ $DRY_RUN == 0 ]]; then
   allowed+=(
@@ -114,6 +115,14 @@ trap 'rm -f "$prompt_file"' EXIT
     echo "- Push with: git push origin master"
   fi
   echo "- Tests: npm test. Production build: npm run build."
+  echo "- www.ssa.gov answers HTTP 403 to this machine (an edge block on our IP). For the"
+  echo "  Social Security wage base, confirm it on irs.gov instead: Publication 15"
+  echo "  (https://www.irs.gov/publications/p15) and Tax Topic 751"
+  echo "  (https://www.irs.gov/taxtopics/tc751) state it. A search-result snippet is not a"
+  echo "  confirmation; the number must be on a page you actually loaded."
+  echo "- A new year's file must be registered in src/lib/setaside/taxYears/index.ts"
+  echo "  (import it with the .ts extension). The page copy in content.ts follows the"
+  echo "  registry automatically, so it doesn't need editing."
   echo "- Permissions are pre-set; anything not allowed is denied automatically."
   echo "  If something you need is denied, stop, and log what was denied and why you"
   echo "  needed it. Don't work around it."

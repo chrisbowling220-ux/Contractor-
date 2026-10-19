@@ -1,7 +1,12 @@
 // Copy for the Safe-to-Spend page. Shared by the React page AND the build-time
 // prerender in vite.config.ts, so the FAQ text, the FAQPage JSON-LD and the
 // meta tags can never drift apart. Plain data only — no React.
-import tax2026 from './taxYears/2026.ts'
+import { computeAnnual } from './taxEngine.ts'
+import { taxYearFor } from './taxYears/index.ts'
+
+// The same year the calculator uses, so adding taxYears/<year>.ts updates the copy too.
+const tax = taxYearFor(new Date())
+const YEAR = tax.year
 
 export const PAGE_PATH = '/safe-to-spend'
 export const PAGE_URL = 'https://builderspro.cc/safe-to-spend'
@@ -21,12 +26,12 @@ export const TRADES = [
 ] as const
 
 const cents = (c: number) => `${c}¢`
-const [mileH1, mileH2] = tax2026.mileage
+const [mileH1, mileH2] = tax.mileage
 
 export const writeOffs: { title: string; body: string }[] = [
   {
     title: 'Truck mileage',
-    body: `Business miles in 2026 are worth ${cents(mileH1.centsPerMile)} a mile through June 30 and ${cents(mileH2.centsPerMile)} a mile from July 1 (IRS standard mileage rate). Driving between jobs, to the supply house, and to bid counts; your commute from home to a regular shop usually doesn’t. Keep a log with date, miles and purpose. Parking and tolls on business trips are deductible on top.`,
+    body: `Business miles in ${YEAR} are worth ${cents(mileH1.centsPerMile)} a mile through June 30 and ${cents(mileH2.centsPerMile)} a mile from July 1 (IRS standard mileage rate). Driving between jobs, to the supply house, and to bid counts; your commute from home to a regular shop usually doesn’t. Keep a log with date, miles and purpose. Parking and tolls on business trips are deductible on top.`,
   },
   { title: 'Tools and equipment', body: 'Saws, drills, ladders, compressors, trailers and other gear you buy for the work. Most can be written off in the year you buy them.' },
   { title: 'Materials and supplies', body: 'Lumber, fasteners, wire, pipe, paint, caulk and anything else that goes into a job, plus shop supplies and consumables like blades and bits.' },
@@ -37,7 +42,12 @@ export const writeOffs: { title: string; body: string }[] = [
   { title: 'Workwear — only if it isn’t everyday clothing', body: 'Clothing counts only when it’s required for the work and not suitable for everyday wear, like flame-resistant (FR) gear or uniforms with your company logo. Regular jeans, T-shirts and work boots you could wear anywhere usually don’t qualify.' },
 ]
 
-const due = tax2026.estimatedDueDates.map(d => {
+// The FAQ's worked example: the engine's own rate for single, NC, $50k net.
+const ncExampleRate = Math.round(
+  computeAnnual({ net: 50_000, filingStatus: 'single', state: { kind: 'nc' }, otherIncome: 0, config: tax }).rate * 100,
+)
+
+const due = tax.estimatedDueDates.map(d => {
   const [y, m, day] = d.split('-').map(Number)
   return new Date(y, m - 1, day).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
 })
@@ -45,15 +55,15 @@ const due = tax2026.estimatedDueDates.map(d => {
 export const faq: { q: string; a: string }[] = [
   {
     q: 'How much should a 1099 contractor set aside?',
-    a: 'Most solo contractors should set aside somewhere between 20% and 30% of their profit (what’s left after materials and expenses), not of every dollar that comes in. Self-employment tax alone is about 14.1% of profit, and federal and state income tax come on top. A single filer in North Carolina clearing $50,000 a year should save about 23%. Use the calculator above for your own number.',
+    a: `Most solo contractors should set aside somewhere between 20% and 30% of their profit (what’s left after materials and expenses), not of every dollar that comes in. Self-employment tax alone is about 14.1% of profit, and federal and state income tax come on top. A single filer in North Carolina clearing $50,000 a year should save about ${ncExampleRate}%. Use the calculator above for your own number.`,
   },
   {
     q: 'What is self-employment tax?',
-    a: `It’s Social Security and Medicare for people who work for themselves. You pay both the employee and employer halves: 12.4% for Social Security (on up to $${tax2026.ssWageBase.toLocaleString('en-US')} of earnings in 2026) plus 2.9% for Medicare, figured on 92.35% of your net profit. You owe it once your net self-employment earnings reach $400, and you get to deduct half of it on your income tax return.`,
+    a: `It’s Social Security and Medicare for people who work for themselves. You pay both the employee and employer halves: 12.4% for Social Security (on up to $${tax.ssWageBase.toLocaleString('en-US')} of earnings in ${YEAR}) plus 2.9% for Medicare, figured on 92.35% of your net profit. You owe it once your net self-employment earnings reach $400, and you get to deduct half of it on your income tax return.`,
   },
   {
     q: 'When are quarterly taxes due?',
-    a: `For the 2026 tax year, estimated payments are due ${due[0]}, ${due[1]}, ${due[2]}, and ${due[3]}. If a date falls on a weekend or legal holiday, it moves to the next business day. You can pay the IRS online through IRS Direct Pay or your IRS Online Account.`,
+    a: `For the ${YEAR} tax year, estimated payments are due ${due[0]}, ${due[1]}, ${due[2]}, and ${due[3]}. If a date falls on a weekend or legal holiday, it moves to the next business day. You can pay the IRS online through IRS Direct Pay or your IRS Online Account.`,
   },
   {
     q: 'Do I have to pay quarterly?',

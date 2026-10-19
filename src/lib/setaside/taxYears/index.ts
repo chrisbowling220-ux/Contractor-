@@ -1,5 +1,6 @@
-import type { TaxYearConfig } from '../types'
-import tax2026 from './2026'
+import type { TaxYearConfig } from '../types.ts'
+// Keep the .ts extension: content.ts (and so vite.config.ts) imports this file.
+import tax2026 from './2026.ts'
 
 // Registered tax years. The 2027 inflation numbers weren't published on irs.gov
 // as of 2026-10-19, so only 2026 ships; add 2027 here once Rev. Proc. is out.

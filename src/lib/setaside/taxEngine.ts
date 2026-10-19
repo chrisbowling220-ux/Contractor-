@@ -4,7 +4,7 @@
 // working out the tax the self-employment income ADDS on top of whatever else
 // the household earns (tax with the SE income minus tax without it). Nothing is
 // rounded until the very end, so totals line up with a hand calculation.
-import type { Bracket, FilingStatus, StateOption, TaxYearConfig } from './types'
+import type { Bracket, FilingStatus, StateOption, TaxYearConfig } from './types.ts'
 
 export interface AnnualInput {
   /** Business profit for the year: gross 1099 income minus business expenses. */

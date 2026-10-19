@@ -41,7 +41,7 @@ const CSS = `
 .sts-money > span { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); font-size: 20px; font-weight: 600; color: ${colors.muted}; pointer-events: none; }
 .sts-money > input { padding-left: 32px; }
 .sts-select { appearance: auto; font-weight: 600; font-size: 18px; }
-.sts-tab { flex: 1; min-height: 52px; border: 0; border-radius: 10px; font-size: 17px; font-weight: 700; cursor: pointer; background: transparent; color: ${colors.muted}; }
+.sts-tab { flex: 1; min-height: 52px; border: 0; border-radius: 10px; font-size: 17px; font-weight: 700; cursor: pointer; background: transparent; color: #475569; }
 .sts-tab[aria-selected="true"] { background: #fff; color: ${colors.text}; box-shadow: ${shadow.sm}; }
 .sts-tab:focus-visible, .sts summary:focus-visible, .sts-btn:focus-visible, .sts a:focus-visible, .sts-radio:focus-within { outline: 3px solid ${ORANGE_INK}; outline-offset: 2px; }
 .sts summary { cursor: pointer; min-height: 48px; display: flex; align-items: center; gap: 8px; font-weight: 700; list-style: none; }
@@ -246,7 +246,7 @@ export default function SafeToSpend() {
 
       <header style={{ background: NAVY, color: 'white', padding: '16px' }}>
         <div style={{ maxWidth: '640px', margin: '0 auto', display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <a href="/" aria-label="BuildPro+ home" style={{ display: 'flex', alignItems: 'center', gap: '12px', color: 'white', textDecoration: 'none' }}>
+          <a href="/" style={{ display: 'flex', alignItems: 'center', gap: '12px', color: 'white', textDecoration: 'none' }}>
             <span aria-hidden="true" style={{ width: '40px', height: '40px', background: ORANGE, borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '20px' }}>B</span>
             <span>
               <span style={{ display: 'block', fontWeight: 800, fontSize: '20px' }}>BuildPro<span style={{ color: ORANGE }}>+</span></span>
@@ -274,14 +274,14 @@ export default function SafeToSpend() {
           <div id="sts-panel" role="tabpanel" aria-labelledby={`tab-${tab}`}>
             {tab === 'payment' ? (
               <>
-                <MoneyField id="pay" label="Payment received" value={payment} onChange={setPayment} placeholder="2,000" />
+                <MoneyField id="pay" label="Payment received" value={payment} onChange={setPayment} placeholder="e.g. 2,000" />
                 <MoneyField id="mat" label="Materials/expenses on this job (optional)" value={materials} onChange={setMaterials} />
                 <MoneyField id="yr" label="About how much will you clear this year after expenses?"
                   hint="Used to find your tax rate. A rough guess is fine." value={yearNet} onChange={setYearNet} />
               </>
             ) : (
               <>
-                <MoneyField id="gross" label={`Expected ${config.year} gross 1099 income`} value={gross} onChange={setGross} placeholder="60,000" />
+                <MoneyField id="gross" label={`Expected ${config.year} gross 1099 income`} value={gross} onChange={setGross} placeholder="e.g. 60,000" />
                 <MoneyField id="exp" label={`Expected ${config.year} business expenses`} value={expenses} onChange={setExpenses} />
               </>
             )}

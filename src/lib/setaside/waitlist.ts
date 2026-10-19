@@ -55,10 +55,7 @@ export async function joinWaitlist(entry: WaitlistEntry, search = window.locatio
   const id = await sha256Hex(emailLower)
 
   // Firestore loads only when someone actually signs up.
-  const [{ db }, { doc, setDoc, serverTimestamp }] = await Promise.all([
-    import('../../firebase'),
-    import('firebase/firestore'),
-  ])
+  const { createDoc } = await import('./firestoreWrite')
 
   const data: Record<string, unknown> = {
     email,
@@ -69,13 +66,12 @@ export async function joinWaitlist(entry: WaitlistEntry, search = window.locatio
     state: entry.state,
     annualNetBucket: entry.annualNetBucket,
     ...utmFrom(search),
-    createdAt: serverTimestamp(),
   }
   const firstName = entry.firstName?.trim()
   if (firstName) data.firstName = firstName.slice(0, 60)
 
   try {
-    await setDoc(doc(db, WAITLIST_COLLECTION, id), data)
+    await createDoc(WAITLIST_COLLECTION, id, data) // adds createdAt: serverTimestamp()
   } catch (err) {
     // Input already passed the same checks the rules make, so a denial here
     // means the doc exists: they signed up before.

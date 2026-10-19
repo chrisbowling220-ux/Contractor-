@@ -1,7 +1,7 @@
 // Copy for the Safe-to-Spend page. Shared by the React page AND the build-time
 // prerender in vite.config.ts, so the FAQ text, the FAQPage JSON-LD and the
 // meta tags can never drift apart. Plain data only — no React.
-import tax2026 from './taxYears/2026'
+import tax2026 from './taxYears/2026.ts'
 
 export const PAGE_PATH = '/safe-to-spend'
 export const PAGE_URL = 'https://builderspro.cc/safe-to-spend'

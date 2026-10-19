@@ -2,7 +2,7 @@
 // Every figure was checked against the official source on 2026-10-19; the URL
 // sits beside each one. When a new year's Rev. Proc. comes out, copy this file
 // to taxYears/<year>.ts, update the numbers, and register it in taxYears/index.ts.
-import type { TaxYearConfig } from '../types'
+import type { TaxYearConfig } from '../types.ts'
 
 const config: TaxYearConfig = {
   year: 2026,

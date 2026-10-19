@@ -29,6 +29,8 @@
       "**/node_modules/**"
     ],
     "rewrites": [
+      { "source": "/safe-to-spend", "destination": "/safe-to-spend.html" },
+      { "source": "/safe-to-spend/", "destination": "/safe-to-spend.html" },
       { "source": "**", "destination": "/index.html" }
     ],
     "headers": [

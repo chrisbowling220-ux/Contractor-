@@ -42,6 +42,46 @@ service cloud.firestore {
       return ('paidAtMs' in d) && withinRetention(d.paidAtMs);
     }
 
+
+    // ── PUBLIC SIGN-OFF (estimates + change orders) ──
+    // The anonymous customer may answer ONCE, while the document is still
+    // pending. After that only the owner can change it (re-sending an edited
+    // version puts it back to pending). Without the pending check anyone
+    // holding the link could flip an approved job to declined, re-sign it under
+    // another name, or push signedAtMs into the future to lock the document
+    // against deletion forever.
+    function validSignoff() {
+      let r = request.resource.data;
+      let c = r.customerResponse;
+      let nowMs = request.time.toMillis();
+      let signedChanged = request.resource.data.diff(resource.data).affectedKeys().hasAny(['signedAtMs']);
+      return resource.data.status == 'pending'
+        && r.status in ['approved', 'declined']
+        && c is map
+        && c.keys().hasOnly(['action', 'signedName', 'reason', 'respondedAt'])
+        && c.action == r.status
+        && c.signedName is string && c.signedName.size() > 0 && c.signedName.size() <= 120
+        && c.respondedAt is string && c.respondedAt.size() <= 40
+        && (!('reason' in c) || (c.reason is string && c.reason.size() <= 2000))
+        // Approval stamps the retention clock; it has to be "about now" (the
+        // customer's phone clock, so allow two days of slack). A decline must
+        // leave it alone.
+        && (r.status == 'approved'
+            ? (r.signedAtMs is int
+               && r.signedAtMs > nowMs - 172800000
+               && r.signedAtMs < nowMs + 172800000)
+            : !signedChanged);
+    }
+    function validStartDateResponse() {
+      let d = request.resource.data.startDateResponse;
+      return d is map
+        && d.keys().hasOnly(['action', 'requestedDate', 'note', 'respondedAt'])
+        && d.action in ['confirmed', 'requested_change']
+        && (!('requestedDate' in d) || (d.requestedDate is string && d.requestedDate.size() <= 10))
+        && (!('note' in d) || (d.note is string && d.note.size() <= 1000))
+        && d.respondedAt is string && d.respondedAt.size() <= 40;
+    }
+
     // ── users/{userId}: the owner's profile/tier. Public read so share pages
     //    can show business branding (name, logo, license). No public write. ──
     //
@@ -62,7 +102,10 @@ service cloud.firestore {
       ]);
     }
     match /users/{userId} {
-      allow read: if true;
+      // A share page loads ONE profile by id. Nobody may list the collection —
+      // that would hand out every contractor's profile and billing state.
+      allow get: if true;
+      allow list: if false;
       // Create: the whole new doc may contain only profile fields.
       allow create: if isSignedIn() && request.auth.uid == userId
         && isUserProfileKeys(request.resource.data.keys());
@@ -75,19 +118,23 @@ service cloud.firestore {
     // ── estimates: owner full access. Public read (view shared estimate).
     //    Public update limited to the customer sign-off fields only. ──
     match /estimates/{id} {
-      allow read: if true;
+      // Customers open ONE estimate by its unguessable link id (get). Listing
+      // is owner-only: with a public list anyone could dump every contractor's
+      // estimates — names, scopes and prices — and walk the ids.
+      allow get: if true;
+      allow list: if isOwner(resource.data);
       allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
       // Owner: full update. Anonymous customer may ONLY:
-      //  - approve/decline (customerResponse + status + signedAtMs on approval), or
+      //  - approve/decline once, while pending (see validSignoff), or
       //  - respond to the proposed start date (startDateResponse only).
       // Cannot touch amounts, totals, deposit, or forge other status values.
       allow update: if isOwner(resource.data)
-        || (onlyChanges(['customerResponse', 'status', 'signedAtMs'])
-            && request.resource.data.status in ['approved', 'declined'])
+        || (onlyChanges(['customerResponse', 'status', 'signedAtMs']) && validSignoff())
         // Customer may respond to the proposed start date ONCE — only if no
         // response exists yet. Prevents an anonymous actor overwriting a prior
         // confirmation. (Owner can always overwrite via the isOwner branch.)
-        || (onlyChanges(['startDateResponse']) && !('startDateResponse' in resource.data));
+        || (onlyChanges(['startDateResponse']) && !('startDateResponse' in resource.data)
+            && validStartDateResponse());
       // Owner may delete UNLESS the document is e-signed and still within the
       // 2-year legal-retention window.
       allow delete: if isOwner(resource.data) && !signedDocLocked(resource.data);
@@ -95,11 +142,11 @@ service cloud.firestore {
 
     // ── changeOrders: same pattern as estimates (incl. 2-year retention lock). ──
     match /changeOrders/{id} {
-      allow read: if true;
+      allow get: if true;
+      allow list: if isOwner(resource.data);
       allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
       allow update: if isOwner(resource.data)
-        || (onlyChanges(['customerResponse', 'status', 'signedAtMs'])
-            && request.resource.data.status in ['approved', 'declined']);
+        || (onlyChanges(['customerResponse', 'status', 'signedAtMs']) && validSignoff());
       allow delete: if isOwner(resource.data) && !signedDocLocked(resource.data);
     }
 
@@ -107,19 +154,25 @@ service cloud.firestore {
     //    owner-only create/update/delete. The Stripe webhook updates invoices
     //    via the Admin SDK, which bypasses these rules. ──
     match /invoices/{id} {
-      allow read: if true;
+      allow get: if true;
+      allow list: if isOwner(resource.data);
       allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
       // Owner can update anything. Anonymous customers can ONLY toggle the
       // cash-choice fields (so picking "Pay Cash" on the share page records
       // their intent). They cannot change amounts, line items, or status.
       allow update: if isOwner(resource.data)
-        || onlyChanges(['customerCashChoice', 'customerCashAt']);
+        || (onlyChanges(['customerCashChoice', 'customerCashAt'])
+            && resource.data.status != 'paid'
+            && request.resource.data.customerCashChoice == true
+            && request.resource.data.customerCashAt is string
+            && request.resource.data.customerCashAt.size() <= 40);
       // Owner may delete UNLESS this is a PAID invoice still within the 2-year
       // legal-retention window (proof of what was owed and that it was paid).
       allow delete: if isOwner(resource.data) && !paidInvoiceLocked(resource.data);
     }
     match /thankYouPackages/{id} {
-      allow read: if true;
+      allow get: if true;
+      allow list: if isOwner(resource.data);
       allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
       allow update, delete: if isOwner(resource.data);
     }
@@ -127,7 +180,11 @@ service cloud.firestore {
     // ── customers: public read (photo-log share page needs the customer doc),
     //    owner-only writes. ──
     match /customers/{id} {
-      allow read: if true;
+      // Public GET only (the photo-log page loads one customer by id). A public
+      // LIST would expose every contractor's customer names, phones and
+      // addresses to anyone on the internet.
+      allow get: if true;
+      allow list: if isOwner(resource.data);
       allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
       allow update, delete: if isOwner(resource.data);
     }

@@ -19,14 +19,25 @@ service firebase.storage {
     function owns(userId) {
       return request.auth != null && request.auth.uid == userId;
     }
+    // Uploads must be images and under 25 MB. The app only ever uploads
+    // photos and logos here (phone photos run 3-12 MB); without this a signed-in account could park
+    // arbitrary files (or very large ones) in the bucket on our bill.
+    // `request.resource` is null on delete, so deletes are checked separately.
+    function validImageUpload() {
+      return request.resource.size < 25 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
     match /customerPhotos/{userId}/{allPaths=**} {
-      allow read, write: if owns(userId);
+      allow read, delete: if owns(userId);
+      allow create, update: if owns(userId) && validImageUpload();
     }
     match /projectPhotos/{userId}/{allPaths=**} {
-      allow read, write: if owns(userId);
+      allow read, delete: if owns(userId);
+      allow create, update: if owns(userId) && validImageUpload();
     }
     match /userLogos/{userId}/{allPaths=**} {
-      allow read, write: if owns(userId);
+      allow read, delete: if owns(userId);
+      allow create, update: if owns(userId) && validImageUpload();
     }
     // Everything else is denied by default.
   }

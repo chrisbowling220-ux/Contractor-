@@ -9,7 +9,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:rules": "firebase emulators:exec --only firestore --project demo-setaside \"vitest run --config vitest.rules.config.ts\""
+    "test:rules": "firebase emulators:exec --only firestore,storage --project demo-setaside \"vitest run --config vitest.rules.config.ts\""
   },
   "dependencies": {
     "@clerk/clerk-react": "^5.61.3",

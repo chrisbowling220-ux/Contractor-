@@ -4,6 +4,7 @@ import { db } from './firebase'
 import { BrandHeader, BrandFooter } from './lib/BrandHeader'
 import { FUNCTIONS_BASE_URL } from './lib/config'
 import type { Invoice } from './data/types'
+import { PAYMENT_METHOD_LABEL, isOverdue } from './lib/invoiceMath'
 
 // Public invoice viewer at /inv/<id>. No sign-in required.
 // onRequest function endpoint (not a callable — the paying customer is not
@@ -19,6 +20,8 @@ export default function PublicInvoice({ invoiceId }: { invoiceId: string }) {
   const [showCash, setShowCash] = useState(false)
   // Whether the contractor has finished payout setup — gates the card button.
   const [cardPayOk, setCardPayOk] = useState(false)
+  // Captured once on load: reading the clock during render isn't allowed.
+  const [loadedAtMs] = useState(() => Date.now())
 
   async function payByCard() {
     setPaying(true)
@@ -105,13 +108,20 @@ export default function PublicInvoice({ invoiceId }: { invoiceId: string }) {
   }
 
   const due = new Date(invoice.dueDate)
-  const overdue = invoice.status !== 'paid' && due.getTime() < Date.now()
+  const overdue = isOverdue(invoice, loadedAtMs)
+  const isPaid = invoice.status === 'paid'
+  const payments = invoice.payments || []
+  const recorded = +payments.reduce((s, p) => s + p.amount, 0).toFixed(2)
+  // Credit that isn't an itemised payment (a deposit applied to this invoice).
+  const credit = Math.max(0, +((invoice.amountPaid || 0) - recorded).toFixed(2))
+  // A card payment from before payments were itemised has no entry of its own.
+  const legacyCard = isPaid ? Math.max(0, +(invoice.subtotal - (invoice.amountPaid || 0)).toFixed(2)) : 0
 
   return (
     <div style={{ minHeight: '100vh', background: '#f8fafc', padding: 'clamp(16px, 4vw, 32px)' }}>
       <div style={{ maxWidth: '720px', margin: '0 auto', background: 'white', borderRadius: '12px', boxShadow: '0 1px 2px rgba(15,23,42,0.04), 0 8px 24px rgba(15,23,42,0.06)', overflow: 'hidden' }}>
         <BrandHeader
-          title={`Invoice ${invoice.invoiceNumber}`}
+          title={`${isPaid ? 'Receipt — Invoice' : 'Invoice'} ${invoice.invoiceNumber}`}
           subtitle={`${invoice.jobTypeName} · ${new Date(invoice.createdAt).toLocaleDateString()}`}
           businessName={invoice.businessName}
           logoUrl={invoice.logoUrl}
@@ -124,7 +134,7 @@ export default function PublicInvoice({ invoiceId }: { invoiceId: string }) {
           {/* Status badge */}
           {invoice.status === 'paid' && (
             <div style={{ background: '#f0fdf4', border: '2px solid #16a34a', borderRadius: '12px', padding: '12px 16px', marginBottom: '20px', textAlign: 'center' }}>
-              <strong style={{ color: '#16a34a', fontSize: '15px' }}>✓ Paid</strong>
+              <strong style={{ color: '#16a34a', fontSize: '15px' }}>✓ Paid in full</strong>
               {invoice.paidAt && <span style={{ color: '#64748b', fontSize: '13px', marginLeft: '8px' }}>· {new Date(invoice.paidAt).toLocaleDateString()}</span>}
             </div>
           )}
@@ -188,10 +198,22 @@ export default function PublicInvoice({ invoiceId }: { invoiceId: string }) {
               <span style={{ color: '#cbd5e1' }}>Subtotal</span>
               <span style={{ fontWeight: 600 }}>${invoice.subtotal.toFixed(2)}</span>
             </div>
-            {invoice.amountPaid > 0 && (
+            {credit > 0 && (
               <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', fontSize: '14px' }}>
-                <span style={{ color: '#cbd5e1' }}>Deposit / payments received</span>
-                <span style={{ fontWeight: 600, color: '#86efac' }}>− ${invoice.amountPaid.toFixed(2)}</span>
+                <span style={{ color: '#cbd5e1' }}>Deposit / earlier payment credited</span>
+                <span style={{ fontWeight: 600, color: '#86efac' }}>− ${credit.toFixed(2)}</span>
+              </div>
+            )}
+            {payments.map(p => (
+              <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', fontSize: '14px' }}>
+                <span style={{ color: '#cbd5e1' }}>Payment received · {PAYMENT_METHOD_LABEL[p.method] || p.method} · {new Date(p.date + 'T12:00:00').toLocaleDateString()}</span>
+                <span style={{ fontWeight: 600, color: '#86efac' }}>− ${p.amount.toFixed(2)}</span>
+              </div>
+            ))}
+            {legacyCard > 0 && (
+              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', fontSize: '14px' }}>
+                <span style={{ color: '#cbd5e1' }}>Payment received · Card{invoice.paidAt ? ` · ${new Date(invoice.paidAt).toLocaleDateString()}` : ''}</span>
+                <span style={{ fontWeight: 600, color: '#86efac' }}>− ${legacyCard.toFixed(2)}</span>
               </div>
             )}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '12px', marginTop: '8px', borderTop: '2px solid #f97316' }}>

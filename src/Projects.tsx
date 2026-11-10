@@ -13,6 +13,8 @@ import ShareThankYouModal from './ShareThankYouModal'
 import ThankYouReviewModal from './ThankYouReviewModal'
 import ShareInvoiceModal from './ShareInvoiceModal'
 import { createInvoice, nextInvoiceNumber, regenerateInvoiceCopy } from './lib/createInvoice'
+import { changeOrderBaseTotal, contractTotal, paidOnInvoice } from './lib/invoiceMath'
+import RecordPaymentModal from './RecordPaymentModal'
 import InvoiceEditModal from './InvoiceEditModal'
 import type { Invoice } from './data/types'
 import EstimatePreview from './EstimatePreview'
@@ -66,6 +68,7 @@ export default function Projects({ initialStatusFilter }: { initialStatusFilter?
   const [invoiceDueDays, setInvoiceDueDays] = useState('14')
   const [invoiceShare, setInvoiceShare] = useState<Invoice | null>(null)
   const [invoiceEdit, setInvoiceEdit] = useState<Invoice | null>(null)
+  const [invoicePay, setInvoicePay] = useState<string | null>(null)   // invoice id whose payments are open
   const [invoices, setInvoices] = useState<Invoice[]>([])
   const [statusFilter, setStatusFilter] = useState<ProjectStatus | 'all'>(initialStatusFilter ?? 'all')
   const [viewMode, setViewMode] = useState<'active' | 'completed' | 'declined'>('active')
@@ -145,30 +148,6 @@ export default function Projects({ initialStatusFilter }: { initialStatusFilter?
     )
     return () => unsub()
   }, [user?.id])
-
-  // After a customer pays (card or cash-choice), the dashboard listener stashes
-  // the related projectId in sessionStorage. When this page mounts and projects
-  // are loaded, auto-open that project and its thank-you panel so the user
-  // lands ready to send the thank-you letter — no extra clicks. Runs once
-  // per mount when projects first arrive.
-  const autoOpenedRef = useRef(false)
-  useEffect(() => {
-    if (autoOpenedRef.current) return
-    if (projects.length === 0 || !user?.id) return
-    // Key is user-scoped (set in App.tsx with the same user.id) so a different
-    // contractor on the same browser doesn't inherit a stale signal.
-    const sessionKey = `bp_open_thanks_for_project_${user.id}`
-    let projectId: string | null = null
-    try { projectId = window.sessionStorage?.getItem(sessionKey) || null } catch { /* noop */ }
-    if (!projectId) return
-    const target = projects.find(p => p.id === projectId)
-    if (!target) return
-    autoOpenedRef.current = true
-    try { window.sessionStorage?.removeItem(sessionKey) } catch { /* noop */ }
-    setActiveId(target.id)
-    openThankYouPanel(target).catch(err => console.error('Auto-open thank-you failed:', err))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projects, user?.id])
 
   // Load the contractor's full business profile so print/PDF letterhead
   // and thank-you letter can use logo + contact info + license number.
@@ -289,6 +268,30 @@ export default function Projects({ initialStatusFilter }: { initialStatusFilter?
     }
   }
 
+  // After a customer pays (card or cash-choice), the dashboard listener stashes
+  // the related projectId in sessionStorage. When this page mounts and projects
+  // are loaded, auto-open that project and its thank-you panel so the user
+  // lands ready to send the thank-you letter — no extra clicks. Runs once
+  // per mount when projects first arrive.
+  const autoOpenedRef = useRef(false)
+  useEffect(() => {
+    if (autoOpenedRef.current) return
+    if (projects.length === 0 || !user?.id) return
+    // Key is user-scoped (set in App.tsx with the same user.id) so a different
+    // contractor on the same browser doesn't inherit a stale signal.
+    const sessionKey = `bp_open_thanks_for_project_${user.id}`
+    let projectId: string | null = null
+    try { projectId = window.sessionStorage?.getItem(sessionKey) || null } catch { /* noop */ }
+    if (!projectId) return
+    const target = projects.find(p => p.id === projectId)
+    if (!target) return
+    autoOpenedRef.current = true
+    try { window.sessionStorage?.removeItem(sessionKey) } catch { /* noop */ }
+    setActiveId(target.id)
+    openThankYouPanel(target).catch(err => console.error('Auto-open thank-you failed:', err))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects, user?.id])
+
   const generateThankYouPackage = async (project: Project) => {
     if (!user?.id) { alert('Not signed in.'); return }
     setThankYouLoading(true)
@@ -339,18 +342,12 @@ export default function Projects({ initialStatusFilter }: { initialStatusFilter?
       if (!clerkToken) throw new Error('Not signed in')
 
       // Pull customer contact info if available.
-      const customer = customers.find(c => c.name.toLowerCase() === project.customerName.toLowerCase())
+      const customer = customers.find(c => c.id === project.customerId)
+        ?? customers.find(c => c.name.toLowerCase() === project.customerName.toLowerCase())
 
-      // Generate an invoice number — count existing invoices for this user this year.
-      const existingThisYear = await getDocs(query(
-        collection(db, 'invoices'),
-        where('createdBy', '==', user.id),
-      ))
-      const thisYear = new Date().getFullYear()
-      const sameYearCount = existingThisYear.docs.filter(d => {
-        const c = d.data().createdAt as string
-        return c && new Date(c).getFullYear() === thisYear
-      }).length
+      // Invoice number: one past the highest this contractor has used this year.
+      const existing = await getDocs(query(collection(db, 'invoices'), where('createdBy', '==', user.id)))
+      const usedNumbers = existing.docs.map(d => d.data().invoiceNumber as string | undefined)
 
       const invoice = await createInvoice({
         clerkToken,
@@ -374,7 +371,7 @@ export default function Projects({ initialStatusFilter }: { initialStatusFilter?
         // remaining balance.
         amountPaid: paidDepositForProject(project.id) + (Number(invoiceAmountPaid) || 0),
         dueInDays: Number(invoiceDueDays) || 14,
-        invoiceNumber: nextInvoiceNumber(sameYearCount),
+        invoiceNumber: nextInvoiceNumber(usedNumbers),
       })
       setInvoiceEdit(invoice)
       setInvoicePanelOpen(false)
@@ -454,12 +451,12 @@ ${link}
     return `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
   }
 
-  // Sum of PAID deposit invoices for a project — credited against the final
+  // What has actually been received on a project's deposit invoices (in full or in part) — credited against the final
   // invoice so the customer only owes the remaining balance.
   const paidDepositForProject = (projectId: string) =>
     +invoices
-      .filter(inv => inv.projectId === projectId && inv.isDeposit && inv.status === 'paid')
-      .reduce((s, inv) => s + (inv.subtotal || 0), 0)
+      .filter(inv => inv.projectId === projectId && inv.isDeposit)
+      .reduce((s, inv) => s + paidOnInvoice(inv), 0)
       .toFixed(2)
 
   const aggregateForProject = (p: Project) => {
@@ -473,12 +470,13 @@ ${link}
       : (matchByName(e.customerName) && e.jobTypeName === p.jobTypeName))
     // Filter change orders by projectId (new shape).
     const cos = changeOrders.filter(c => c.projectId === p.id)
-    const quoteTotal = ests.reduce((s, e) => s + e.total, 0)
-    // Only APPROVED change orders change the contract total. Pending/declined
-    // ones are shown in the list but must not inflate what the customer owes.
-    const coDelta = cos.reduce((s, c) => s + (c.status === 'approved' ? (c.delta || 0) : 0), 0)
-    const contractTotal = quoteTotal + coDelta
-    return { ests, cos, quoteTotal, contractTotal }
+    const quoteTotal = ests.reduce((s, e) => s + (e.total || 0), 0)
+    // What the customer owes: live (not declined) estimates plus APPROVED
+    // change orders. A declined project has no live estimate, so it still
+    // shows the quote that was turned down.
+    const live = contractTotal(ests, cos)
+    const total = ests.some(e => e.status !== 'declined') ? live : quoteTotal
+    return { ests, cos, quoteTotal, contractTotal: total }
   }
 
   const archivedCount = useMemo(() => projects.filter(p => p.archived && !p.declined).length, [projects])
@@ -509,7 +507,8 @@ ${link}
 
   if (activeProject && activeAgg) {
     const sc = STATUS_COLOR[activeProject.status]
-    const customer = customers.find(c => c.name === activeProject.customerName)
+    const customer = customers.find(c => c.id === activeProject.customerId)
+      ?? customers.find(c => c.name.toLowerCase() === activeProject.customerName.toLowerCase())
     const idx = PROJECT_STATUS_ORDER.indexOf(activeProject.status)
     return (
       <div style={{ padding: 'clamp(16px, 4vw, 32px)' }}>
@@ -879,11 +878,12 @@ ${link}
                           <div style={{ minWidth: 0 }}>
                             <span style={{ fontWeight: 700, fontSize: '14px' }}>{inv.invoiceNumber}</span>
                             <span style={{ marginLeft: '8px', fontSize: '13px', color: '#64748b' }}>
-                              {paid ? `Paid $${(inv.subtotal || 0).toFixed(2)}` : `$${(inv.amountDue || 0).toFixed(2)} due`}
+                              {paid ? `Paid $${paidOnInvoice(inv).toFixed(2)}` : `$${(inv.amountDue || 0).toFixed(2)} due${(inv.amountPaid || 0) > 0 ? ` · $${(inv.amountPaid || 0).toFixed(2)} received` : ''}`}
                             </span>
                             <span style={{ marginLeft: '8px', background: paid ? '#f0fdf4' : '#fff7ed', color: paid ? '#16a34a' : '#ea580c', padding: '2px 8px', borderRadius: '999px', fontSize: '11px', fontWeight: 700, textTransform: 'uppercase' }}>{inv.status}</span>
                           </div>
                           <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                            <button onClick={() => setInvoicePay(inv.id)} style={{ background: paid ? '#f1f5f9' : '#16a34a', color: paid ? '#1a1f2e' : 'white', border: paid ? '1px solid #cbd5e1' : 'none', padding: '6px 12px', borderRadius: '6px', cursor: 'pointer', fontWeight: 700, fontSize: '12px' }}>{paid ? '🧾 Payments' : '💵 Record payment'}</button>
                             {!paid && <button onClick={() => setInvoiceEdit(inv)} style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '6px 12px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '12px' }}>✏️ Edit</button>}
                             <button onClick={() => setInvoiceShare(inv)} style={{ background: '#1a1f2e', color: 'white', border: 'none', padding: '6px 12px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '12px' }}>📤 Send</button>
                           </div>
@@ -966,7 +966,7 @@ ${link}
             customerName={activeProject.customerName}
             jobTypeName={activeProject.jobTypeName}
             jobLocationZip={activeProject.jobLocationZip}
-            originalTotal={activeAgg.quoteTotal}
+            originalTotal={changeOrderBaseTotal(activeAgg.ests, activeAgg.cos, coEditing?.id)}
             existing={coEditing}
             onClose={() => { setCoFormOpen(false); setCoEditing(null) }}
             onSaved={onChangeOrderSaved}
@@ -1029,6 +1029,19 @@ ${link}
                 dueInDays: 14,
                 paymentMethods: paymentMethods || undefined,
               })
+            }}
+          />
+        )}
+
+        {invoicePay && invoices.find(i => i.id === invoicePay) && (
+          <RecordPaymentModal
+            invoice={invoices.find(i => i.id === invoicePay)!}
+            onClose={() => setInvoicePay(null)}
+            onPaidInFull={async (inv) => {
+              // Same rule as a card payment: once the FINAL invoice is paid, a
+              // completed job closes. A deposit never closes a job.
+              if (inv.isDeposit || activeProject.status !== 'completed') return
+              await advance(activeProject, 'closed')
             }}
           />
         )}

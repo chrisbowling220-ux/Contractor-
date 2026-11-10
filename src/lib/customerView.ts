@@ -19,14 +19,26 @@ export function toCustomerView(q: AIQuote): AIQuote {
   let nextLaborSubtotal = q.price_breakdown.labor_subtotal
 
   if (hasMaterials) {
-    // Distribute markup proportionally across material line items.
-    const multiplier = 1 + markupDollars / materialsSubtotal
-    nextMaterials = q.material_list.map(m => {
-      const newUnitPrice = +(m.unit_price * multiplier).toFixed(2)
-      const newLineTotal = +(newUnitPrice * m.quantity_with_waste).toFixed(2)
-      return { ...m, unit_price: newUnitPrice, line_total: newLineTotal }
+    // Distribute markup proportionally across material line items. Work on the
+    // LINE TOTALS (not the unit prices) and hand any leftover cents to the
+    // biggest line, so the lines add up to exactly materials + markup. Rounding
+    // the unit price first and multiplying back by the quantity drifts by
+    // dollars on large quantities, and then the breakdown no longer matches the
+    // total the customer signed.
+    const target = +(materialsSubtotal + markupDollars).toFixed(2)
+    const multiplier = target / materialsSubtotal
+    const totals = q.material_list.map(m => +((Number(m.line_total) || 0) * multiplier).toFixed(2))
+    const drift = +(target - totals.reduce((s, t) => s + t, 0)).toFixed(2)
+    if (drift !== 0) {
+      const biggest = totals.indexOf(Math.max(...totals))
+      totals[biggest] = +(totals[biggest] + drift).toFixed(2)
+    }
+    nextMaterials = q.material_list.map((m, i) => {
+      const qty = Number(m.quantity_with_waste) || 0
+      const newUnitPrice = qty > 0 ? +(totals[i] / qty).toFixed(2) : +(m.unit_price * multiplier).toFixed(2)
+      return { ...m, unit_price: newUnitPrice, line_total: totals[i] }
     })
-    nextMaterialsSubtotal = +nextMaterials.reduce((s, m) => s + m.line_total, 0).toFixed(2)
+    nextMaterialsSubtotal = target
   } else {
     // No materials — bake into labor so the total still adds up.
     const newLaborTotal = +(q.labor.labor_total + markupDollars).toFixed(2)

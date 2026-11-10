@@ -130,19 +130,15 @@ export async function autoConvertApprovedEstimates(userId: string): Promise<{
           const fresh = eSnap.exists() ? ({ id: e.id, ...eSnap.data() } as Estimate) : e
           if (fresh.projectId && !fresh.depositInvoiceCreated) {
             const profile = await fetchBusinessProfile(userId)
-            // Invoice number: count this user's invoices this year.
+            // Invoice number: one past the highest this user has used this year.
             const invSnap = await getDocs(query(collection(db, 'invoices'), where('createdBy', '==', userId)))
-            const thisYear = new Date().getFullYear()
-            const sameYear = invSnap.docs.filter(d => {
-              const c = d.data().createdAt as string
-              return c && new Date(c).getFullYear() === thisYear
-            }).length
+            const usedNumbers = invSnap.docs.map(d => d.data().invoiceNumber as string | undefined)
             await createDepositInvoice({
               userId,
               estimate: fresh,
               project: { id: fresh.projectId },
               profile,
-              invoiceNumber: nextInvoiceNumber(sameYear),
+              invoiceNumber: nextInvoiceNumber(usedNumbers),
             })
             await updateDoc(doc(db, 'estimates', e.id), { depositInvoiceCreated: true })
           }

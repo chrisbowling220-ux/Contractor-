@@ -24,7 +24,8 @@ import { TermsPage, PrivacyPage } from './LegalPages'
 import SafeToSpend from './SafeToSpend'
 import { fireDueReminders, fireMorningAgenda, requestNotificationPermission, alertsEnabled, setAlertsEnabled, playAlertCue } from './lib/reminders'
 import { tipOfTheDay } from './data/contractorTips'
-import type { ProjectStatus } from './data/types'
+import type { Invoice, ProjectStatus } from './data/types'
+import { collectedBetween, isOverdue, localDateStr } from './lib/invoiceMath'
 
 const ORANGE = '#f97316'
 const NAVY = '#1a1f2e'
@@ -136,12 +137,10 @@ function useDashboardCounts(userId: string | undefined, refreshKey = 0) {
         const now = new Date()
         const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime()
         const invDocs = invoices.docs.map(d => ({ id: d.id, ...d.data() } as Record<string, unknown> & { id: string }))
-        const paidInvoices = invDocs.filter(i => i.status === 'paid' && i.paidAt)
-        const paidAtMs = (i: typeof invDocs[number]) => new Date(i.paidAt as string).getTime()
-        const amountOf = (i: typeof invDocs[number]) => (i.subtotal as number) || 0
-        const revenueThisMonth = +paidInvoices
-          .filter(i => paidAtMs(i) >= monthStart)
-          .reduce((s, i) => s + amountOf(i), 0).toFixed(2)
+        // Money is counted when it actually arrived: each recorded payment on
+        // its own date, and never a credited deposit twice (see collectedEvents).
+        const moneyDocs = invDocs as unknown as Invoice[]
+        const revenueThisMonth = collectedBetween(moneyDocs, monthStart)
 
         // ── Weekly money: this week + the last 4 weeks (Monday-anchored). Helps
         //    the contractor see at a glance if cash is keeping up week to week. ──
@@ -153,17 +152,13 @@ function useDashboardCounts(userId: string | undefined, refreshKey = 0) {
           return x
         }
         const thisMonday = startOfWeek(now)
-        const revenueThisWeek = +paidInvoices
-          .filter(i => paidAtMs(i) >= thisMonday.getTime())
-          .reduce((s, i) => s + amountOf(i), 0).toFixed(2)
+        const revenueThisWeek = collectedBetween(moneyDocs, thisMonday.getTime())
         // Build 4 buckets: 3 weeks ago → this week (oldest first).
         const weeklyRevenue: { label: string; amount: number }[] = []
         for (let w = 3; w >= 0; w--) {
           const weekStart = new Date(thisMonday); weekStart.setDate(weekStart.getDate() - w * 7)
           const weekEnd = new Date(weekStart); weekEnd.setDate(weekEnd.getDate() + 7)
-          const amount = +paidInvoices
-            .filter(i => { const t = paidAtMs(i); return t >= weekStart.getTime() && t < weekEnd.getTime() })
-            .reduce((s, i) => s + amountOf(i), 0).toFixed(2)
+          const amount = collectedBetween(moneyDocs, weekStart.getTime(), weekEnd.getTime())
           const label = w === 0 ? 'This wk' : weekStart.toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' })
           weeklyRevenue.push({ label, amount })
         }
@@ -172,8 +167,10 @@ function useDashboardCounts(userId: string | undefined, refreshKey = 0) {
         //    contractor should act on so nothing slips through the cracks. ──
         const attention: AttentionItem[] = []
         const DAY = 86400000
-        const todayStr = new Date().toISOString().slice(0, 10)
-        const tomorrowStr = new Date(now.getTime() + DAY).toISOString().slice(0, 10)
+        // LOCAL calendar days. The UTC date is already tomorrow every evening in
+        // the US, which put "starts today" a day off after about 7pm.
+        const todayStr = localDateStr(now)
+        const tomorrowStr = localDateStr(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1))
         const projDocs = projects.docs.map(d => ({ id: d.id, ...d.data() } as Record<string, unknown> & { id: string }))
         // Which projects already have an invoice? (so we can flag the ones that don't)
         const projectsWithInvoice = new Set(invDocs.map(i => i.projectId as string).filter(Boolean))
@@ -197,7 +194,7 @@ function useDashboardCounts(userId: string | undefined, refreshKey = 0) {
 
         // 1) Unpaid invoices past their due date — only for jobs that are still
         //    open (skips deleted/completed/closed projects & orphan invoices).
-        invDocs.filter(i => i.status !== 'paid' && !i.customerCashChoice && i.dueDate && new Date(i.dueDate as string).getTime() < now.getTime()
+        invDocs.filter(i => !i.customerCashChoice && isOverdue(i as unknown as Invoice, now.getTime())
             && billable(i.projectId as string | undefined))
           .forEach(i => attention.push({
             id: `inv-${i.id}`, kind: 'overdue_invoice', goto: 'projects',
@@ -391,7 +388,7 @@ function DashboardHome({ counts, onPick, onBox, onPhotos, onQuickAdd, userName }
   // Reminders the user has tapped/cleared. Persisted per-DAY in localStorage so
   // a cleared item stays gone for the rest of today, then naturally returns
   // tomorrow if it's still relevant ("clears itself, pops back when necessary").
-  const dismissKey = `bp_dismissed_reminders_${new Date().toISOString().slice(0, 10)}`
+  const dismissKey = `bp_dismissed_reminders_${localDateStr()}`
   const [dismissed, setDismissed] = useState<Set<string>>(() => {
     try { return new Set(JSON.parse(localStorage.getItem(dismissKey) || '[]') as string[]) } catch { return new Set() }
   })

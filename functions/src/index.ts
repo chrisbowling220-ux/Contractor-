@@ -1599,6 +1599,30 @@ function escapeHtml(s: string): string {
     .replace(/'/g, '&#39;')
 }
 
+// ── Outbound customer email guard rails ──
+// These two functions send mail from OUR verified domain to an address the
+// caller chooses, so a signed-in account could otherwise use them to send
+// anything to anyone. Three limits: a daily cap per contractor, header fields
+// stripped of line breaks and capped in length, and links only to our own site.
+const EMAIL_DAILY_CAP = 60
+const cleanHeader = (v: string | undefined, max: number): string =>
+  (v || '').replace(/[\r\n\t]+/g, ' ').replace(/[<>"]/g, '').trim().slice(0, max)
+const isOwnLink = (url: string | undefined): boolean =>
+  typeof url === 'string' && url.startsWith(`${PUBLIC_HOST}/`)
+
+async function consumeEmailSendOrThrow(userId: string): Promise<void> {
+  const db = getAdminDb()
+  const day = new Date().toISOString().slice(0, 10)
+  const ref = db.collection('emailUsage').doc(userId).collection('days').doc(day)
+  await db.runTransaction(async tx => {
+    const count = Number((await tx.get(ref)).data()?.count ?? 0)
+    if (count >= EMAIL_DAILY_CAP) {
+      throw new HttpsError('resource-exhausted', `You've reached today's limit of ${EMAIL_DAILY_CAP} emails. Use the text or copy-link option, or try again tomorrow.`)
+    }
+    tx.set(ref, { count: count + 1, updatedAt: new Date().toISOString() }, { merge: true })
+  })
+}
+
 export const sendEstimateEmail = onCall<SendEstimateCallPayload>(
   {
     secrets: [CLERK_SECRET_KEY, RESEND_API_KEY],
@@ -1615,7 +1639,11 @@ export const sendEstimateEmail = onCall<SendEstimateCallPayload>(
     }
 
     const userId = await verifyClerk(clerkToken)
-    console.log(`sendEstimateEmail user=${userId} to=${input.to}`)
+    console.log(`sendEstimateEmail user=${userId}`)
+    input.fromName = cleanHeader(input.fromName, 80) || undefined
+    input.subject = cleanHeader(input.subject, 150) || undefined
+    if (input.replyTo && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.replyTo)) input.replyTo = undefined
+    await consumeEmailSendOrThrow(userId)
 
     const html = renderEstimateEmailHtml(input)
     const subject = input.subject || `Estimate from ${input.fromName || 'Your Contractor'} — ${input.estimate.jobTypeName}`
@@ -1768,7 +1796,13 @@ export const sendInvoiceEmail = onCall<SendInvoiceCallPayload>(
     }
 
     const userId = await verifyClerk(clerkToken)
-    console.log(`sendInvoiceEmail user=${userId} to=${input.to} inv=${input.invoice.invoiceNumber}`)
+    console.log(`sendInvoiceEmail user=${userId} inv=${input.invoice.invoiceNumber}`)
+    input.fromName = cleanHeader(input.fromName, 80) || undefined
+    input.subject = cleanHeader(input.subject, 150) || undefined
+    input.invoice.businessName = cleanHeader(input.invoice.businessName, 80) || undefined
+    // The pay button may only point at an invoice page on our own site.
+    if (!isOwnLink(input.invoice.payUrl)) throw new HttpsError('invalid-argument', 'Invalid invoice link')
+    await consumeEmailSendOrThrow(userId)
 
     const html = renderInvoiceEmailHtml(input)
     const subject = input.subject
@@ -2359,8 +2393,25 @@ interface InvoiceDoc {
   invoiceNumber?: string
   jobTypeName?: string
   amountDue?: number
+  amountPaid?: number
+  subtotal?: number
+  isDeposit?: boolean
+  projectId?: string
+  payments?: unknown[]
   status?: 'draft' | 'sent' | 'paid' | 'overdue'
   createdBy?: string   // the contractor who owns this invoice — money routes to them
+}
+
+// Next INV-YYYY-NNNN: one past the HIGHEST number this contractor has used this
+// year. (Counting invoices reuses a number as soon as one is deleted. Keep in
+// step with nextInvoiceNumberFrom in src/lib/invoiceMath.ts.)
+function nextInvoiceNumberFor(existing: (string | undefined)[], year: number): string {
+  let max = 0
+  for (const n of existing) {
+    const m = /^INV-(\d{4})-(\d+)$/.exec(n || '')
+    if (m && Number(m[1]) === year) max = Math.max(max, Number(m[2]))
+  }
+  return `INV-${year}-${String(max + 1).padStart(4, '0')}`
 }
 
 // Platform fee taken off the top of every customer card payment, to cover the
@@ -2415,7 +2466,9 @@ export const createDepositInvoiceForApproval = onRequest(
           const exDoc = existing.docs[0]
           const exData = exDoc.data() as Record<string, unknown>
           const fullAmt = +Number(est.total || 0).toFixed(2)
-          if (payFull && exData.status !== 'paid' && Number(exData.subtotal) !== fullAmt) {
+          // Never re-price an invoice that already has money on it.
+          const untouched = !(Number(exData.amountPaid) > 0) && !(Array.isArray(exData.payments) && exData.payments.length > 0)
+          if (payFull && exData.status !== 'paid' && untouched && Number(exData.subtotal) !== fullAmt) {
             await exDoc.ref.set({ subtotal: fullAmt, amountDue: fullAmt, payFull: true }, { merge: true })
           }
           res.json({ invoiceId: exDoc.id }); return
@@ -2434,14 +2487,10 @@ export const createDepositInvoiceForApproval = onRequest(
       const userSnap = await db.collection('users').doc(ownerId).get()
       const u = (userSnap.data() as Record<string, unknown>) || {}
 
-      // Invoice number: count this owner's invoices this year.
+      // Invoice number: one past the highest this owner has used this year.
       const invSnap = await db.collection('invoices').where('createdBy', '==', ownerId).get()
-      const year = new Date().getFullYear()
-      const sameYear = invSnap.docs.filter(d => {
-        const c = d.data().createdAt as string
-        return c && new Date(c).getFullYear() === year
-      }).length
-      const invoiceNumber = `INV-${year}-${String(sameYear + 1).padStart(4, '0')}`
+      const invoiceNumber = nextInvoiceNumberFor(
+        invSnap.docs.map(d => d.data().invoiceNumber as string | undefined), new Date().getFullYear())
 
       const payload: Record<string, unknown> = {
         ...(projectId ? { projectId } : {}),
@@ -2968,30 +3017,50 @@ export const stripeWebhook = onRequest(
               console.log(`Invoice ${invoiceId} already marked paid — skipping duplicate webhook event`)
               break
             }
+            const invData = (invSnap.data() as InvoiceDoc | undefined) ?? {}
+            // What Stripe actually collected, in dollars. Falls back to the
+            // balance on the invoice if the event carries no total.
+            const paidDollars = typeof session.amount_total === 'number'
+              ? +(session.amount_total / 100).toFixed(2)
+              : +Number(invData.amountDue ?? 0).toFixed(2)
+            const nowIso = new Date().toISOString()
+            // Eastern calendar day, matching how the app dates payments.
+            const payDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
             await invRef.set({
               status: 'paid',
               amountDue: 0,
-              paidAt: new Date().toISOString(),
+              // Itemise the card payment in the invoice's payment history and
+              // count it in amountPaid, so the receipt and the dashboard's
+              // "money in" both show it. session.id makes the entry unique.
+              amountPaid: +(Number(invData.amountPaid ?? 0) + paidDollars).toFixed(2),
+              payments: FieldValue.arrayUnion({
+                id: `stripe_${session.id}`,
+                amount: paidDollars,
+                method: 'card',
+                date: payDate,
+                recordedAt: nowIso,
+                source: 'stripe',
+              }),
+              paidAt: nowIso,
               paidAtMs: Date.now(),   // numeric anchor for the 2-year retention lock
               stripePaymentIntentId: typeof session.payment_intent === 'string' ? session.payment_intent : null,
             }, { merge: true })
             console.log(`Invoice ${invoiceId} marked paid via Stripe`)
 
-            // Auto-advance the project to "closed" now that it's paid. Only move
-            // forward from completed → closed; never knock a project backward.
-            const projectId = (invSnap.data() as { projectId?: string } | undefined)?.projectId
-            if (projectId) {
+            // Auto-close the project when its FINAL invoice is paid — and only
+            // from "completed". A DEPOSIT (or pay-in-full-upfront) invoice is
+            // paid before the work starts; closing the job on it took a job
+            // that hadn't begun out of the active list. The contractor's notes
+            // are left alone (this used to overwrite them).
+            const projectId = invData.projectId
+            if (projectId && !invData.isDeposit) {
               try {
                 const projRef = db.collection('projects').doc(projectId)
                 const projSnap = await projRef.get()
                 const status = (projSnap.data() as { status?: string } | undefined)?.status
-                if (status && status !== 'closed') {
-                  await projRef.set({
-                    status: 'closed',
-                    closedAt: new Date().toISOString(),
-                    notes: 'Invoice paid in full — project auto-closed.',
-                  }, { merge: true })
-                  console.log(`Project ${projectId} auto-closed (invoice paid)`)
+                if (status === 'completed') {
+                  await projRef.set({ status: 'closed', closedAt: nowIso }, { merge: true })
+                  console.log(`Project ${projectId} auto-closed (final invoice paid)`)
                 }
               } catch (projErr) {
                 console.error('Could not auto-close project after payment', projErr)
@@ -3106,8 +3175,8 @@ export const morningAgendaAlert = onSchedule(
         if (!to || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) { console.log(`Skip ${uid}: no valid email`); continue }
 
         const lines: string[] = []
-        if (agenda.jobs.length) lines.push('<strong>Jobs today:</strong><ul>' + agenda.jobs.map(j => `<li>🔨 ${j}</li>`).join('') + '</ul>')
-        if (agenda.events.length) lines.push('<strong>On your calendar:</strong><ul>' + agenda.events.map(e => `<li>📌 ${e}</li>`).join('') + '</ul>')
+        if (agenda.jobs.length) lines.push('<strong>Jobs today:</strong><ul>' + agenda.jobs.map(j => `<li>🔨 ${escapeHtml(j)}</li>`).join('') + '</ul>')
+        if (agenda.events.length) lines.push('<strong>On your calendar:</strong><ul>' + agenda.events.map(e => `<li>📌 ${escapeHtml(e)}</li>`).join('') + '</ul>')
         const prettyDate = new Date(todayISO + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })
         const html = `<div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;color:#1a1f2e">
           <h2 style="color:#f97316;margin:0 0 4px">Good morning${u.businessName ? ', ' + escapeHtml(u.businessName) : ''} ☀️</h2>

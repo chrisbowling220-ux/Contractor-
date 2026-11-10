@@ -2,6 +2,7 @@ import { httpsCallable } from 'firebase/functions'
 import { addDoc, collection } from 'firebase/firestore'
 import { db, functions } from '../firebase'
 import type { Invoice, InvoiceLine, Estimate, ChangeOrder } from '../data/types'
+import { balanceOf, buildInvoiceLineItems, money, nextInvoiceNumberFrom, sumLines } from './invoiceMath'
 import type { BusinessProfile } from '../Settings'
 
 const generateInvoiceCopyCallable = httpsCallable<
@@ -53,66 +54,15 @@ export async function createInvoice(args: BuildInvoiceArgs): Promise<Invoice> {
   const { clerkToken, userId, project, estimates, changeOrders, profile } = args
   if (!clerkToken) throw new Error('Not signed in')
 
-  // ── 1. Line items
-  // Prefer the first estimate's AI quote (richest data). Fall back to a single
-  // line representing the estimate total if no AI quote exists.
-  const lineItems: InvoiceLine[] = []
-  const primaryEstimate = estimates[0]
-
-  if (primaryEstimate?.aiQuote && primaryEstimate.aiQuote.material_list.length > 0) {
-    // Materials line items
-    for (const m of primaryEstimate.aiQuote.material_list) {
-      lineItems.push({
-        name: m.name,
-        quantity: m.quantity_with_waste,
-        unitPrice: m.unit_price,
-        lineTotal: m.line_total,
-      })
-    }
-    // Labor as a single line
-    const labor = primaryEstimate.aiQuote.labor
-    if (labor && labor.labor_total > 0) {
-      lineItems.push({
-        name: `Labor — ${labor.estimated_hours} hours @ $${labor.hourly_rate}/hr`,
-        quantity: 1,
-        unitPrice: labor.labor_total,
-        lineTotal: labor.labor_total,
-      })
-    }
-    // Rentals as a single line if any
-    const rentals = primaryEstimate.aiQuote.price_breakdown.rentals_subtotal
-    if (rentals && rentals > 0) {
-      lineItems.push({
-        name: 'Rental equipment',
-        quantity: 1,
-        unitPrice: rentals,
-        lineTotal: rentals,
-      })
-    }
-  } else if (primaryEstimate) {
-    // No structured AI quote — single roll-up line.
-    lineItems.push({
-      name: `${project.jobTypeName} (per estimate)`,
-      quantity: 1,
-      unitPrice: primaryEstimate.total || 0,
-      lineTotal: primaryEstimate.total || 0,
-    })
-  }
-
-  // Change orders — only include approved ones (declined/pending should NOT
-  // appear on the final invoice).
-  for (const co of changeOrders.filter(c => c.status === 'approved')) {
-    lineItems.push({
-      name: `Change Order: ${co.description}`,
-      quantity: 1,
-      unitPrice: co.delta,
-      lineTotal: co.delta,
-    })
-  }
-
-  const subtotal = +lineItems.reduce((s, l) => s + l.lineTotal, 0).toFixed(2)
-  const amountPaid = +(args.amountPaid || 0).toFixed(2)
-  const amountDue = +(subtotal - amountPaid).toFixed(2)
+  // ── 1. Line items: every live estimate (markup folded into the prices, so
+  // the lines add up to what the customer signed) plus approved change orders.
+  // The math lives in invoiceMath.ts, where it is unit-tested.
+  const lineItems: InvoiceLine[] = buildInvoiceLineItems(estimates, changeOrders, project.jobTypeName)
+  const subtotal = sumLines(lineItems)
+  // A credit can't exceed the invoice (a deposit larger than the final bill
+  // would otherwise show a negative amount due).
+  const amountPaid = Math.min(Math.max(0, money(args.amountPaid || 0)), Math.max(0, subtotal))
+  const amountDue = balanceOf(subtotal, amountPaid)
   const dueInDays = args.dueInDays ?? 14
   const dueDate = new Date(Date.now() + dueInDays * 24 * 60 * 60 * 1000).toISOString()
 
@@ -273,11 +223,8 @@ export async function regenerateInvoiceCopy(args: {
   return { introNote: res.data.intro_note, paymentTerms: res.data.payment_terms }
 }
 
-// Generates the next invoice number for a user. Simple format: INV-YYYY-NNNN
-// where NNNN increments per user per year. Falls back to timestamp-based if
-// the count lookup fails.
-export function nextInvoiceNumber(existingCount: number): string {
-  const year = new Date().getFullYear()
-  const n = String(existingCount + 1).padStart(4, '0')
-  return `INV-${year}-${n}`
+// Next invoice number for a user, INV-YYYY-NNNN: one past the highest number
+// already used this year (see nextInvoiceNumberFrom for why it isn't a count).
+export function nextInvoiceNumber(existingNumbers: (string | undefined)[]): string {
+  return nextInvoiceNumberFrom(existingNumbers)
 }

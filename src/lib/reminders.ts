@@ -13,7 +13,9 @@ const FIRED_KEY = 'bp_fired_reminders'
 const ALERTS_PREF_KEY = 'bp_alerts_enabled'   // the user's ON/OFF switch (separate from browser permission)
 
 function todayStamp(): string {
-  return new Date().toISOString().slice(0, 10)
+  // Local calendar day (the UTC date rolls over in the early evening in the US).
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
 // Has the browser granted notification permission?

@@ -204,6 +204,21 @@ export interface InvoiceLine {
   lineTotal: number
 }
 
+export type PaymentMethod = 'cash' | 'check' | 'card' | 'zelle' | 'venmo' | 'bank_transfer' | 'other'
+
+// One payment received against an invoice. Recording one is bookkeeping: it
+// does not charge anybody. Card payments taken through Stripe checkout are
+// added by the webhook with source 'stripe'.
+export interface InvoicePayment {
+  id: string
+  amount: number
+  method: PaymentMethod
+  date: string          // yyyy-mm-dd the money was received
+  note?: string         // e.g. check number
+  recordedAt: string    // ISO timestamp the entry was made
+  source: 'manual' | 'stripe'
+}
+
 export interface Invoice {
   id: string
   projectId: string
@@ -220,8 +235,9 @@ export interface Invoice {
   // Line items rolled up from estimate + approved change orders
   lineItems: InvoiceLine[]
   subtotal: number
-  amountPaid: number            // for deposits already received
-  amountDue: number             // subtotal - amountPaid
+  amountPaid: number            // deposit credit + every payment recorded so far
+  amountDue: number             // subtotal - amountPaid (what card checkout charges)
+  payments?: InvoicePayment[]   // payment history (see lib/invoiceMath.ts)
   // Snapshot of contractor profile at time of generation
   businessName?: string
   businessPhone?: string

@@ -3,6 +3,7 @@ import { doc, updateDoc } from 'firebase/firestore'
 import { db } from './firebase'
 import type { Invoice } from './data/types'
 import { PUBLIC_HOST } from './lib/config'
+import { balanceOf } from './lib/invoiceMath'
 
 interface Props {
   invoice: Invoice
@@ -19,7 +20,10 @@ interface Props {
 export default function InvoiceEditModal({ invoice, onRegenerate, onDone, onClose }: Props) {
   const [introNote, setIntroNote] = useState(invoice.introNote)
   const [paymentTerms, setPaymentTerms] = useState(invoice.paymentTerms)
-  const [amountPaid, setAmountPaid] = useState(String(invoice.amountPaid || 0))
+  // Payments recorded one by one (Record payment) are kept as they are; this
+  // field edits only the lump credit applied on top of them, such as a deposit.
+  const recorded = +(invoice.payments || []).reduce((s, p) => s + p.amount, 0).toFixed(2)
+  const [amountPaid, setAmountPaid] = useState(String(Math.max(0, +((invoice.amountPaid || 0) - recorded).toFixed(2))))
   const [paymentMethods, setPaymentMethods] = useState('')
   // Due date as yyyy-mm-dd for the date input.
   const [dueDate, setDueDate] = useState(invoice.dueDate ? invoice.dueDate.slice(0, 10) : '')
@@ -27,8 +31,9 @@ export default function InvoiceEditModal({ invoice, onRegenerate, onDone, onClos
   const [regenerating, setRegenerating] = useState(false)
   const [savedNote, setSavedNote] = useState('')
 
-  const paidNum = Math.max(0, Number(amountPaid) || 0)
-  const amountDue = +(invoice.subtotal - paidNum).toFixed(2)
+  const creditNum = Math.min(Math.max(0, Number(amountPaid) || 0), Math.max(0, +(invoice.subtotal - recorded).toFixed(2)))
+  const paidNum = +(creditNum + recorded).toFixed(2)
+  const amountDue = balanceOf(invoice.subtotal, paidNum)
 
   const buildUpdates = () => ({
     introNote,
@@ -137,7 +142,7 @@ export default function InvoiceEditModal({ invoice, onRegenerate, onDone, onClos
             <textarea value={paymentTerms} onChange={e => setPaymentTerms(e.target.value)} rows={3} style={{ ...field, marginBottom: '12px' }} />
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
               <div>
-                <label style={fieldLabel}>Amount already paid ($)</label>
+                <label style={fieldLabel}>Deposit / credit applied ($)</label>
                 <input type="number" value={amountPaid} onChange={e => setAmountPaid(e.target.value)} style={field} placeholder="0" />
               </div>
               <div>

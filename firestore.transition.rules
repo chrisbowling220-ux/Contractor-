@@ -1,0 +1,389 @@
+rules_version = '2';
+
+// ═══ TRANSITION RULES — deploy WITH the new app version, replace later ═══
+// Identical to firestore.rules except for three reads marked TRANSITION
+// below, which stay open the way the urgent rules left them:
+//   users/{id}            public get   (share-page branding)
+//   customers/{id}        public get   (photo-log page)
+//   customerPhotos        public read  (photo-log page)
+// The new app publishes customer-safe copies (publicProfiles, photoLogs) the
+// first time each contractor opens it. Until every active contractor has done
+// that, share links they sent earlier still need the old reads. Once they
+// have, deploy firestore.rules, which closes all three.
+//   npx firebase deploy --only firestore:rules --config firebase.transition.json
+
+// Per-user isolation is enforced here using the Clerk→Firebase bridge:
+// exchangeFirebaseToken (Cloud Function) mints a Firebase custom token whose
+// uid == the Clerk user id, and the frontend signs in with it. So
+// request.auth.uid == the Clerk user id, and it matches the `createdBy` field
+// (and {userId} doc id) that all data is keyed by.
+//
+// Public share pages (estimate, invoice, change order, thank-you, photo log)
+// are viewed by UNAUTHENTICATED customers. A document they were sent can be
+// opened by its unguessable id (get) but nothing is ever publicly listable,
+// and estimates/changeOrders allow a tightly-scoped public UPDATE so the
+// customer can sign off (only the response fields — never totals/line items).
+// Contractor-private records (users, customers, photos, projects) have no
+// public access at all; share pages read publicProfiles and photoLogs.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function isOwner(resourceData) {
+      return isSignedIn() && request.auth.uid == resourceData.createdBy;
+    }
+    // True if the incoming write changes ONLY the listed fields (plus none else).
+    function onlyChanges(allowed) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(allowed);
+    }
+
+    // ── 2-YEAR LEGAL RETENTION LOCK ──
+    // E-signed documents (and paid invoices) are the contractor's proof in a
+    // dispute, so they CANNOT be deleted until 2 years after the signing/payment.
+    // `anchorMs` is the epoch-ms the clock starts from (signedAtMs / paidAtMs).
+    // 2 years = 730 days = 63,072,000,000 ms.
+    function withinRetention(anchorMs) {
+      return anchorMs is int && request.time.toMillis() < (anchorMs + 63072000000);
+    }
+    // A signed estimate/change order is locked while within retention.
+    function signedDocLocked(d) {
+      return ('signedAtMs' in d) && withinRetention(d.signedAtMs);
+    }
+    // A paid invoice is locked while within retention.
+    function paidInvoiceLocked(d) {
+      return ('paidAtMs' in d) && withinRetention(d.paidAtMs);
+    }
+
+
+    // ── PUBLIC SIGN-OFF (estimates + change orders) ──
+    // The anonymous customer may answer ONCE, while the document is still
+    // pending. After that only the owner can change it (re-sending an edited
+    // version puts it back to pending). Without the pending check anyone
+    // holding the link could flip an approved job to declined, re-sign it under
+    // another name, or push signedAtMs into the future to lock the document
+    // against deletion forever.
+    function validSignoff() {
+      let r = request.resource.data;
+      let c = r.customerResponse;
+      let nowMs = request.time.toMillis();
+      let signedChanged = request.resource.data.diff(resource.data).affectedKeys().hasAny(['signedAtMs']);
+      return resource.data.status == 'pending'
+        && r.status in ['approved', 'declined']
+        && c is map
+        && c.keys().hasOnly(['action', 'signedName', 'reason', 'respondedAt'])
+        && c.action == r.status
+        && c.signedName is string && c.signedName.size() > 0 && c.signedName.size() <= 120
+        && c.respondedAt is string && c.respondedAt.size() <= 40
+        && (!('reason' in c) || (c.reason is string && c.reason.size() <= 2000))
+        // Approval stamps the retention clock; it has to be "about now" (the
+        // customer's phone clock, so allow two days of slack). A decline must
+        // leave it alone.
+        && (r.status == 'approved'
+            ? (r.signedAtMs is int
+               && r.signedAtMs > nowMs - 172800000
+               && r.signedAtMs < nowMs + 172800000)
+            : !signedChanged);
+    }
+    function validStartDateResponse() {
+      let d = request.resource.data.startDateResponse;
+      return d is map
+        && d.keys().hasOnly(['action', 'requestedDate', 'note', 'respondedAt'])
+        && d.action in ['confirmed', 'requested_change']
+        && (!('requestedDate' in d) || (d.requestedDate is string && d.requestedDate.size() <= 10))
+        && (!('note' in d) || (d.note is string && d.note.size() <= 1000))
+        && d.respondedAt is string && d.respondedAt.size() <= 40;
+    }
+
+    // ── users/{userId}: the owner's profile, plan and billing state. Readable
+    //    only by that contractor. Share pages get their branding from
+    //    publicProfiles/{userId} below, which holds the business card only. ──
+    //
+    // The client may ONLY write its own profile fields. Billing/entitlement
+    // fields (tier, stripe*, subscriptionStatus, cancelAtPeriodEnd, aiQuotesUsed,
+    // lastAiAt) are SERVER-ONLY — written exclusively by the Stripe webhook and
+    // the AI-quota functions via the Admin SDK (which bypasses these rules).
+    // This is an ALLOW-LIST: any field not listed here is rejected, so a client
+    // can never grant itself Pro or reset its free-quote counter from the browser.
+    // Allowed client-writable profile fields. Anything else (tier, stripe*,
+    // subscriptionStatus, cancelAtPeriodEnd, aiQuotesUsed, lastAiAt, and the
+    // Connect fields stripeConnectId / connectPayoutsEnabled / connectDetailsSubmitted)
+    // is rejected — those are server-only, written via the Admin SDK / webhook.
+    function isUserProfileKeys(keys) {
+      return keys.hasOnly([
+        'businessName', 'businessPhone', 'businessEmail', 'licenseNumber',
+        'logoUrl', 'logoStoragePath', 'onboardedAt', 'updatedAt'
+      ]);
+    }
+    match /users/{userId} {
+      allow get: if true;   // TRANSITION: closed to the owner only in firestore.rules
+      allow list: if false;
+      // Create: the whole new doc may contain only profile fields.
+      allow create: if isSignedIn() && request.auth.uid == userId
+        && isUserProfileKeys(request.resource.data.keys());
+      // Update: only profile fields may CHANGE; billing fields stay untouchable
+      // (a merge write that doesn't alter them won't list them in affectedKeys).
+      allow update: if isSignedIn() && request.auth.uid == userId
+        && isUserProfileKeys(request.resource.data.diff(resource.data).affectedKeys());
+    }
+
+    // ── publicProfiles/{userId}: the business card a share page may show —
+    //    name, phone, email, license, logo — plus whether card payments are
+    //    switched on. Published by the contractor's own app. The card flag is
+    //    not taken on trust: it must equal the server-written value on the
+    //    contractor's users doc. ──
+    function validPublicProfile(userId) {
+      let d = request.resource.data;
+      let u = get(/databases/$(database)/documents/users/$(userId)).data;
+      return d.keys().hasOnly(['businessName', 'businessPhone', 'businessEmail',
+                               'licenseNumber', 'logoUrl', 'cardPaymentsEnabled', 'updatedAt'])
+        && d.businessName is string && d.businessName.size() <= 200
+        && d.businessPhone is string && d.businessPhone.size() <= 40
+        && d.businessEmail is string && d.businessEmail.size() <= 200
+        && d.licenseNumber is string && d.licenseNumber.size() <= 80
+        && d.logoUrl is string && d.logoUrl.size() <= 2000
+        && d.cardPaymentsEnabled is bool
+        && d.cardPaymentsEnabled == (u.get('connectPayoutsEnabled', false) == true);
+    }
+    match /publicProfiles/{userId} {
+      allow get: if true;
+      allow list: if false;
+      allow create, update: if isSignedIn() && request.auth.uid == userId && validPublicProfile(userId);
+      allow delete: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    // ── photoLogs/{customerId}: the customer-safe copy of one customer's photo
+    //    log (name, address, photo links, captions) shown at /log/{customerId}.
+    //    Opened by its unguessable id; never listable. Only the contractor who
+    //    owns that customer record can publish it. ──
+    function validPhotoLog(customerId) {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['createdBy', 'customerName', 'address', 'photos', 'updatedAt'])
+        && d.createdBy == request.auth.uid
+        && d.customerName is string && d.customerName.size() <= 200
+        && d.address is string && d.address.size() <= 300
+        && d.photos is list && d.photos.size() <= 1500
+        && get(/databases/$(database)/documents/customers/$(customerId)).data.createdBy == request.auth.uid;
+    }
+    match /photoLogs/{customerId} {
+      allow get: if true;
+      allow list: if false;
+      allow create: if isSignedIn() && validPhotoLog(customerId);
+      allow update: if isOwner(resource.data) && validPhotoLog(customerId);
+      allow delete: if isOwner(resource.data);
+    }
+
+    // ── estimates: owner full access. Public read (view shared estimate).
+    //    Public update limited to the customer sign-off fields only. ──
+    match /estimates/{id} {
+      // Customers open ONE estimate by its unguessable link id (get). Listing
+      // is owner-only: with a public list anyone could dump every contractor's
+      // estimates — names, scopes and prices — and walk the ids.
+      allow get: if true;
+      allow list: if isOwner(resource.data);
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
+      // Owner: full update. Anonymous customer may ONLY:
+      //  - approve/decline once, while pending (see validSignoff), or
+      //  - respond to the proposed start date (startDateResponse only).
+      // Cannot touch amounts, totals, deposit, or forge other status values.
+      allow update: if isOwner(resource.data)
+        || (onlyChanges(['customerResponse', 'status', 'signedAtMs']) && validSignoff())
+        // Customer may respond to the proposed start date ONCE — only if no
+        // response exists yet. Prevents an anonymous actor overwriting a prior
+        // confirmation. (Owner can always overwrite via the isOwner branch.)
+        || (onlyChanges(['startDateResponse']) && !('startDateResponse' in resource.data)
+            && validStartDateResponse());
+      // Owner may delete UNLESS the document is e-signed and still within the
+      // 2-year legal-retention window.
+      allow delete: if isOwner(resource.data) && !signedDocLocked(resource.data);
+    }
+
+    // ── changeOrders: same pattern as estimates (incl. 2-year retention lock). ──
+    match /changeOrders/{id} {
+      allow get: if true;
+      allow list: if isOwner(resource.data);
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
+      allow update: if isOwner(resource.data)
+        || (onlyChanges(['customerResponse', 'status', 'signedAtMs']) && validSignoff());
+      allow delete: if isOwner(resource.data) && !signedDocLocked(resource.data);
+    }
+
+    // ── invoices & thankYouPackages: public read (customer views/pays),
+    //    owner-only create/update/delete. The Stripe webhook updates invoices
+    //    via the Admin SDK, which bypasses these rules. ──
+    match /invoices/{id} {
+      allow get: if true;
+      allow list: if isOwner(resource.data);
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
+      // Owner can update anything. Anonymous customers can ONLY toggle the
+      // cash-choice fields (so picking "Pay Cash" on the share page records
+      // their intent). They cannot change amounts, line items, or status.
+      allow update: if isOwner(resource.data)
+        || (onlyChanges(['customerCashChoice', 'customerCashAt'])
+            && resource.data.status != 'paid'
+            && request.resource.data.customerCashChoice == true
+            && request.resource.data.customerCashAt is string
+            && request.resource.data.customerCashAt.size() <= 40);
+      // Owner may delete UNLESS this is a PAID invoice still within the 2-year
+      // legal-retention window (proof of what was owed and that it was paid).
+      allow delete: if isOwner(resource.data) && !paidInvoiceLocked(resource.data);
+    }
+    match /thankYouPackages/{id} {
+      allow get: if true;
+      allow list: if isOwner(resource.data);
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
+      allow update, delete: if isOwner(resource.data);
+    }
+
+    // ── customers: the contractor's own address book — names, phones,
+    //    addresses and private notes. Owner-only, read and write. The photo-log
+    //    share page reads photoLogs/{customerId} instead. ──
+    match /customers/{id} {
+      allow get: if true;   // TRANSITION: owner-only in firestore.rules
+      allow list: if isOwner(resource.data);
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
+      allow update, delete: if isOwner(resource.data);
+    }
+
+    // ── projects, customerPhotos, projectPhotos: owner-only across the board.
+    //    Public pages don't read these directly (thank-you photos are snapshotted
+    //    into the package doc), so no public access needed. ──
+    match /projects/{id} {
+      allow read: if isOwner(resource.data);
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
+      allow update, delete: if isOwner(resource.data);
+    }
+    // customerPhotos: owner-only. The customer's share page shows the
+    // published copy in photoLogs/{customerId}.
+    match /customerPhotos/{id} {
+      allow read: if true;   // TRANSITION: owner-only in firestore.rules
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
+      allow update, delete: if isOwner(resource.data);
+    }
+    match /projectPhotos/{id} {
+      allow read: if isOwner(resource.data);
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
+      allow update, delete: if isOwner(resource.data);
+    }
+
+    // userMaterialPrices/{userId}: the contractor's own learned price book.
+    // Doc id IS the user id — only that user can read/write it. (The generator
+    // function reads it via the Admin SDK, which bypasses these rules.)
+    match /userMaterialPrices/{userId} {
+      allow read, write: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    // calendarEvents: the contractor's own calendar entries. Owner-only.
+    match /calendarEvents/{id} {
+      allow read: if isOwner(resource.data);
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
+      allow update, delete: if isOwner(resource.data);
+    }
+
+    // voiceUsage/{userId}/months/{YYYY-MM}: how much text-to-speech this
+    // contractor has spent this month. Written ONLY by synthesizeSpeech via the
+    // Admin SDK — if the client could write here it could reset its own spend
+    // cap. Read-only, own docs only, so the app can show "you're near the limit".
+    // (Subcollection rather than a compound doc id on purpose: Clerk user ids
+    // contain underscores, so a "{userId}_{month}" id can't be split safely.)
+    match /voiceUsage/{userId}/months/{month} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      allow write: if false;
+    }
+
+    // voiceUsageTotals/{YYYY-MM}: account-wide voice spend against the shared
+    // ElevenLabs monthly budget. Server-only, both directions — one user has no
+    // business reading how much everyone else has used.
+    match /voiceUsageTotals/{month} {
+      allow read, write: if false;
+    }
+
+    // ── PROPERTY ADVISOR ──
+    // propertyAdvisorSessions/{id}: one property the contractor is asking
+    // about. They own it outright — create, rename, delete. The property
+    // context is theirs to edit; the conversation under it is not.
+    match /propertyAdvisorSessions/{sessionId} {
+      allow read, update, delete: if isOwner(resource.data);
+      allow create: if isSignedIn() && request.resource.data.createdBy == request.auth.uid;
+
+      // messages/{id}: the transcript. Readable by the owner, written ONLY by
+      // askPropertyAdvisor through the Admin SDK. If the client could append
+      // here it could forge assistant turns — advice "the advisor already
+      // gave" — and the next question would be answered on top of them.
+      match /messages/{messageId} {
+        allow read, delete: if isSignedIn()
+          && get(/databases/$(database)/documents/propertyAdvisorSessions/$(sessionId)).data.createdBy == request.auth.uid;
+        // create/update stay closed: only askPropertyAdvisor (Admin SDK) adds turns.
+        allow create, update: if false;
+      }
+    }
+
+    // advisorUsage/{userId}/…: how many advisor questions this contractor has
+    // asked this month and today. The free allowance is enforced against these,
+    // so they are server-write-only — a client that could edit them would have
+    // an unlimited free tier. Readable by the owner so the UI can show what's left.
+    match /advisorUsage/{userId}/{period}/{key} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      allow write: if false;
+    }
+
+    // accountDeletionRequests/{userId}: a contractor asking for their account
+    // and data to be deleted (Settings → Delete my account). They can make,
+    // see and cancel their own request; nobody else can see it, and it cannot
+    // be edited into something else. The owner works these from the console.
+    match /accountDeletionRequests/{userId} {
+      allow get: if isSignedIn() && request.auth.uid == userId;
+      allow list: if false;
+      allow create: if isSignedIn() && request.auth.uid == userId
+        && request.resource.data.keys().hasOnly(['status', 'requestedAt', 'note'])
+        && request.resource.data.status == 'requested'
+        && request.resource.data.requestedAt is string && request.resource.data.requestedAt.size() <= 40
+        && (!('note' in request.resource.data)
+            || (request.resource.data.note is string && request.resource.data.note.size() <= 1000));
+      allow update: if false;
+      allow delete: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    // setaside_waitlist/{id}: 1099 Set-Aside early-access signups from the
+    // public /safe-to-spend page. Anyone may CREATE one well-formed signup;
+    // nobody can read, change or delete them from a client (view them in the
+    // Firebase console). The doc id is sha256(lowercased email), so a repeat
+    // signup hits an existing doc, counts as an update, and is denied.
+    function isSetasideSignup(id) {
+      let d = request.resource.data;
+      let trades = ['Handyman', 'General contractor', 'Carpenter', 'Electrician',
+                    'Plumber', 'HVAC', 'Painter', 'Roofer', 'Landscaping/lawn',
+                    'Flooring', 'Other'];
+      return d.keys().hasAll(['email', 'emailLower', 'trade', 'source', 'filingStatus',
+                              'state', 'annualNetBucket', 'createdAt'])
+        && d.keys().hasOnly(['email', 'emailLower', 'trade', 'firstName', 'source',
+                             'filingStatus', 'state', 'annualNetBucket', 'utm_source',
+                             'utm_medium', 'utm_campaign', 'createdAt'])
+        && d.email is string && d.email.size() < 254
+        && d.email.matches('^[^@\\s]+@[^@\\s]+[.][^@\\s]+$')
+        && d.emailLower == d.email.trim().lower()
+        && id == hashing.sha256(d.emailLower).toHexString().lower()
+        && d.trade in trades
+        && d.source == 'safe-to-spend-calculator'
+        && d.filingStatus in ['single', 'mfj', 'hoh']
+        && d.state in ['nc', 'none', 'other']
+        && d.annualNetBucket is string && d.annualNetBucket.size() <= 12
+        && (!('firstName' in d) || (d.firstName is string && d.firstName.size() <= 60))
+        && (!('utm_source' in d) || (d.utm_source is string && d.utm_source.size() <= 100))
+        && (!('utm_medium' in d) || (d.utm_medium is string && d.utm_medium.size() <= 100))
+        && (!('utm_campaign' in d) || (d.utm_campaign is string && d.utm_campaign.size() <= 100))
+        && d.createdAt == request.time;
+    }
+    match /setaside_waitlist/{id} {
+      allow create: if isSetasideSignup(id);
+      allow read, update, delete: if false;
+    }
+
+    // Everything else: denied.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

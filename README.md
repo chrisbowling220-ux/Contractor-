@@ -57,17 +57,22 @@ checkout).
 
 ## Deploying
 
-Deploys are manual and need the owner's go-ahead:
+Deploys are manual and need the owner's go-ahead. Secrets (Anthropic, Clerk,
+ElevenLabs, Resend, Stripe) live in Firebase secret storage, never in this
+repository.
 
-```bash
-npm run build && npx firebase deploy --only hosting
-npx firebase deploy --only firestore:rules,storage
-npx firebase deploy --only functions
-```
+The security rules come in three steps, because share links already sent to
+customers have to keep working while contractors move to the new app version:
 
-Deploy rules and functions before (or with) the hosting build that depends on
-them. Secrets (Anthropic, Clerk, ElevenLabs, Resend, Stripe) live in Firebase
-secret storage, never in this repository.
+| Step | When | What | Command |
+|---|---|---|---|
+| 1 | Now (works with the app that is live today) | Stops anyone listing contractors' data; locks customer sign-off | Deploy `firestore.rules` from tag `rules/stage1-urgent` |
+| 2 | With the new app version | Adds the collections the new app writes; keeps old share links working | `npx firebase deploy --only firestore:rules --config firebase.transition.json`, then `npx firebase deploy --only storage,functions`, then `npm run build && npx firebase deploy --only hosting` |
+| 3 | Once active contractors have opened the new app (it republishes their share data on open) | Makes customers, photos and billing profiles owner-only | `npx firebase deploy --only firestore:rules` |
+
+Roll back any step by redeploying the same thing from tag
+`checkpoint/pre-audit-2026-11-10`, which matches what was live on 2026-11-11
+(rules and hosting were both verified identical to it).
 
 `scripts/setaside-tax-check.sh` is a scheduled job that checks the Safe-to-Spend
 tax numbers; see `scripts/setaside-tax-check.md`.

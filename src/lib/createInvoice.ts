@@ -3,7 +3,7 @@ import { addDoc, collection } from 'firebase/firestore'
 import { db, functions } from '../firebase'
 import type { Invoice, InvoiceLine, Estimate, ChangeOrder } from '../data/types'
 import { balanceOf, buildInvoiceLineItems, money, nextInvoiceNumberFrom, sumLines } from './invoiceMath'
-import type { BusinessProfile } from '../Settings'
+import type { BusinessProfile } from './businessProfile'
 
 const generateInvoiceCopyCallable = httpsCallable<
   {

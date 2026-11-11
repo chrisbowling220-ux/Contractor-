@@ -1,4 +1,5 @@
 import { useState, useRef } from 'react'
+import { contentTypeFor } from './lib/photoUpload'
 import { useUser } from '@clerk/clerk-react'
 import { doc, setDoc } from 'firebase/firestore'
 import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage'
@@ -34,7 +35,7 @@ export default function BusinessOnboarding({ onDone }: { onDone: () => void }) {
       const safeName = file.name.replace(/[^A-Za-z0-9._-]/g, '_')
       const path = `userLogos/${user.id}/${ts}-${safeName}`
       const sRef = storageRef(storage, path)
-      await uploadBytes(sRef, file, { contentType: file.type })
+      await uploadBytes(sRef, file, { contentType: contentTypeFor(file) })
       const url = await getDownloadURL(sRef)
       setLogoUrl(url)
       setLogoStoragePath(path)

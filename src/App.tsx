@@ -3,7 +3,8 @@ import { useState, useEffect } from 'react'
 import { collection, getDocs, query, where, onSnapshot } from 'firebase/firestore'
 import { db } from './firebase'
 import Customers from './Customers'
-import Settings, { fetchBusinessName } from './Settings'
+import Settings from './Settings'
+import { fetchBusinessName } from './lib/businessProfile'
 import ScanRoom from './ScanRoom'
 import Projects from './Projects'
 import Estimates from './Estimates'
@@ -112,10 +113,7 @@ function useDashboardCounts(userId: string | undefined, refreshKey = 0) {
     revenueThisMonth: 0, revenueThisWeek: 0, weeklyRevenue: [], estimatesWon: 0, estimatesLost: 0, avgJobSize: 0, attention: [],
   })
   useEffect(() => {
-    if (!userId) {
-      setCounts({ activeJobs: 0, pendingEstimates: 0, customers: 0, revenueThisMonth: 0, revenueThisWeek: 0, weeklyRevenue: [], estimatesWon: 0, estimatesLost: 0, avgJobSize: 0, attention: [] })
-      return
-    }
+    if (!userId) return
     (async () => {
       try {
         const [projects, estimates, customers, invoices, calEvents] = await Promise.all([
@@ -803,10 +801,40 @@ function FirebaseGate() {
   return <Dashboard />
 }
 
+// The screen is kept in the URL (#projects, #customers …) so the phone's Back
+// button moves between screens instead of leaving the app, a reload stays on
+// the same screen, and a screen can be bookmarked.
+const pageFromUrl = (): string => {
+  if (typeof window === 'undefined') return 'dashboard'
+  const key = window.location.hash.replace(/^#\/?/, '')
+  return key in TITLE_MAP || key === 'settings' ? key : 'dashboard'
+}
+
+// "?billing=success|cancel" on return from Stripe Checkout.
+const billingNotice = (): { text: string; ms: number } | null => {
+  if (typeof window === 'undefined') return null
+  const billing = new URLSearchParams(window.location.search).get('billing')
+  if (billing === 'success') return { text: '💎 Welcome to BuildPro+ Pro — unlimited instant quotes unlocked!', ms: 9000 }
+  if (billing === 'cancel') return { text: 'Upgrade canceled — you can subscribe anytime in Settings.', ms: 6000 }
+  return null
+}
+
 function Dashboard() {
   const { user } = useUser()
-  const [page, setPage] = useState('dashboard')
+  const [page, setPageState] = useState(pageFromUrl)
   const [menuOpen, setMenuOpen] = useState(false)
+  const setPage = (key: string) => {
+    if (key !== pageFromUrl()) {
+      window.history.pushState(null, '', key === 'dashboard' ? window.location.pathname + window.location.search : `#${key}`)
+    }
+    setPageState(key)
+    window.scrollTo(0, 0)
+  }
+  useEffect(() => {
+    const onNav = () => { setPageState(pageFromUrl()); setMenuOpen(false) }
+    window.addEventListener('popstate', onNav)
+    return () => window.removeEventListener('popstate', onNav)
+  }, [])
   // When the dashboard boxes deep-link into Projects, this seeds its status filter.
   const [projectsFilter, setProjectsFilter] = useState<ProjectStatus | 'all'>('all')
   // Bumped by the live listeners below so the count tiles + reminders feed
@@ -814,10 +842,12 @@ function Dashboard() {
   const [countsRefresh, setCountsRefresh] = useState(0)
   const counts = useDashboardCounts(user?.id, countsRefresh)
   const isMobile = useIsMobile()
-  const [conversionToast, setConversionToast] = useState<string | null>(null)
+  const [conversionToast, setConversionToast] = useState<string | null>(() => billingNotice()?.text ?? null)
   const [photoCaptureOpen, setPhotoCaptureOpen] = useState(false)
   const [quickAddOpen, setQuickAddOpen] = useState(false)
-  const [businessNameBannerDismissed, setBusinessNameBannerDismissed] = useState(false)
+  const [businessNameBannerDismissed, setBusinessNameBannerDismissed] = useState(() => {
+    try { return window.sessionStorage?.getItem(`bp_business_banner_dismissed_${user?.id}`) === '1' } catch { return false }
+  })
   const [showBusinessNameBanner, setShowBusinessNameBanner] = useState(false)
 
   // On sign-in / refresh, sweep for approved estimates that haven't yet been
@@ -990,16 +1020,12 @@ function Dashboard() {
   // Detect return from Stripe subscription Checkout (?billing=success|cancel)
   // and show a toast. The webhook flips the tier; the Settings page reflects it.
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    const billing = params.get('billing')
-    if (billing === 'success') {
-      setConversionToast('💎 Welcome to BuildPro+ Pro — unlimited instant quotes unlocked!')
-      setTimeout(() => setConversionToast(null), 9000)
-    } else if (billing === 'cancel') {
-      setConversionToast('Upgrade canceled — you can subscribe anytime in Settings.')
-      setTimeout(() => setConversionToast(null), 6000)
-    }
-    if (billing) window.history.replaceState({}, '', window.location.pathname)
+    const notice = billingNotice()
+    if (!notice) return
+    // The toast itself was set from the URL on first render; here we only time
+    // it out and clean the query string so a reload doesn't show it again.
+    window.setTimeout(() => setConversionToast(null), notice.ms)
+    window.history.replaceState({}, '', window.location.pathname + window.location.hash)
   }, [])
 
   // Check whether the user has set a business name yet. If not, show the
@@ -1007,16 +1033,13 @@ function Dashboard() {
   useEffect(() => {
     if (!user?.id) return
     let cancelled = false
-    const dismissedKey = `bp_business_banner_dismissed_${user.id}`
-    if (typeof window !== 'undefined' && window.sessionStorage?.getItem(dismissedKey) === '1') {
-      setBusinessNameBannerDismissed(true)
-      return
-    }
+    if (businessNameBannerDismissed) return
     fetchBusinessName(user.id).then(name => {
       if (cancelled) return
       if (!name.trim()) setShowBusinessNameBanner(true)
     })
     return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id])
 
   const dismissBusinessNameBanner = () => {
@@ -1051,9 +1074,12 @@ function Dashboard() {
   }, [])
 
   const navItem = (label: string, icon: string, key: string) => (
-    <a key={key} onClick={() => go(key)} style={{
+    <button key={key} type="button" onClick={() => go(key)} aria-current={page === key ? 'page' : undefined} style={{
       color: page === key ? ORANGE : 'white',
-      textDecoration: 'none',
+      border: 'none',
+      width: '100%',
+      textAlign: 'left',
+      minHeight: '44px',
       cursor: 'pointer',
       display: 'flex',
       alignItems: 'center',
@@ -1064,12 +1090,12 @@ function Dashboard() {
       fontSize: '14px',
       fontWeight: 500,
     }}>
-      {icon} {label}
-    </a>
+      <span aria-hidden="true">{icon}</span> {label}
+    </button>
   )
 
   const sidebar = (
-    <div style={{
+    <nav aria-label="Main" style={{
       width: isMobile ? '100%' : '240px',
       background: NAVY,
       color: 'white',
@@ -1084,7 +1110,8 @@ function Dashboard() {
       height: isMobile ? '100vh' : 'auto',
       zIndex: 100,
       transform: isMobile ? (menuOpen ? 'translateX(0)' : 'translateX(-100%)') : 'none',
-      transition: 'transform 0.2s',
+      visibility: isMobile && !menuOpen ? 'hidden' : 'visible',
+      transition: 'transform 0.2s, visibility 0.2s',
       boxShadow: isMobile ? '2px 0 8px rgba(0,0,0,0.2)' : 'none',
     }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', padding: '0 8px' }}>
@@ -1095,11 +1122,11 @@ function Dashboard() {
             <p style={{ color: '#94a3b8', fontSize: '10px', margin: '2px 0 0', letterSpacing: '0.5px', textTransform: 'uppercase' }}>Contractor Suite</p>
           </div>
         </div>
-        {isMobile && <button onClick={() => setMenuOpen(false)} style={{ background: 'none', border: 'none', color: 'white', fontSize: '24px', cursor: 'pointer', lineHeight: 1 }}>×</button>}
+        {isMobile && <button onClick={() => setMenuOpen(false)} aria-label="Close menu" style={{ background: 'none', border: 'none', color: 'white', fontSize: '24px', cursor: 'pointer', lineHeight: 1, minWidth: '44px', minHeight: '44px' }}>×</button>}
       </div>
       {navItem('Dashboard', '🏠', 'dashboard')}
       {NAV_ITEMS.map(t => navItem(t.label, t.icon, t.key))}
-    </div>
+    </nav>
   )
 
   return (
@@ -1109,7 +1136,7 @@ function Dashboard() {
         <div onClick={() => setMenuOpen(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 99 }} />
       )}
 
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <main style={{ flex: 1, minWidth: 0 }}>
         <div style={{
           background: 'white',
           padding: isMobile ? '12px 16px' : '16px 32px',
@@ -1123,7 +1150,7 @@ function Dashboard() {
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
             {isMobile && (
-              <button onClick={() => setMenuOpen(true)} style={{ background: 'none', border: 'none', fontSize: '24px', cursor: 'pointer', padding: '4px 8px', lineHeight: 1 }}>☰</button>
+              <button onClick={() => setMenuOpen(true)} aria-label="Open menu" aria-expanded={menuOpen} style={{ background: 'none', border: 'none', fontSize: '24px', cursor: 'pointer', padding: '4px 8px', lineHeight: 1, minWidth: '44px', minHeight: '44px' }}>☰</button>
             )}
             {page !== 'dashboard' && (
               <button onClick={() => go('dashboard')} style={{ background: '#f1f5f9', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '6px 12px', cursor: 'pointer', fontWeight: 600, fontSize: '13px', color: '#1a1f2e', whiteSpace: 'nowrap' }}>
@@ -1143,6 +1170,7 @@ function Dashboard() {
 
         {conversionToast && (
           <div
+            role="status"
             onClick={() => { setConversionToast(null); go('projects') }}
             style={{
               position: 'fixed',
@@ -1165,7 +1193,7 @@ function Dashboard() {
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', gap: '12px' }}>
               <span>{conversionToast}</span>
-              <button onClick={e => { e.stopPropagation(); setConversionToast(null) }} style={{ background: 'transparent', color: '#94a3b8', border: 'none', cursor: 'pointer', fontSize: '16px', padding: 0, lineHeight: 1 }}>×</button>
+              <button onClick={e => { e.stopPropagation(); setConversionToast(null) }} aria-label="Dismiss notification" style={{ background: 'transparent', color: '#cbd5e1', border: 'none', cursor: 'pointer', fontSize: '20px', padding: '4px 8px', lineHeight: 1 }}>×</button>
             </div>
             <div style={{ marginTop: '6px', fontSize: '11px', color: '#94a3b8', fontWeight: 400 }}>Tap to open Projects →</div>
           </div>
@@ -1201,7 +1229,7 @@ function Dashboard() {
         {page === 'scan-room' && <ScanRoom onNavigate={go} />}
         {page === 'property-advisor' && <PropertyAdvisor />}
         {page === 'settings' && <Settings />}
-      </div>
+      </main>
     </div>
   )
 }

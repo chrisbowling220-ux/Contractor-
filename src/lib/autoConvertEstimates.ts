@@ -3,7 +3,7 @@ import { db } from '../firebase'
 import type { Estimate, Project, ProjectStatus } from '../data/types'
 import { PROJECT_STATUS_ORDER } from '../data/types'
 import { createDepositInvoice, nextInvoiceNumber } from './createInvoice'
-import { fetchBusinessProfile } from '../Settings'
+import { fetchBusinessProfile } from './businessProfile'
 
 // We've merged Estimates into Projects — every estimate should belong to a
 // project, and the project's status should AUTO-ADVANCE based on the customer's

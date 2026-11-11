@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
+import { contactLinks } from './lib/customers'
+import type { Customer } from './lib/customers'
+import { preparePhoto, safeFileName } from './lib/photoUpload'
 import { db, storage } from './firebase'
-import { collection, addDoc, getDocs, query, where, doc, deleteDoc, updateDoc } from 'firebase/firestore'
+import { collection, addDoc, query, where, doc, deleteDoc, updateDoc, onSnapshot } from 'firebase/firestore'
 import { ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage'
 import { useUser } from '@clerk/clerk-react'
 import { copyShareLink, isPhone } from './lib/shareEstimate'
@@ -8,17 +11,10 @@ import type { CustomerPhoto } from './data/types'
 import { PUBLIC_HOST } from './lib/config'
 import { fetchCustomerDocuments, type CustomerDocument } from './lib/customerDocuments'
 
-interface Customer {
-  id: string
-  name: string
-  phone: string
-  email: string
-  address: string
-}
-
 interface Props {
   customer: Customer
   onBack: () => void
+  onEdit?: () => void
 }
 
 // The public share link for a customer's photo log lives at /log/<customerId>.
@@ -50,7 +46,7 @@ ${link}
   return `mailto:${customer.email ? encodeURIComponent(customer.email) : ''}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
 }
 
-export default function CustomerDetail({ customer, onBack }: Props) {
+export default function CustomerDetail({ customer, onBack, onEdit }: Props) {
   const { user } = useUser()
   const [photos, setPhotos] = useState<CustomerPhoto[]>([])
   const [uploading, setUploading] = useState(false)
@@ -62,29 +58,25 @@ export default function CustomerDetail({ customer, onBack }: Props) {
   const cameraRef = useRef<HTMLInputElement>(null)
   const uploadRef = useRef<HTMLInputElement>(null)
 
-  const fetchPhotos = async () => {
+  // Live photo log for this customer.
+  useEffect(() => {
     if (!user?.id) return
-    try {
-      const snap = await getDocs(query(
-        collection(db, 'customerPhotos'),
-        where('customerId', '==', customer.id),
-        where('createdBy', '==', user.id),
-      ))
-      const list = snap.docs.map(d => ({ id: d.id, ...d.data() } as CustomerPhoto))
-      list.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '')) // oldest first for progress log
-      setPhotos(list)
-    } catch (err) {
-      console.error('Photos fetch failed:', err)
-    }
-  }
-
-  useEffect(() => { fetchPhotos() }, [customer.id, user?.id])
+    const unsub = onSnapshot(
+      query(collection(db, 'customerPhotos'), where('customerId', '==', customer.id), where('createdBy', '==', user.id)),
+      snap => {
+        const list = snap.docs.map(d => ({ id: d.id, ...d.data() } as CustomerPhoto))
+        list.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '')) // oldest first for progress log
+        setPhotos(list)
+      },
+      err => console.error('Photos listener failed:', err),
+    )
+    return () => unsub()
+  }, [customer.id, user?.id])
 
   // Load this customer's signed documents (the legal paper trail).
   useEffect(() => {
     if (!user?.id) return
     let cancelled = false
-    setDocsLoading(true)
     fetchCustomerDocuments(user.id, { id: customer.id, name: customer.name })
       .then(docs => { if (!cancelled) setDocuments(docs) })
       .catch(err => console.error('Customer documents fetch failed:', err))
@@ -111,10 +103,11 @@ export default function CustomerDetail({ customer, onBack }: Props) {
     try {
       for (const file of Array.from(files)) {
         const ts = Date.now()
-        const safeName = file.name.replace(/[^A-Za-z0-9._-]/g, '_')
+        const photo = await preparePhoto(file)
+        const safeName = safeFileName(photo.name, `photo-${ts}.jpg`)
         const path = `customerPhotos/${user.id}/${customer.id}/${ts}-${safeName}`
         const sRef = storageRef(storage, path)
-        await uploadBytes(sRef, file, { contentType: file.type })
+        await uploadBytes(sRef, photo.blob, { contentType: photo.contentType })
         const photoUrl = await getDownloadURL(sRef)
         const docData: Omit<CustomerPhoto, 'id'> = {
           customerId: customer.id,
@@ -127,7 +120,6 @@ export default function CustomerDetail({ customer, onBack }: Props) {
         }
         await addDoc(collection(db, 'customerPhotos'), docData)
       }
-      await fetchPhotos()
     } catch (err) {
       alert('Upload failed: ' + (err instanceof Error ? err.message : String(err)))
     } finally {
@@ -242,8 +234,22 @@ export default function CustomerDetail({ customer, onBack }: Props) {
       <div style={card}>
         <h2 style={{ margin: '0 0 4px', fontSize: '22px', fontWeight: 700 }}>{customer.name}</h2>
         <p style={{ margin: 0, color: '#64748b', fontSize: '14px' }}>
-          {customer.phone}{customer.email && ` · ${customer.email}`}{customer.address && ` · ${customer.address}`}
+          {[customer.phone, customer.email, customer.address].filter(Boolean).join(' · ') || 'No contact details yet.'}
         </p>
+        {customer.notes && <p style={{ margin: '10px 0 0', fontSize: '14px', color: '#1a1f2e', whiteSpace: 'pre-wrap', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '8px', padding: '10px 12px' }}>{customer.notes}</p>}
+        {(() => {
+          const links = contactLinks(customer)
+          const chip: React.CSSProperties = { display: 'inline-flex', alignItems: 'center', minHeight: '44px', padding: '0 14px', borderRadius: '8px', border: '1px solid #cbd5e1', background: 'white', color: '#1a1f2e', fontWeight: 600, fontSize: '14px', textDecoration: 'none', cursor: 'pointer' }
+          return (
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '12px' }}>
+              {links.call && <a href={links.call} style={chip}>📞 Call</a>}
+              {links.text && <a href={links.text} style={chip}>💬 Text</a>}
+              {links.email && <a href={links.email} style={chip}>✉️ Email</a>}
+              {links.map && <a href={links.map} target="_blank" rel="noopener noreferrer" style={chip}>📍 Directions</a>}
+              {onEdit && <button onClick={onEdit} style={chip}>✏️ Edit details</button>}
+            </div>
+          )
+        })()}
       </div>
 
       {/* ── Records & Signed Documents — the legal paper trail for this customer.

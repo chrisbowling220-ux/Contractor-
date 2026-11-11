@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { contentTypeFor } from './lib/photoUpload'
 import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore'
 import { ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage'
 import { httpsCallable } from 'firebase/functions'
@@ -249,7 +250,7 @@ export default function Settings() {
       const safeName = file.name.replace(/[^A-Za-z0-9._-]/g, '_')
       const path = `userLogos/${user.id}/${ts}-${safeName}`
       const sRef = storageRef(storage, path)
-      await uploadBytes(sRef, file, { contentType: file.type })
+      await uploadBytes(sRef, file, { contentType: contentTypeFor(file) })
       const url = await getDownloadURL(sRef)
       setLogoUrl(url)
       setLogoStoragePath(path)
@@ -531,39 +532,4 @@ export default function Settings() {
       </p>
     </div>
   )
-}
-
-export interface BusinessProfile {
-  businessName: string
-  businessPhone: string
-  businessEmail: string
-  licenseNumber: string
-  logoUrl: string
-}
-
-// Fetcher used by other parts of the app (BrandHeader, print, thank-you, etc.)
-// Always returns a populated object — empty strings for missing fields.
-export async function fetchBusinessProfile(userId: string): Promise<BusinessProfile> {
-  const empty: BusinessProfile = { businessName: '', businessPhone: '', businessEmail: '', licenseNumber: '', logoUrl: '' }
-  if (!userId) return empty
-  try {
-    const snap = await getDoc(doc(db, 'users', userId))
-    if (!snap.exists()) return empty
-    const d = snap.data() as Partial<BusinessProfile>
-    return {
-      businessName: d.businessName || '',
-      businessPhone: d.businessPhone || '',
-      businessEmail: d.businessEmail || '',
-      licenseNumber: d.licenseNumber || '',
-      logoUrl: d.logoUrl || '',
-    }
-  } catch {
-    return empty
-  }
-}
-
-// Back-compat shim for existing callers.
-export async function fetchBusinessName(userId: string): Promise<string> {
-  const p = await fetchBusinessProfile(userId)
-  return p.businessName
 }

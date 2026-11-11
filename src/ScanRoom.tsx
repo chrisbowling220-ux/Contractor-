@@ -9,8 +9,8 @@ import { buildFallbackQuote } from './lib/fallbackQuote'
 import EstimatePreview from './EstimatePreview'
 import ManualEstimateBuilder from './ManualEstimateBuilder'
 import { openEstimatePrintWindow } from './lib/printEstimate'
-import { fetchBusinessProfile } from './Settings'
-import type { BusinessProfile } from './Settings'
+import { fetchBusinessProfile } from './lib/businessProfile'
+import type { BusinessProfile } from './lib/businessProfile'
 import { useTier } from './lib/useTier'
 import type { AIQuote, Estimate } from './data/types'
 
@@ -105,7 +105,7 @@ function forceDuration(video: HTMLVideoElement, knownDurationHint: number): Prom
     const finish = (d: number) => {
       if (resolved) return
       resolved = true
-      try { video.currentTime = 0 } catch {}
+      try { video.currentTime = 0 } catch { /* some browsers refuse a seek here; the frame grab below still runs */ }
       resolve(d > 0 && isFinite(d) ? d : knownDurationHint)
     }
     const onDurChange = () => {
@@ -117,7 +117,7 @@ function forceDuration(video: HTMLVideoElement, knownDurationHint: number): Prom
     video.addEventListener('durationchange', onDurChange)
     // Trick: seek to a huge value, which forces the browser to read the
     // end of the file and compute duration.
-    try { video.currentTime = 1e9 } catch {}
+    try { video.currentTime = 1e9 } catch { /* seek not supported on this stream; duration stays as reported */ }
     // Fallback hard timeout — use the hint we were given by the recorder.
     setTimeout(() => finish(knownDurationHint), 3000)
   })
@@ -163,7 +163,7 @@ async function extractKeyframes(videoBlob: Blob, count: number, knownDurationMs:
       video.addEventListener('error', onErr, { once: true })
       // Safety timeout.
       setTimeout(() => { if (!settled) { settled = true; resolve() } }, 4000)
-      try { video.load() } catch {}
+      try { video.load() } catch { /* nothing to release */ }
     })
 
     const duration = await forceDuration(video, knownDurationMs / 1000)
@@ -330,7 +330,7 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
         livePreviewRef.current.srcObject = stream
         livePreviewRef.current.muted = true
         livePreviewRef.current.playsInline = true
-        try { await livePreviewRef.current.play() } catch {}
+        try { await livePreviewRef.current.play() } catch { /* autoplay blocked: the preview stays paused until the user taps */ }
       }
       const mimeType = pickVideoMimeType()
       const rec = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream)

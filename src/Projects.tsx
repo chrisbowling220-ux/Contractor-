@@ -7,7 +7,8 @@ import type { Estimate, Project, ProjectStatus, ChangeOrder } from './data/types
 import { PROJECT_STATUS_LABEL, PROJECT_STATUS_ORDER, CHANGE_ORDER_REASON_LABEL } from './data/types'
 import ChangeOrderForm from './ChangeOrderForm'
 import ShareChangeOrderModal from './ShareChangeOrderModal'
-import ProjectPhotos, { fetchProjectPhotos } from './ProjectPhotos'
+import ProjectPhotos from './ProjectPhotos'
+import { fetchProjectPhotos } from './lib/projectPhotos'
 import { createThankYouPackage, regenerateThankYouLetter } from './lib/thankYouPackage'
 import ShareThankYouModal from './ShareThankYouModal'
 import ThankYouReviewModal from './ThankYouReviewModal'
@@ -21,8 +22,8 @@ import EstimatePreview from './EstimatePreview'
 import { openEstimatePrintWindow } from './lib/printEstimate'
 import { PUBLIC_HOST } from './lib/config'
 import { useTier } from './lib/useTier'
-import { fetchBusinessProfile } from './Settings'
-import type { BusinessProfile } from './Settings'
+import { fetchBusinessProfile } from './lib/businessProfile'
+import type { BusinessProfile } from './lib/businessProfile'
 import type { ThankYouPackage } from './data/types'
 import { useAuth } from '@clerk/clerk-react'
 import { isPhone } from './lib/shareEstimate'
@@ -80,30 +81,23 @@ export default function Projects({ initialStatusFilter }: { initialStatusFilter?
   const [description, setDescription] = useState('')
   const [notes, setNotes] = useState('')
 
-  const load = async () => {
-    if (!user?.id) {
-      setProjects([]); setCustomers([]); setEstimates([]); setChangeOrders([])
-      return
-    }
+  // Customers and estimates, live — a quote saved from Quick Quote or a
+  // customer added on another screen appears here without a reload.
+  useEffect(() => {
+    if (!user?.id) return
     const own = (name: string) => query(collection(db, name), where('createdBy', '==', user.id))
     const sortDesc = <T extends { createdAt?: string }>(arr: T[]) =>
       arr.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
-    try {
-      const [pSnap, cSnap, eSnap, coSnap] = await Promise.all([
-        getDocs(own('projects')),
-        getDocs(own('customers')),
-        getDocs(own('estimates')),
-        getDocs(own('changeOrders')),
-      ])
-      setProjects(sortDesc(pSnap.docs.map(d => ({ id: d.id, ...d.data() } as Project))))
-      setCustomers(sortDesc(cSnap.docs.map(d => ({ id: d.id, ...d.data() } as Customer & { createdAt?: string }))))
-      setEstimates(sortDesc(eSnap.docs.map(d => ({ id: d.id, ...d.data() } as Estimate))))
-      setChangeOrders(sortDesc(coSnap.docs.map(d => ({ id: d.id, ...d.data() } as ChangeOrder))))
-    } catch (err) {
-      console.error('Projects load failed:', err)
-    }
-  }
-  useEffect(() => { load() }, [user?.id])
+    const unsubs = [
+      onSnapshot(own('customers'),
+        snap => setCustomers(sortDesc(snap.docs.map(d => ({ id: d.id, ...d.data() } as Customer & { createdAt?: string })))),
+        err => console.error('Customers listener failed:', err)),
+      onSnapshot(own('estimates'),
+        snap => setEstimates(sortDesc(snap.docs.map(d => ({ id: d.id, ...d.data() } as Estimate)))),
+        err => console.error('Estimates listener failed:', err)),
+    ]
+    return () => unsubs.forEach(u => u())
+  }, [user?.id])
 
   // Live subscription on projects so status changes (e.g. a customer approving
   // an estimate auto-moves the project to In Progress) appear without a manual
@@ -176,7 +170,6 @@ export default function Projects({ initialStatusFilter }: { initialStatusFilter?
       await addDoc(collection(db, 'projects'), payload)
       setCustomerName(''); setJobLocationZip(''); setDescription(''); setNotes('')
       setShowForm(false)
-      await load()
     } catch (err) {
       console.error('Project save failed:', err)
       alert('Could not save the project: ' + (err instanceof Error ? err.message : String(err)))
@@ -269,26 +262,27 @@ export default function Projects({ initialStatusFilter }: { initialStatusFilter?
   }
 
   // After a customer pays (card or cash-choice), the dashboard listener stashes
-  // the related projectId in sessionStorage. When this page mounts and projects
-  // are loaded, auto-open that project and its thank-you panel so the user
-  // lands ready to send the thank-you letter — no extra clicks. Runs once
-  // per mount when projects first arrive.
+  // the related projectId in sessionStorage. Once projects have loaded, open
+  // that project with its thank-you panel ready — no extra clicks. Runs once
+  // per mount, the first time the target project is present.
   const autoOpenedRef = useRef(false)
   useEffect(() => {
-    if (autoOpenedRef.current) return
-    if (projects.length === 0 || !user?.id) return
+    if (autoOpenedRef.current || projects.length === 0 || !user?.id) return
     // Key is user-scoped (set in App.tsx with the same user.id) so a different
     // contractor on the same browser doesn't inherit a stale signal.
     const sessionKey = `bp_open_thanks_for_project_${user.id}`
     let projectId: string | null = null
     try { projectId = window.sessionStorage?.getItem(sessionKey) || null } catch { /* noop */ }
-    if (!projectId) return
-    const target = projects.find(p => p.id === projectId)
+    const target = projectId ? projects.find(p => p.id === projectId) : undefined
     if (!target) return
     autoOpenedRef.current = true
     try { window.sessionStorage?.removeItem(sessionKey) } catch { /* noop */ }
-    setActiveId(target.id)
-    openThankYouPanel(target).catch(err => console.error('Auto-open thank-you failed:', err))
+    // Deferred a tick: this reacts to data arriving, it isn't part of rendering.
+    const t = window.setTimeout(() => {
+      setActiveId(target.id)
+      openThankYouPanel(target).catch(err => console.error('Auto-open thank-you failed:', err))
+    }, 0)
+    return () => window.clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects, user?.id])
 

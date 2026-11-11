@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useMemo } from 'react'
 import { useAuth, useUser } from '@clerk/clerk-react'
 import { doc, updateDoc, deleteField } from 'firebase/firestore'
 import { db } from './firebase'
@@ -6,7 +6,7 @@ import { toCustomerView } from './lib/customerView'
 import { copyShareLink, shareLinkFor, smsHref, mailtoHref, nativeShare, isPhone } from './lib/shareEstimate'
 import { rememberMaterialPrices } from './lib/learnedPrices'
 import { generateProposalLetter, buildProposalFallback } from './lib/proposal'
-import { fetchBusinessProfile } from './Settings'
+import { fetchBusinessProfile } from './lib/businessProfile'
 import MaterialsListModal from './MaterialsListModal'
 import ProposalEditor from './ProposalEditor'
 import type { Estimate, AIQuote, AIMaterialLine, ProposalLetter } from './data/types'
@@ -52,16 +52,11 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, b
   const [proposalEdited, setProposalEdited] = useState(!!estimate.proposalEdited)
   const [proposalBusy, setProposalBusy] = useState(false)
   const [proposalOpen, setProposalOpen] = useState(false)
-  const [dirty, setDirty] = useState(false)
-
-  useEffect(() => {
-    // Mark dirty when any field changes after first render. Initial sync is
-    // not a change.
-    setDirty(true)
-  }, [customerName, customerSummary, workScope, materials, hourlyRate, estimatedHours, rentalsTotal, contractorNotes, depositRequested, depositAmount])
-
-  // Reset dirty on mount.
-  useEffect(() => { setDirty(false) }, [])
+  // Unsaved changes = the fields differ from what was last saved. (Changing a
+  // value and changing it back is clean again.)
+  const fieldsKey = JSON.stringify([customerName, customerSummary, workScope, materials, hourlyRate, estimatedHours, rentalsTotal, contractorNotes, depositRequested, depositAmount])
+  const [savedKey, setSavedKey] = useState(fieldsKey)
+  const dirty = fieldsKey !== savedKey
 
   // Live recalculation. Markup is baked into materials already (customer view),
   // so total = labor + materials + rentals.
@@ -161,7 +156,7 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, b
       onSaved(updated)
       // Learn the contractor's edited material prices for smarter future quotes.
       if (user?.id) rememberMaterialPrices(user.id, materials)
-      setDirty(false)
+      setSavedKey(fieldsKey)
       setSaveStatus('✓ Saved')
       setTimeout(() => setSaveStatus(''), 2500)
     } catch (err) {

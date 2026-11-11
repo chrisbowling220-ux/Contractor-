@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { preparePhoto, safeFileName } from './lib/photoUpload'
 import { useUser } from '@clerk/clerk-react'
 import { collection, addDoc, getDocs, query, where } from 'firebase/firestore'
 import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage'
@@ -66,10 +67,11 @@ export default function QuickPhotoCapture({ onClose }: { onClose: () => void }) 
       let n = 0
       for (const pic of pics) {
         const ts = Date.now() + n
-        const safeName = pic.file.name.replace(/[^A-Za-z0-9._-]/g, '_') || `photo-${ts}.jpg`
+        const photo = await preparePhoto(pic.file)
+        const safeName = safeFileName(photo.name, `photo-${ts}.jpg`)
         const path = `projectPhotos/${user.id}/${project.id}/${ts}-${safeName}`
         const sRef = storageRef(storage, path)
-        await uploadBytes(sRef, pic.file, { contentType: pic.file.type || 'image/jpeg' })
+        await uploadBytes(sRef, photo.blob, { contentType: photo.contentType })
         const photoUrl = await getDownloadURL(sRef)
         const docData: Omit<ProjectPhoto, 'id'> = {
           projectId: project.id,

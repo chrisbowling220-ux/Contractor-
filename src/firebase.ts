@@ -1,8 +1,8 @@
 import { initializeApp } from 'firebase/app'
-import { getFirestore } from 'firebase/firestore'
-import { getFunctions } from 'firebase/functions'
-import { getStorage } from 'firebase/storage'
-import { getAuth } from 'firebase/auth'
+import { connectFirestoreEmulator, getFirestore } from 'firebase/firestore'
+import { connectFunctionsEmulator, getFunctions } from 'firebase/functions'
+import { connectStorageEmulator, getStorage } from 'firebase/storage'
+import { connectAuthEmulator, getAuth } from 'firebase/auth'
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -18,3 +18,18 @@ export const db = getFirestore(app)
 export const functions = getFunctions(app)
 export const storage = getStorage(app)
 export const firebaseAuth = getAuth(app)
+
+// Local development and browser tests can run against the Firebase emulators
+// instead of the live project, so nothing they do touches real customer data:
+//
+//   VITE_USE_EMULATORS=1 npm run dev      (with `firebase emulators:start` running)
+//
+// Only honoured by the dev server. A production build ignores the flag
+// entirely (import.meta.env.DEV is false and this block is compiled out).
+if (import.meta.env.DEV && import.meta.env.VITE_USE_EMULATORS === '1') {
+  connectFirestoreEmulator(db, '127.0.0.1', 8080)
+  connectStorageEmulator(storage, '127.0.0.1', 9199)
+  connectFunctionsEmulator(functions, '127.0.0.1', 5001)
+  connectAuthEmulator(firebaseAuth, 'http://127.0.0.1:9099', { disableWarnings: true })
+  console.info('[BuildPro+] Using local Firebase emulators — not the live project.')
+}

@@ -51,10 +51,12 @@ export function useTier(): {
   const [currentPeriodEnd, setCurrentPeriodEnd] = useState<number | null>(null)
   const [cancelAtPeriodEnd, setCancelAtPeriodEnd] = useState(false)
   const [subscriptionStatus, setSubscriptionStatus] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
+  // Which user id the values above were loaded for (null = nothing yet).
+  const [loadedFor, setLoadedFor] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!user?.id) { setLoading(false); return }
+    if (!user?.id) return
+    const uid = user.id
     const unsub = onSnapshot(doc(db, 'users', user.id), snap => {
       const data = snap.data() as {
         tier?: 'free' | 'pro'; aiQuotesUsed?: number; paidQuoteCredits?: number
@@ -67,10 +69,13 @@ export function useTier(): {
       setCurrentPeriodEnd(typeof data?.subscriptionCurrentPeriodEnd === 'number' ? data.subscriptionCurrentPeriodEnd : null)
       setCancelAtPeriodEnd(!!data?.cancelAtPeriodEnd)
       setSubscriptionStatus(data?.subscriptionStatus ?? null)
-      setLoading(false)
-    }, err => { console.error('useTier listener failed:', err); setLoading(false) })
+      setLoadedFor(uid)
+    }, err => { console.error('useTier listener failed:', err); setLoadedFor(uid) })
     return () => unsub()
   }, [user?.id])
+
+  // Still loading only while a signed-in user's doc hasn't arrived yet.
+  const loading = !!user?.id && loadedFor !== user.id
 
   const quotesLeft = tier === 'pro'
     ? null

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
+import { preparePhoto, safeFileName } from './lib/photoUpload'
 import { db, storage } from './firebase'
-import { collection, addDoc, getDocs, query, where, doc, deleteDoc, updateDoc } from 'firebase/firestore'
+import { collection, addDoc, query, where, doc, deleteDoc, updateDoc, onSnapshot } from 'firebase/firestore'
 import { ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage'
 import { useUser } from '@clerk/clerk-react'
 import type { ProjectPhoto, Project } from './data/types'
@@ -22,24 +23,25 @@ export default function ProjectPhotos({ project, onCountChange }: Props) {
   const cameraRef = useRef<HTMLInputElement>(null)
   const uploadRef = useRef<HTMLInputElement>(null)
 
-  const fetchPhotos = async () => {
+  // Live list: a photo added from Quick Photo or Quick Quote (or on another
+  // device) shows up here without a refresh.
+  useEffect(() => {
     if (!user?.id) return
-    try {
-      const snap = await getDocs(query(
-        collection(db, 'projectPhotos'),
-        where('projectId', '==', project.id),
-        where('createdBy', '==', user.id),
-      ))
-      const list = snap.docs.map(d => ({ id: d.id, ...d.data() } as ProjectPhoto))
-      // Oldest first — the slideshow + photo log read chronologically.
-      list.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
-      setPhotos(list)
-      onCountChange?.(list.length)
-    } catch (err) {
-      console.error('Project photos fetch failed:', err)
-    }
-  }
-  useEffect(() => { fetchPhotos() }, [project.id, user?.id])
+    const unsub = onSnapshot(
+      query(collection(db, 'projectPhotos'), where('projectId', '==', project.id), where('createdBy', '==', user.id)),
+      snap => {
+        const list = snap.docs.map(d => ({ id: d.id, ...d.data() } as ProjectPhoto))
+        // Oldest first — the slideshow + photo log read chronologically.
+        list.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
+        setPhotos(list)
+      },
+      err => console.error('Project photos listener failed:', err),
+    )
+    return () => unsub()
+  }, [project.id, user?.id])
+
+  // Tell the parent how many photos there are whenever that changes.
+  useEffect(() => { onCountChange?.(photos.length) }, [photos.length, onCountChange])
 
   const uploadFiles = async (files: FileList | null) => {
     if (!files || files.length === 0 || !user?.id) return
@@ -47,10 +49,11 @@ export default function ProjectPhotos({ project, onCountChange }: Props) {
     try {
       for (const file of Array.from(files)) {
         const ts = Date.now()
-        const safeName = file.name.replace(/[^A-Za-z0-9._-]/g, '_')
+        const photo = await preparePhoto(file)
+        const safeName = safeFileName(photo.name, `photo-${ts}.jpg`)
         const path = `projectPhotos/${user.id}/${project.id}/${ts}-${safeName}`
         const sRef = storageRef(storage, path)
-        await uploadBytes(sRef, file, { contentType: file.type })
+        await uploadBytes(sRef, photo.blob, { contentType: photo.contentType })
         const photoUrl = await getDownloadURL(sRef)
         const docData: Omit<ProjectPhoto, 'id'> = {
           projectId: project.id,
@@ -63,7 +66,6 @@ export default function ProjectPhotos({ project, onCountChange }: Props) {
         }
         await addDoc(collection(db, 'projectPhotos'), docData)
       }
-      await fetchPhotos()
     } catch (err) {
       alert('Upload failed: ' + (err instanceof Error ? err.message : String(err)))
     } finally {
@@ -86,7 +88,6 @@ export default function ProjectPhotos({ project, onCountChange }: Props) {
       try { await deleteObject(storageRef(storage, p.storagePath)) } catch { /* best-effort: the storage object may already be gone */ }
       await deleteDoc(doc(db, 'projectPhotos', p.id))
       setPhotos(prev => prev.filter(x => x.id !== p.id))
-      onCountChange?.(photos.length - 1)
     } catch (err) {
       alert('Delete failed: ' + (err instanceof Error ? err.message : String(err)))
     }
@@ -139,20 +140,4 @@ export default function ProjectPhotos({ project, onCountChange }: Props) {
       )}
     </div>
   )
-}
-
-// Exported so the parent can fetch photos when generating the slideshow PDF.
-export async function fetchProjectPhotos(projectId: string, userId: string): Promise<ProjectPhoto[]> {
-  try {
-    const snap = await getDocs(query(
-      collection(db, 'projectPhotos'),
-      where('projectId', '==', projectId),
-      where('createdBy', '==', userId),
-    ))
-    const list = snap.docs.map(d => ({ id: d.id, ...d.data() } as ProjectPhoto))
-    list.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
-    return list
-  } catch {
-    return []
-  }
 }

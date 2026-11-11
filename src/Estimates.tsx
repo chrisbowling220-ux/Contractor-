@@ -1,3 +1,4 @@
+import { duplicateEstimateFields } from './lib/duplicateEstimate'
 import { useEffect, useMemo, useState } from 'react'
 import { useUser } from '@clerk/clerk-react'
 import { collection, query, where, onSnapshot, doc, deleteDoc, addDoc } from 'firebase/firestore'
@@ -80,14 +81,7 @@ export default function Estimates({ initialTab = 'pending' }: { initialTab?: Tab
   const duplicateEstimate = async (e: Estimate) => {
     if (!user?.id) { alert('Not signed in.'); return }
     try {
-      const { id: _omit, customerResponse: _r, projectAutoCreated: _pac, projectId: _pid, ...rest } = e as Estimate & Record<string, unknown>
-      void _omit; void _r; void _pac; void _pid
-      const clone: Record<string, unknown> = {
-        ...rest,
-        status: 'pending',
-        createdAt: new Date().toISOString(),
-        createdBy: user.id,
-      }
+      const clone = duplicateEstimateFields(e, user.id)
       const ref = await addDoc(collection(db, 'estimates'), clone)
       // Open the new copy in the editor so they can tweak customer/details.
       setPreview({ id: ref.id, ...clone } as Estimate)

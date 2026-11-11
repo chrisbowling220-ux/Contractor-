@@ -1027,6 +1027,11 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '16px' }}>
             <div>
               <h3>🎯 Instant Estimate</h3>
+              {/* Say plainly what this is: a draft produced from photos and a
+                  description, not a measured take-off or a code review. */}
+              <p role="note" style={{ margin: '6px 0 8px', padding: '8px 10px', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '6px', color: '#78350f', fontSize: '13px', lineHeight: 1.45 }}>
+                <strong>Draft estimate — check it before you send it.</strong> Quantities and prices are estimated from your photos and description, not measured or quoted by a supplier. Electrical, plumbing, structural and permit requirements must be confirmed by a licensed professional and your local code office.
+              </p>
               <p style={{ color: '#64748b', fontSize: '13px' }}>Based on {images.length} photo(s) and {transcript.trim().split(/\s+/).filter(Boolean).length} words of narration</p>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-end' }}>

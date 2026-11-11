@@ -10,7 +10,9 @@
 # goes to logs/setaside-tax-check-<timestamp>.jsonl.
 set -uo pipefail
 
-REPO="$HOME/buildpro-plus"
+# The repo is wherever this script lives (scripts/ sits one level below the
+# root), so moving or renaming the folder cannot break the job again.
+REPO="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin"
 
 DRY_RUN="${DRY_RUN:-0}"

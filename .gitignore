@@ -47,3 +47,8 @@ ui-debug.log
 e2e/.out/
 test-results/
 playwright-report/
+
+# Android signing keys must never be committed
+*.keystore
+*.jks
+playstore/app-release-*

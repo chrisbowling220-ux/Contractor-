@@ -43,7 +43,8 @@ ignores it.
 | Command | What it covers |
 |---|---|
 | `npm test` | Unit tests: tax engine, invoice and payment math, markup, hand-built estimates, customers, uploads. |
-| `npm run test:rules` | Firestore and Storage security rules, in the emulators. |
+| `npm run test:rules` | Firestore and Storage security rules, in the emulators, including that one contractor can never read another's data. |
+| `npm run test:functions` | The Cloud Functions themselves (Stripe webhook, deposit invoice, card checkout, email, AI allowance) against the Firestore emulator. Stripe, Clerk, Resend and the AI model are stand-ins: nothing is charged, sent or billed. |
 | `npm run test:e2e` | Browser tests (Playwright, phone and desktop sizes) of the real app against the emulators, with the real rules and a throwaway account. Needs Google Chrome installed. |
 | `npm run lint` | ESLint. |
 | `npm run build` | Type-check and production build into `dist/`. |

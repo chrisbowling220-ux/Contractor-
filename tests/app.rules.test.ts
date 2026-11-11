@@ -314,3 +314,27 @@ describe('the published photo log (photoLogs)', () => {
     await assertFails(setDoc(doc(as(ALICE), 'photoLogs', 'c1'), log(ALICE, { phone: '555-0199' })))
   })
 })
+
+describe('account deletion requests', () => {
+  const req = (extra: Record<string, unknown> = {}) => ({ status: 'requested', requestedAt: '2026-11-11T00:00:00.000Z', ...extra })
+  it('a contractor can make, see and cancel their own request', async () => {
+    await assertSucceeds(setDoc(doc(as(ALICE), 'accountDeletionRequests', ALICE), req({ note: 'closing the business' })))
+    await assertSucceeds(getDoc(doc(as(ALICE), 'accountDeletionRequests', ALICE)))
+    await assertSucceeds(deleteDoc(doc(as(ALICE), 'accountDeletionRequests', ALICE)))
+  })
+  it('nobody can file, read or cancel a request for someone else', async () => {
+    await assertFails(setDoc(doc(as(BOB), 'accountDeletionRequests', ALICE), req()))
+    await assertFails(setDoc(doc(anon(), 'accountDeletionRequests', ALICE), req()))
+    await seed('accountDeletionRequests/' + ALICE, req())
+    await assertFails(getDoc(doc(as(BOB), 'accountDeletionRequests', ALICE)))
+    await assertFails(getDoc(doc(anon(), 'accountDeletionRequests', ALICE)))
+    await assertFails(deleteDoc(doc(as(BOB), 'accountDeletionRequests', ALICE)))
+    await assertFails(getDocs(collection(as(ALICE), 'accountDeletionRequests')))
+  })
+  it('a request cannot carry other fields or be edited afterwards', async () => {
+    await assertFails(setDoc(doc(as(ALICE), 'accountDeletionRequests', ALICE), req({ status: 'done' })))
+    await assertFails(setDoc(doc(as(ALICE), 'accountDeletionRequests', ALICE), req({ tier: 'pro' })))
+    await seed('accountDeletionRequests/' + ALICE, req())
+    await assertFails(updateDoc(doc(as(ALICE), 'accountDeletionRequests', ALICE), { note: 'changed' }))
+  })
+})

@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react'
 import { db, functions } from './firebase'
-import { addDoc, collection, doc, updateDoc } from 'firebase/firestore'
+import { addDoc, collection, deleteField, doc, updateDoc } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
 import { useAuth, useUser } from '@clerk/clerk-react'
 import type { ChangeOrder, ChangeOrderLine } from './data/types'
@@ -145,7 +145,11 @@ export default function ChangeOrderForm({ projectId, customerName, jobTypeName, 
       }
       let savedId: string
       if (existing?.id) {
-        await updateDoc(doc(db, 'changeOrders', existing.id), payload as Record<string, unknown>)
+        // Re-sending an edited change order puts it back to pending, so the
+        // customer's earlier answer no longer applies: clear it, the same way
+        // an edited estimate does. (Otherwise the page showed the old answer
+        // against the new numbers.)
+        await updateDoc(doc(db, 'changeOrders', existing.id), { ...(payload as Record<string, unknown>), customerResponse: deleteField() })
         savedId = existing.id
       } else {
         const ref = await addDoc(collection(db, 'changeOrders'), payload)

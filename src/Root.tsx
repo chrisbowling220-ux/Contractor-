@@ -14,12 +14,13 @@ const PublicThankYou = lazy(() => import('./PublicThankYou'))
 const PublicInvoice = lazy(() => import('./PublicInvoice'))
 const TermsPage = lazy(() => import('./LegalPages').then(m => ({ default: m.TermsPage })))
 const PrivacyPage = lazy(() => import('./LegalPages').then(m => ({ default: m.PrivacyPage })))
+const DeleteAccountPage = lazy(() => import('./LegalPages').then(m => ({ default: m.DeleteAccountPage })))
 const SafeToSpend = lazy(() => import('./SafeToSpend'))
 const ContractorApp = lazy(() => import('./ContractorApp'))
 
 export type Route =
   | { page: 'estimate' | 'photo-log' | 'change-order' | 'thank-you' | 'invoice'; id: string }
-  | { page: 'terms' | 'privacy' | 'safe-to-spend' | 'app' }
+  | { page: 'terms' | 'privacy' | 'delete-account' | 'safe-to-spend' | 'app' }
 
 const ID_ROUTES: [prefix: string, page: Extract<Route, { id: string }>['page']][] = [
   ['q', 'estimate'],         // /q/<id>      shared estimate
@@ -38,6 +39,7 @@ export function routeFor(pathname: string): Route {
   const p = pathname.replace(/\/$/, '')
   if (p === '/terms') return { page: 'terms' }
   if (p === '/privacy') return { page: 'privacy' }
+  if (p === '/delete-account') return { page: 'delete-account' }
   if (p === '/safe-to-spend') return { page: 'safe-to-spend' }
   return { page: 'app' }
 }
@@ -59,6 +61,7 @@ function Page({ route }: { route: Route }) {
     case 'invoice': return <PublicInvoice invoiceId={route.id} />
     case 'terms': return <TermsPage />
     case 'privacy': return <PrivacyPage />
+    case 'delete-account': return <DeleteAccountPage />
     case 'safe-to-spend': return <SafeToSpend />
     default: return <ContractorApp />
   }

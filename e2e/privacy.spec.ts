@@ -63,3 +63,35 @@ test('share pages are still branded from the published business card', async ({ 
   await expect(link.getByText('NC-12345').first()).toBeVisible()
   await visitor.close()
 })
+
+test('a contractor can ask for their account to be deleted, and change their mind', async ({ page, browser }) => {
+  const errors = trackErrors(page)
+  await signIn(page)
+  const menu = page.getByRole('button', { name: 'Open menu' })
+  if (await menu.isVisible()) await menu.click()
+  await page.getByRole('navigation', { name: 'Main' }).getByRole('button', { name: 'Settings' }).click()
+
+  await page.getByRole('button', { name: 'Delete my account…' }).click()
+  const send = page.getByRole('button', { name: 'Request deletion' })
+  await expect(send).toBeDisabled()          // nothing happens until DELETE is typed
+  await page.getByLabel('Type DELETE to confirm').fill('DELETE')
+  await page.getByLabel(/Anything we should know/).fill('Retiring')
+  await send.click()
+  await expect(page.getByText(/Deletion requested on/)).toBeVisible()
+  expect(await read(`accountDeletionRequests/${UID}`)).toMatchObject({ status: 'requested', note: 'Retiring' })
+  // Nothing was deleted: the profile is still there.
+  expect((await read(`users/${UID}`))?.businessName).toBe('Tester Builds LLC')
+
+  await page.getByRole('button', { name: 'Keep my account' }).click()
+  await expect(page.getByRole('button', { name: 'Delete my account…' })).toBeVisible()
+  expect(await read(`accountDeletionRequests/${UID}`)).toBeUndefined()
+  expect(errors).toEqual([])
+
+  // The public instructions page Google Play links to opens signed-out.
+  const visitor = await browser.newContext()
+  const info = await visitor.newPage()
+  await info.goto('/delete-account')
+  await expect(info.getByRole('heading', { name: 'Delete Your Account' })).toBeVisible()
+  await expect(info.getByText(/within 30 days/)).toBeVisible()
+  await visitor.close()
+})

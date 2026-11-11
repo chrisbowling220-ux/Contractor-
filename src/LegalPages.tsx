@@ -30,6 +30,7 @@ function Shell({ title, children }: { title: string; children: React.ReactNode }
         <div style={{ marginTop: '40px', paddingTop: '20px', borderTop: '1px solid #e2e8f0', display: 'flex', flexWrap: 'wrap', gap: '16px', fontSize: '13px' }}>
           <a href="/terms" style={{ color: '#c2410c', textDecoration: 'none', fontWeight: 600 }}>Terms of Service</a>
           <a href="/privacy" style={{ color: '#c2410c', textDecoration: 'none', fontWeight: 600 }}>Privacy Policy</a>
+          <a href="/delete-account" style={{ color: '#c2410c', textDecoration: 'none', fontWeight: 600 }}>Delete Your Account</a>
           <a href="/safe-to-spend" style={{ color: '#c2410c', textDecoration: 'none', fontWeight: 600 }}>Free Tools → Safe-to-Spend Calculator</a>
           <a href={`https://${SITE}`} style={{ color: '#64748b', textDecoration: 'none' }}>Back to {SITE}</a>
         </div>
@@ -125,7 +126,7 @@ export function PrivacyPage() {
       <p>Your data is stored using industry-standard cloud infrastructure (Google Firebase). We use reasonable technical and organizational measures to protect it, including per-account access controls. No system is perfectly secure, so we can't guarantee absolute security. Some records (such as e-signed documents and paid invoices) are retained for a period of time to support dispute protection.</p>
 
       <H>7. Your Choices and Rights</H>
-      <p>You can update your business profile in the app at any time. You can control notification preferences in the app. Depending on where you live, you may have rights to access, correct, or delete certain personal information — contact us to make a request. Note that some records may be retained where we have a legal or legitimate business reason to keep them.</p>
+      <p>You can update your business profile in the app at any time. You can control notification preferences in the app. Depending on where you live, you may have rights to access, correct, or delete certain personal information — contact us to make a request. To delete your account and its data, use Settings → Delete my account in the app, or see <a href="/delete-account" style={{ color: '#c2410c' }}>how to delete your account</a>. Note that some records may be retained where we have a legal or legitimate business reason to keep them.</p>
 
       <H>8. Data Retention</H>
       <p>We keep your information for as long as your account is active and as needed to provide the Service, comply with our legal obligations, resolve disputes, and enforce our agreements.</p>
@@ -138,6 +139,34 @@ export function PrivacyPage() {
 
       <H>11. Contact</H>
       <p>Questions about this Policy or your data? Contact us at <a href={`mailto:${CONTACT_EMAIL}`} style={{ color: ORANGE }}>{CONTACT_EMAIL}</a>.</p>
+    </Shell>
+  )
+}
+
+// Public page Google Play links to: how to ask for an account and its data to
+// be deleted, and what is kept.
+export function DeleteAccountPage() {
+  return (
+    <Shell title="Delete Your Account">
+      <p>You can ask us to delete your {COMPANY} account and the data in it at any time.</p>
+
+      <H>How to request deletion</H>
+      <ol style={{ paddingLeft: '22px' }}>
+        <li>Sign in at <a href={`https://${SITE}`} style={{ color: '#c2410c' }}>{SITE}</a> or open the {COMPANY} app.</li>
+        <li>Open <strong>Settings</strong> and choose <strong>Delete my account</strong>.</li>
+        <li>Type DELETE to confirm and send the request.</li>
+      </ol>
+      <p>If you can't sign in, email <a href={`mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent('Delete my BuildPro+ account')}`} style={{ color: '#c2410c' }}>{CONTACT_EMAIL}</a> from the address on your account and we'll take it from there.</p>
+
+      <H>What is deleted</H>
+      <p>Your sign-in, business profile and logo, customers, estimates, change orders, invoices, projects, photos, schedule, saved prices and Property Advisor conversations. Links you sent to customers stop working. We complete deletion within 30 days of your request and confirm by email. You can cancel the request in Settings any time before then.</p>
+
+      <H>What is kept, and for how long</H>
+      <ul style={{ paddingLeft: '22px' }}>
+        <li>Customer-signed estimates and change orders, and paid invoices, are kept for up to two years after the signing or payment date so both sides have a record in a dispute. They are then deleted.</li>
+        <li>Payment records held by our payment processor (Stripe) are kept by them as the law requires.</li>
+        <li>If you have a paid subscription, cancel it in Settings first so you are not billed again.</li>
+      </ul>
     </Shell>
   )
 }

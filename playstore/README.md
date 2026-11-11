@@ -67,3 +67,42 @@ Verify it serves: `curl https://builderspro.cc/.well-known/assetlinks.json`
 - **PWA changes** (features, fixes): just `firebase deploy` — TWA loads the live site, no Play upload.
 - **Wrapper changes** (icon, name, permissions): bump `appVersionCode` in `twa-manifest.json`,
   `bubblewrap build`, upload the new `.aab`.
+
+## Readiness check — 2026-11-11
+
+Checked against the repo and the live site. Nothing was built, signed or uploaded.
+
+**Ready**
+- Web manifest, 192/512/maskable PNG icons and `assetlinks.json` are all served by
+  the live site with the right content types.
+- `twa-manifest.json` matches the manifest (package `cc.builderspro.app`, portrait,
+  `#1a1f2e` theme). Notification delegation is on, which the in-app reminders use.
+- Android Back moves between screens (hash navigation), instead of closing the app.
+- Offline launch page: `public/sw.js` shows `/offline.html` when the app is opened
+  with no signal, instead of a browser error. It caches nothing else.
+- Account deletion (a Play requirement for apps with accounts): Settings → Delete my
+  account, and the public page `https://builderspro.cc/delete-account` — paste that
+  URL into Play Console → App content → Data safety → "Delete account URL".
+  Requests land in the Firestore collection `accountDeletionRequests`; act on each
+  within 30 days. Nothing is deleted automatically.
+
+**Needs the owner**
+1. `assetlinks.json` still holds the placeholder fingerprint. Until the real Play App
+   Signing SHA-256 is in it and hosting is redeployed, the app shows a browser address bar.
+2. This machine has Java 21 and Bubblewrap but **no Android SDK** (`~/.bubblewrap/config.json`
+   is empty). The first `bubblewrap` run asks to download a JDK/SDK and accept Google's
+   licences — yours to accept.
+3. `bubblewrap init` creates the signing keystore. Back it up somewhere other than this
+   machine; it is never committed here (`*.keystore` / `*.jks` should stay out of git).
+4. **Billing policy — confirm before submitting.** The app sells the Pro subscription and
+   quote packs through Stripe. Google Play generally requires Play Billing for digital
+   goods sold inside an Android app, with region-specific exceptions and programs that
+   change. Invoices a customer pays a contractor are payments for real-world services and
+   are not the concern; the Pro upgrade screens are. Check the current Play Payments
+   policy (or hide the upgrade buttons when the app runs as the Android wrapper,
+   `?source=twa`) before the first upload. This is a policy reading, not legal advice.
+5. Data safety form: the app collects name, email, business details, customer contact
+   details, photos and payment status; card numbers go to Stripe and are never seen by
+   the app.
+6. Not tested on a real Android device. Before production: install the internal-testing
+   build and check sign-in, camera capture, a card payment and the Back button.

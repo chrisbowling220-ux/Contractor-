@@ -4,6 +4,7 @@ import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore'
 import { ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage'
 import { httpsCallable } from 'firebase/functions'
 import { signOut as firebaseSignOut } from 'firebase/auth'
+import DeleteAccountCard from './DeleteAccountCard'
 import { db, storage, functions, firebaseAuth } from './firebase'
 import { useUser, useAuth } from '@clerk/clerk-react'
 import { notificationsBlocked, requestNotificationPermission, alertsEnabled, setAlertsEnabled, playAlertCue } from './lib/reminders'
@@ -524,11 +525,15 @@ export default function Settings() {
         </button>
       </div>
 
+      {user?.id && <DeleteAccountCard userId={user.id} isPro={tier === 'pro'} />}
+
       {/* Legal links — always reachable. */}
       <p style={{ textAlign: 'center', fontSize: '12px', color: '#94a3b8', marginTop: '8px' }}>
         <a href="/terms" target="_blank" rel="noopener noreferrer" style={{ color: '#64748b', textDecoration: 'underline' }}>Terms of Service</a>
         {' · '}
         <a href="/privacy" target="_blank" rel="noopener noreferrer" style={{ color: '#64748b', textDecoration: 'underline' }}>Privacy Policy</a>
+        {' · '}
+        <a href="/delete-account" target="_blank" rel="noopener noreferrer" style={{ color: '#64748b', textDecoration: 'underline' }}>Account deletion</a>
       </p>
     </div>
   )

@@ -316,6 +316,23 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // accountDeletionRequests/{userId}: a contractor asking for their account
+    // and data to be deleted (Settings → Delete my account). They can make,
+    // see and cancel their own request; nobody else can see it, and it cannot
+    // be edited into something else. The owner works these from the console.
+    match /accountDeletionRequests/{userId} {
+      allow get: if isSignedIn() && request.auth.uid == userId;
+      allow list: if false;
+      allow create: if isSignedIn() && request.auth.uid == userId
+        && request.resource.data.keys().hasOnly(['status', 'requestedAt', 'note'])
+        && request.resource.data.status == 'requested'
+        && request.resource.data.requestedAt is string && request.resource.data.requestedAt.size() <= 40
+        && (!('note' in request.resource.data)
+            || (request.resource.data.note is string && request.resource.data.note.size() <= 1000));
+      allow update: if false;
+      allow delete: if isSignedIn() && request.auth.uid == userId;
+    }
+
     // setaside_waitlist/{id}: 1099 Set-Aside early-access signups from the
     // public /safe-to-spend page. Anyone may CREATE one well-formed signup;
     // nobody can read, change or delete them from a client (view them in the

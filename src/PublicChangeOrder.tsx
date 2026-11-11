@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { doc, getDoc, updateDoc } from 'firebase/firestore'
 import { db } from './firebase'
+import { fetchPublicProfile } from './lib/publishCopies'
 import type { ChangeOrder } from './data/types'
 import { CHANGE_ORDER_REASON_LABEL } from './data/types'
 import { BrandHeader, BrandFooter } from './lib/BrandHeader'
@@ -37,17 +38,12 @@ export default function PublicChangeOrder({ changeOrderId }: { changeOrderId: st
           const data = { id: snap.id, ...snap.data() } as ChangeOrder
           setCo(data)
           if (data.createdBy) {
-            try {
-              const userSnap = await getDoc(doc(db, 'users', data.createdBy))
-              if (userSnap.exists()) {
-                const u = userSnap.data() as { businessName?: string; businessPhone?: string; businessEmail?: string; licenseNumber?: string; logoUrl?: string }
-                if (u.businessName?.trim()) setBusinessName(u.businessName.trim())
-                if (u.businessPhone?.trim()) setBusinessPhone(u.businessPhone.trim())
-                if (u.businessEmail?.trim()) setBusinessEmail(u.businessEmail.trim())
-                if (u.licenseNumber?.trim()) setLicenseNumber(u.licenseNumber.trim())
-                if (u.logoUrl?.trim()) setLogoUrl(u.logoUrl.trim())
-              }
-            } catch { /* graceful fallback */ }
+            const u = await fetchPublicProfile(data.createdBy)
+            if (u.businessName) setBusinessName(u.businessName)
+            if (u.businessPhone) setBusinessPhone(u.businessPhone)
+            if (u.businessEmail) setBusinessEmail(u.businessEmail)
+            if (u.licenseNumber) setLicenseNumber(u.licenseNumber)
+            if (u.logoUrl) setLogoUrl(u.logoUrl)
           }
           // Intentionally do NOT pre-fill the signature with the customer name —
           // the customer must type their own name to sign.

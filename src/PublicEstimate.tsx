@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { doc, getDoc, updateDoc } from 'firebase/firestore'
 import { db } from './firebase'
+import { fetchPublicProfile } from './lib/publishCopies'
 import { toCustomerView } from './lib/customerView'
 import { BrandHeader, BrandFooter } from './lib/BrandHeader'
 import { FUNCTIONS_BASE_URL } from './lib/config'
@@ -54,17 +55,12 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
           setEstimate(data)
           // Fetch the contractor's business profile so the header brands it.
           if (data.createdBy) {
-            try {
-              const userSnap = await getDoc(doc(db, 'users', data.createdBy))
-              if (userSnap.exists()) {
-                const u = userSnap.data() as { businessName?: string; businessPhone?: string; businessEmail?: string; licenseNumber?: string; logoUrl?: string }
-                if (u.businessName?.trim()) setBusinessName(u.businessName.trim())
-                if (u.businessPhone?.trim()) setBusinessPhone(u.businessPhone.trim())
-                if (u.businessEmail?.trim()) setBusinessEmail(u.businessEmail.trim())
-                if (u.licenseNumber?.trim()) setLicenseNumber(u.licenseNumber.trim())
-                if (u.logoUrl?.trim()) setLogoUrl(u.logoUrl.trim())
-              }
-            } catch { /* graceful fallback to BuildPro+ branding */ }
+            const u = await fetchPublicProfile(data.createdBy)
+            if (u.businessName) setBusinessName(u.businessName)
+            if (u.businessPhone) setBusinessPhone(u.businessPhone)
+            if (u.businessEmail) setBusinessEmail(u.businessEmail)
+            if (u.licenseNumber) setLicenseNumber(u.licenseNumber)
+            if (u.logoUrl) setLogoUrl(u.logoUrl)
           }
           // Intentionally do NOT pre-fill the signature with the customer name —
           // the customer must type their own name to sign.

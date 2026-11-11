@@ -4,6 +4,7 @@ import { collection, getDocs, query, where, onSnapshot } from 'firebase/firestor
 import { db } from './firebase'
 import { fetchBusinessName, needsBusinessSetup } from './lib/businessProfile'
 import { autoConvertApprovedEstimates } from './lib/autoConvertEstimates'
+import { watchAndPublishProfile, publishAllPhotoLogs } from './lib/publishCopies'
 import { useFirebaseBridge } from './lib/useFirebaseBridge'
 import BusinessOnboarding from './BusinessOnboarding'
 import QuickPhotoCapture from './QuickPhotoCapture'
@@ -770,6 +771,15 @@ function FirebaseGate() {
       if (!cancelled) setNeedsOnboarding(needs)
     }).catch(err => { console.error('Profile check failed:', err); if (!cancelled) setNeedsOnboarding(false) })
     return () => { cancelled = true }
+  }, [ready, user?.id])
+
+  // Share pages read a customer-safe copy of the business card and of each
+  // photo log (see lib/publicCopies.ts). Keep those copies current.
+  useEffect(() => {
+    if (!ready || !user?.id) return
+    const stop = watchAndPublishProfile(user.id)
+    publishAllPhotoLogs(user.id).catch(err => console.warn('Photo log refresh failed:', err))
+    return stop
   }, [ready, user?.id])
 
   if (error) {

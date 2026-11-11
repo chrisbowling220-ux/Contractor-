@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
-import { collection, getDocs, query, where, doc, getDoc } from 'firebase/firestore'
-import { db } from './firebase'
-import type { CustomerPhoto } from './data/types'
+import { fetchPhotoLog, fetchPublicProfile } from './lib/publishCopies'
+import type { PhotoLogEntry } from './lib/publicCopies'
 import { BrandHeader, BrandFooter } from './lib/BrandHeader'
 
 interface Customer {
@@ -14,7 +13,7 @@ interface Customer {
 // Renders all photos in chronological order with captions.
 export default function PublicPhotoLog({ customerId }: { customerId: string }) {
   const [customer, setCustomer] = useState<Customer | null>(null)
-  const [photos, setPhotos] = useState<CustomerPhoto[]>([])
+  const [photos, setPhotos] = useState<PhotoLogEntry[]>([])
   const [businessName, setBusinessName] = useState('')
   const [businessPhone, setBusinessPhone] = useState('')
   const [businessEmail, setBusinessEmail] = useState('')
@@ -32,34 +31,23 @@ export default function PublicPhotoLog({ customerId }: { customerId: string }) {
     }, 15000)
     ;(async () => {
       try {
-        const cSnap = await getDoc(doc(db, 'customers', customerId))
+        // The contractor's app publishes a customer-safe copy of the log
+        // (name, address, photos). This page never reads the customer record.
+        const log = await fetchPhotoLog(customerId)
         if (done) return
-        let ownerId: string | undefined
-        if (cSnap.exists()) {
-          const cd = cSnap.data() as { name?: string; address?: string; createdBy?: string }
-          setCustomer({ id: cSnap.id, name: cd.name || 'Customer', address: cd.address })
-          ownerId = cd.createdBy
+        if (!log) {
+          setError('This photo log is not available. Please ask your contractor to send the link again.')
+          return
         }
-        const pSnap = await getDocs(query(
-          collection(db, 'customerPhotos'),
-          where('customerId', '==', customerId),
-        ))
-        const list = pSnap.docs.map(d => ({ id: d.id, ...d.data() } as CustomerPhoto))
-        list.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
-        setPhotos(list)
-        if (ownerId) {
-          try {
-            const userSnap = await getDoc(doc(db, 'users', ownerId))
-            if (userSnap.exists()) {
-              const u = userSnap.data() as { businessName?: string; businessPhone?: string; businessEmail?: string; licenseNumber?: string; logoUrl?: string }
-              if (u.businessName?.trim()) setBusinessName(u.businessName.trim())
-              if (u.businessPhone?.trim()) setBusinessPhone(u.businessPhone.trim())
-              if (u.businessEmail?.trim()) setBusinessEmail(u.businessEmail.trim())
-              if (u.licenseNumber?.trim()) setLicenseNumber(u.licenseNumber.trim())
-              if (u.logoUrl?.trim()) setLogoUrl(u.logoUrl.trim())
-            }
-          } catch { /* graceful fallback */ }
-        }
+        setCustomer({ id: customerId, name: log.customerName, address: log.address || undefined })
+        setPhotos(log.photos)
+        const u = await fetchPublicProfile(log.createdBy)
+        if (done) return
+        if (u.businessName) setBusinessName(u.businessName)
+        if (u.businessPhone) setBusinessPhone(u.businessPhone)
+        if (u.businessEmail) setBusinessEmail(u.businessEmail)
+        if (u.licenseNumber) setLicenseNumber(u.licenseNumber)
+        if (u.logoUrl) setLogoUrl(u.logoUrl)
       } catch (err) {
         if (done) return
         console.error('PublicPhotoLog load failed:', err)

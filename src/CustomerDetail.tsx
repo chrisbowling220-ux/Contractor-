@@ -10,6 +10,7 @@ import { copyShareLink, isPhone } from './lib/shareEstimate'
 import type { CustomerPhoto } from './data/types'
 import { PUBLIC_HOST } from './lib/config'
 import { fetchCustomerDocuments, type CustomerDocument } from './lib/customerDocuments'
+import { publishPhotoLog } from './lib/publishCopies'
 
 interface Props {
   customer: Customer
@@ -67,11 +68,15 @@ export default function CustomerDetail({ customer, onBack, onEdit }: Props) {
         const list = snap.docs.map(d => ({ id: d.id, ...d.data() } as CustomerPhoto))
         list.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '')) // oldest first for progress log
         setPhotos(list)
+        // The customer's /log link shows a published copy; refresh it whenever
+        // a photo is added, captioned or removed.
+        publishPhotoLog(user.id, customer, list).catch(err => console.warn('Photo log publish failed:', err))
       },
       err => console.error('Photos listener failed:', err),
     )
     return () => unsub()
-  }, [customer.id, user?.id])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- republish on name/address edits, not on every render's new object
+  }, [customer.id, customer.name, customer.address, user?.id])
 
   // Load this customer's signed documents (the legal paper trail).
   useEffect(() => {

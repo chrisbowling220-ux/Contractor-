@@ -36,7 +36,7 @@ const response = (action: 'approved' | 'declined', extra: Record<string, unknown
 
 beforeAll(async () => {
   env = await initializeTestEnvironment({
-    projectId: 'demo-setaside',
+    projectId: 'demo-buildpro-app',
     firestore: { rules: readFileSync('firestore.rules', 'utf8') },
     storage: { rules: readFileSync('storage.rules', 'utf8') },
   })
@@ -45,11 +45,13 @@ beforeEach(async () => { await env.clearFirestore(); await env.clearStorage() })
 afterAll(async () => { await env.cleanup() })
 
 describe('nobody can browse another contractor\'s data', () => {
-  const shared = ['customers', 'estimates', 'changeOrders', 'invoices', 'thankYouPackages']
+  const shared = ['estimates', 'changeOrders', 'invoices', 'thankYouPackages']
+  // Contractor-private: no access of any kind for anyone but the owner.
+  const privateOnly = ['customers', 'customerPhotos', 'projects', 'projectPhotos', 'calendarEvents']
 
   beforeEach(async () => {
     for (const c of shared) await seed(`${c}/a1`, { createdBy: ALICE, customerName: 'Pat Doe', status: 'pending' })
-    await seed('projects/a1', { createdBy: ALICE, customerName: 'Pat Doe', status: 'lead' })
+    for (const c of privateOnly) await seed(`${c}/a1`, { createdBy: ALICE, customerId: 'a1', customerName: 'Pat Doe', notes: 'gate code 4411', status: 'lead' })
     await seed('users/' + ALICE, { businessName: 'Alice Builds', tier: 'free', aiQuotesUsed: 7 })
   })
 
@@ -78,16 +80,30 @@ describe('nobody can browse another contractor\'s data', () => {
     })
   }
 
-  it('projects are private: no public read at all', async () => {
-    await assertFails(getDoc(doc(anon(), 'projects', 'a1')))
-    await assertFails(getDoc(doc(as(BOB), 'projects', 'a1')))
-    await assertSucceeds(getDoc(doc(as(ALICE), 'projects', 'a1')))
-  })
+  for (const c of privateOnly) {
+    it(`${c}: private — no one but the owner can open, list, change or delete`, async () => {
+      for (const who of [anon(), as(BOB)]) {
+        await assertFails(getDoc(doc(who, c, 'a1')))
+        await assertFails(getDocs(collection(who, c)))
+        await assertFails(getDocs(query(collection(who, c), where('createdBy', '==', ALICE))))
+        await assertFails(getDocs(query(collection(who, c), where('customerId', '==', 'a1'))))
+        await assertFails(updateDoc(doc(who, c, 'a1'), { customerName: 'Hacked' }))
+        await assertFails(deleteDoc(doc(who, c, 'a1')))
+      }
+      await assertFails(addDoc(collection(as(BOB), c), { createdBy: ALICE, customerName: 'x' }))
+      await assertSucceeds(getDoc(doc(as(ALICE), c, 'a1')))
+      await assertSucceeds(getDocs(query(collection(as(ALICE), c), where('createdBy', '==', ALICE))))
+      await assertSucceeds(updateDoc(doc(as(ALICE), c, 'a1'), { customerName: 'Pat D.' }))
+    })
+  }
 
-  it('profiles open one at a time but cannot be listed', async () => {
-    await assertSucceeds(getDoc(doc(anon(), 'users', ALICE)))
+  it('a contractor\'s profile and billing state are readable only by them', async () => {
+    await assertFails(getDoc(doc(anon(), 'users', ALICE)))
+    await assertFails(getDoc(doc(as(BOB), 'users', ALICE)))
+    await assertSucceeds(getDoc(doc(as(ALICE), 'users', ALICE)))
     await assertFails(getDocs(collection(anon(), 'users')))
     await assertFails(getDocs(collection(as(BOB), 'users')))
+    await assertFails(getDocs(collection(as(ALICE), 'users')))
   })
 
   it('a contractor cannot grant themselves Pro or touch billing fields', async () => {
@@ -225,5 +241,76 @@ describe('photo and logo storage', () => {
   })
   it('paths outside the three photo folders are closed', async () => {
     await assertFails(uploadBytes(ref(store(ALICE), `elsewhere/${ALICE}/a.jpg`), jpeg, { contentType: 'image/jpeg' }))
+  })
+})
+
+describe('the public business card (publicProfiles)', () => {
+  const card = (extra: Record<string, unknown> = {}) => ({
+    businessName: 'Alice Builds', businessPhone: '555-0100', businessEmail: 'a@example.com',
+    licenseNumber: 'NC-1', logoUrl: '', cardPaymentsEnabled: false, updatedAt: '2026-11-11T00:00:00.000Z', ...extra,
+  })
+  beforeEach(async () => {
+    await seed('users/' + ALICE, { businessName: 'Alice Builds', tier: 'pro', stripeCustomerId: 'cus_x' })
+    await seed('users/' + BOB, { businessName: 'Bob Co', connectPayoutsEnabled: true })
+  })
+
+  it('the contractor publishes their own card; anyone can open it; nobody can list', async () => {
+    await assertSucceeds(setDoc(doc(as(ALICE), 'publicProfiles', ALICE), card()))
+    await assertSucceeds(getDoc(doc(anon(), 'publicProfiles', ALICE)))
+    await assertFails(getDocs(collection(anon(), 'publicProfiles')))
+    await assertFails(getDocs(collection(as(ALICE), 'publicProfiles')))
+  })
+  it('nobody can publish or change someone else\'s card', async () => {
+    await assertFails(setDoc(doc(as(BOB), 'publicProfiles', ALICE), card()))
+    await assertFails(setDoc(doc(anon(), 'publicProfiles', ALICE), card()))
+    await seed('publicProfiles/' + ALICE, card())
+    await assertFails(updateDoc(doc(as(BOB), 'publicProfiles', ALICE), { businessName: 'Bob was here' }))
+    await assertFails(deleteDoc(doc(as(BOB), 'publicProfiles', ALICE)))
+  })
+  it('billing fields cannot ride along on the card', async () => {
+    await assertFails(setDoc(doc(as(ALICE), 'publicProfiles', ALICE), card({ tier: 'pro' })))
+    await assertFails(setDoc(doc(as(ALICE), 'publicProfiles', ALICE), card({ stripeCustomerId: 'cus_x' })))
+  })
+  it('"takes cards" must match what the server recorded', async () => {
+    await assertFails(setDoc(doc(as(ALICE), 'publicProfiles', ALICE), card({ cardPaymentsEnabled: true })))
+    await assertSucceeds(setDoc(doc(as(BOB), 'publicProfiles', BOB), card({ cardPaymentsEnabled: true })))
+    await assertFails(setDoc(doc(as(BOB), 'publicProfiles', BOB), card({ cardPaymentsEnabled: false })))
+  })
+})
+
+describe('the published photo log (photoLogs)', () => {
+  const log = (uid: string, extra: Record<string, unknown> = {}) => ({
+    createdBy: uid, customerName: 'Pat Doe', address: '1 Elm St',
+    photos: [{ id: 'p1', photoUrl: 'https://example.com/p1.jpg', caption: 'demo day', createdAt: '2026-11-01T00:00:00.000Z' }],
+    updatedAt: '2026-11-11T00:00:00.000Z', ...extra,
+  })
+  beforeEach(async () => {
+    await seed('customers/c1', { createdBy: ALICE, name: 'Pat Doe', phone: '555-0199', notes: 'gate code 4411' })
+  })
+
+  it('the owner publishes it and the customer opens it signed-out by its link', async () => {
+    await assertSucceeds(setDoc(doc(as(ALICE), 'photoLogs', 'c1'), log(ALICE)))
+    await assertSucceeds(getDoc(doc(anon(), 'photoLogs', 'c1')))
+    await assertSucceeds(setDoc(doc(as(ALICE), 'photoLogs', 'c1'), log(ALICE, { photos: [] })))
+    await assertSucceeds(deleteDoc(doc(as(ALICE), 'photoLogs', 'c1')))
+  })
+  it('logs cannot be listed or searched by anyone', async () => {
+    await seed('photoLogs/c1', log(ALICE))
+    await assertFails(getDocs(collection(anon(), 'photoLogs')))
+    await assertFails(getDocs(query(collection(as(BOB), 'photoLogs'), where('createdBy', '==', ALICE))))
+    await assertFails(getDocs(query(collection(as(ALICE), 'photoLogs'), where('createdBy', '==', ALICE))))
+  })
+  it('another contractor cannot publish a log for a customer that is not theirs', async () => {
+    await assertFails(setDoc(doc(as(BOB), 'photoLogs', 'c1'), log(BOB)))
+    await assertFails(setDoc(doc(as(BOB), 'photoLogs', 'c1'), log(ALICE)))
+    await assertFails(setDoc(doc(as(BOB), 'photoLogs', 'no-such-customer'), log(BOB)))
+    await seed('photoLogs/c1', log(ALICE))
+    await assertFails(updateDoc(doc(as(BOB), 'photoLogs', 'c1'), { customerName: 'Hacked' }))
+    await assertFails(deleteDoc(doc(as(BOB), 'photoLogs', 'c1')))
+    await assertFails(deleteDoc(doc(anon(), 'photoLogs', 'c1')))
+  })
+  it('private customer fields cannot be published into the log', async () => {
+    await assertFails(setDoc(doc(as(ALICE), 'photoLogs', 'c1'), log(ALICE, { notes: 'gate code 4411' })))
+    await assertFails(setDoc(doc(as(ALICE), 'photoLogs', 'c1'), log(ALICE, { phone: '555-0199' })))
   })
 })

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { doc, getDoc, updateDoc } from 'firebase/firestore'
 import { db } from './firebase'
+import { fetchPublicProfile } from './lib/publishCopies'
 import { BrandHeader, BrandFooter } from './lib/BrandHeader'
 import { FUNCTIONS_BASE_URL } from './lib/config'
 import type { Invoice } from './data/types'
@@ -59,13 +60,9 @@ export default function PublicInvoice({ invoiceId }: { invoiceId: string }) {
           const inv = { id: snap.id, ...snap.data() } as Invoice & { createdBy?: string }
           setInvoice(inv)
           // Only offer "Pay by Card" if the contractor has finished payout setup
-          // (otherwise the money has nowhere to go). users/{createdBy} is public-read.
-          if (inv.createdBy) {
-            try {
-              const ownerSnap = await getDoc(doc(db, 'users', inv.createdBy))
-              setCardPayOk(!!(ownerSnap.data() as { connectPayoutsEnabled?: boolean } | undefined)?.connectPayoutsEnabled)
-            } catch { /* default: card hidden */ }
-          }
+          // (otherwise the money has nowhere to go). The server checks again
+          // before it creates a checkout.
+          setCardPayOk((await fetchPublicProfile(inv.createdBy)).cardPaymentsEnabled)
         }
       } catch (err) {
         if (done) return

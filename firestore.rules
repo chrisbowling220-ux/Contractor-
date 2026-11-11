@@ -7,9 +7,12 @@ rules_version = '2';
 // (and {userId} doc id) that all data is keyed by.
 //
 // Public share pages (estimate, invoice, change order, thank-you, photo log)
-// are viewed by UNAUTHENTICATED customers, so specific collections allow public
-// READ, and estimates/changeOrders allow a tightly-scoped public UPDATE so the
+// are viewed by UNAUTHENTICATED customers. A document they were sent can be
+// opened by its unguessable id (get) but nothing is ever publicly listable,
+// and estimates/changeOrders allow a tightly-scoped public UPDATE so the
 // customer can sign off (only the response fields — never totals/line items).
+// Contractor-private records (users, customers, photos, projects) have no
+// public access at all; share pages read publicProfiles and photoLogs.
 
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -82,8 +85,9 @@ service cloud.firestore {
         && d.respondedAt is string && d.respondedAt.size() <= 40;
     }
 
-    // ── users/{userId}: the owner's profile/tier. Public read so share pages
-    //    can show business branding (name, logo, license). No public write. ──
+    // ── users/{userId}: the owner's profile, plan and billing state. Readable
+    //    only by that contractor. Share pages get their branding from
+    //    publicProfiles/{userId} below, which holds the business card only. ──
     //
     // The client may ONLY write its own profile fields. Billing/entitlement
     // fields (tier, stripe*, subscriptionStatus, cancelAtPeriodEnd, aiQuotesUsed,
@@ -102,9 +106,7 @@ service cloud.firestore {
       ]);
     }
     match /users/{userId} {
-      // A share page loads ONE profile by id. Nobody may list the collection —
-      // that would hand out every contractor's profile and billing state.
-      allow get: if true;
+      allow get: if isSignedIn() && request.auth.uid == userId;
       allow list: if false;
       // Create: the whole new doc may contain only profile fields.
       allow create: if isSignedIn() && request.auth.uid == userId
@@ -113,6 +115,52 @@ service cloud.firestore {
       // (a merge write that doesn't alter them won't list them in affectedKeys).
       allow update: if isSignedIn() && request.auth.uid == userId
         && isUserProfileKeys(request.resource.data.diff(resource.data).affectedKeys());
+    }
+
+    // ── publicProfiles/{userId}: the business card a share page may show —
+    //    name, phone, email, license, logo — plus whether card payments are
+    //    switched on. Published by the contractor's own app. The card flag is
+    //    not taken on trust: it must equal the server-written value on the
+    //    contractor's users doc. ──
+    function validPublicProfile(userId) {
+      let d = request.resource.data;
+      let u = get(/databases/$(database)/documents/users/$(userId)).data;
+      return d.keys().hasOnly(['businessName', 'businessPhone', 'businessEmail',
+                               'licenseNumber', 'logoUrl', 'cardPaymentsEnabled', 'updatedAt'])
+        && d.businessName is string && d.businessName.size() <= 200
+        && d.businessPhone is string && d.businessPhone.size() <= 40
+        && d.businessEmail is string && d.businessEmail.size() <= 200
+        && d.licenseNumber is string && d.licenseNumber.size() <= 80
+        && d.logoUrl is string && d.logoUrl.size() <= 2000
+        && d.cardPaymentsEnabled is bool
+        && d.cardPaymentsEnabled == (u.get('connectPayoutsEnabled', false) == true);
+    }
+    match /publicProfiles/{userId} {
+      allow get: if true;
+      allow list: if false;
+      allow create, update: if isSignedIn() && request.auth.uid == userId && validPublicProfile(userId);
+      allow delete: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    // ── photoLogs/{customerId}: the customer-safe copy of one customer's photo
+    //    log (name, address, photo links, captions) shown at /log/{customerId}.
+    //    Opened by its unguessable id; never listable. Only the contractor who
+    //    owns that customer record can publish it. ──
+    function validPhotoLog(customerId) {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['createdBy', 'customerName', 'address', 'photos', 'updatedAt'])
+        && d.createdBy == request.auth.uid
+        && d.customerName is string && d.customerName.size() <= 200
+        && d.address is string && d.address.size() <= 300
+        && d.photos is list && d.photos.size() <= 1500
+        && get(/databases/$(database)/documents/customers/$(customerId)).data.createdBy == request.auth.uid;
+    }
+    match /photoLogs/{customerId} {
+      allow get: if true;
+      allow list: if false;
+      allow create: if isSignedIn() && validPhotoLog(customerId);
+      allow update: if isOwner(resource.data) && validPhotoLog(customerId);
+      allow delete: if isOwner(resource.data);
     }
 
     // ── estimates: owner full access. Public read (view shared estimate).
@@ -177,14 +225,11 @@ service cloud.firestore {
       allow update, delete: if isOwner(resource.data);
     }
 
-    // ── customers: public read (photo-log share page needs the customer doc),
-    //    owner-only writes. ──
+    // ── customers: the contractor's own address book — names, phones,
+    //    addresses and private notes. Owner-only, read and write. The photo-log
+    //    share page reads photoLogs/{customerId} instead. ──
     match /customers/{id} {
-      // Public GET only (the photo-log page loads one customer by id). A public
-      // LIST would expose every contractor's customer names, phones and
-      // addresses to anyone on the internet.
-      allow get: if true;
-      allow list: if isOwner(resource.data);
+      allow read: if isOwner(resource.data);
       allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
       allow update, delete: if isOwner(resource.data);
     }
@@ -197,11 +242,10 @@ service cloud.firestore {
       allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
       allow update, delete: if isOwner(resource.data);
     }
-    // customerPhotos: PUBLIC read — the customer photo-log share page
-    // (/log/{customerId}) is viewed by unauthenticated customers. Writes are
-    // owner-only.
+    // customerPhotos: owner-only. The customer's share page shows the
+    // published copy in photoLogs/{customerId}.
     match /customerPhotos/{id} {
-      allow read: if true;
+      allow read: if isOwner(resource.data);
       allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
       allow update, delete: if isOwner(resource.data);
     }

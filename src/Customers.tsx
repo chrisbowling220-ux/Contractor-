@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { db } from './firebase'
+import { removePhotoLog } from './lib/publishCopies'
 import { collection, addDoc, query, where, doc, deleteDoc, updateDoc, onSnapshot } from 'firebase/firestore'
 import { useUser } from '@clerk/clerk-react'
 import CustomerDetail from './CustomerDetail'
@@ -52,6 +53,7 @@ export default function Customers() {
     if (!confirm(`Delete customer "${c.name}"? Their estimates, invoices and jobs stay, but the customer record is removed. This cannot be undone.`)) return
     try {
       await deleteDoc(doc(db, 'customers', c.id))
+      await removePhotoLog(c.id)
       flash(`Deleted ${c.name}.`)
     } catch (err) {
       alert('Delete failed: ' + (err instanceof Error ? err.message : String(err)))

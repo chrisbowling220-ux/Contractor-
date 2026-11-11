@@ -89,12 +89,12 @@ export default function PublicChangeOrder({ changeOrderId }: { changeOrderId: st
     } finally { setSubmitting(false) }
   }
 
-  if (loading) return <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f8fafc' }}><p style={{ color: '#64748b' }}>Loading…</p></div>
+  if (loading) return <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f8fafc' }}><p style={{ color: '#475569' }}>Loading…</p></div>
   if (error || !co) return (
     <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f8fafc', padding: '24px' }}>
       <div style={{ maxWidth: '460px', textAlign: 'center' }}>
-        <h1 style={{ color: '#dc2626', fontSize: '20px', marginBottom: '12px' }}>Not Available</h1>
-        <p style={{ color: '#64748b' }}>{error}</p>
+        <h1 style={{ color: '#b91c1c', fontSize: '20px', marginBottom: '12px' }}>Not Available</h1>
+        <p style={{ color: '#475569' }}>{error}</p>
       </div>
     </div>
   )
@@ -120,14 +120,14 @@ export default function PublicChangeOrder({ changeOrderId }: { changeOrderId: st
             Hi <strong>{co.customerName}</strong>, this is a change order for your project. Please review and respond below.
           </p>
 
-          <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#64748b', letterSpacing: '1px', margin: '0 0 6px' }}>What changed</h3>
+          <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#475569', letterSpacing: '1px', margin: '0 0 6px' }}>What changed</h3>
           <p style={{ background: '#f8fafc', padding: '12px', borderRadius: '6px', fontSize: '14px', margin: '0 0 20px', lineHeight: 1.5 }}>{co.description}</p>
 
           {co.lineItems.length > 0 && (
             <>
-              <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#64748b', letterSpacing: '1px', margin: '0 0 6px' }}>Itemized changes</h3>
-              <div style={{ overflowX: 'auto', marginBottom: '20px' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+              <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#475569', letterSpacing: '1px', margin: '0 0 6px' }}>Itemized changes</h3>
+              <div tabIndex={0} role="region" aria-label="Change order items" style={{ overflowX: 'auto', marginBottom: '20px' }}>
+                <table tabIndex={0} aria-label="Change order line items" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
                   <thead>
                     <tr style={{ borderBottom: '2px solid #e2e8f0', textAlign: 'left' }}>
                       <th style={{ padding: '8px' }}>Item</th>
@@ -169,35 +169,35 @@ export default function PublicChangeOrder({ changeOrderId }: { changeOrderId: st
                 <div style={{ fontSize: '32px', marginBottom: '8px' }}>✅</div>
                 <h2 style={{ margin: '0 0 8px', color: '#16a34a', fontSize: '20px' }}>Change Order Approved</h2>
                 <p style={{ margin: '0 0 4px', fontSize: '14px' }}>Signed by <strong>{response!.signedName}</strong></p>
-                <p style={{ margin: 0, fontSize: '13px', color: '#64748b' }}>on {new Date(response!.respondedAt).toLocaleString()}</p>
+                <p style={{ margin: 0, fontSize: '13px', color: '#475569' }}>on {new Date(response!.respondedAt).toLocaleString()}</p>
               </div>
             ) : (
               <div style={{ background: '#fef2f2', border: '2px solid #dc2626', borderRadius: '12px', padding: '20px', textAlign: 'center' }}>
                 <div style={{ fontSize: '32px', marginBottom: '8px' }}>📝</div>
-                <h2 style={{ margin: '0 0 8px', color: '#dc2626', fontSize: '20px' }}>Change Order Declined</h2>
+                <h2 style={{ margin: '0 0 8px', color: '#b91c1c', fontSize: '20px' }}>Change Order Declined</h2>
                 <p style={{ margin: '0 0 4px', fontSize: '14px' }}>Declined by <strong>{response!.signedName}</strong></p>
-                <p style={{ margin: 0, fontSize: '13px', color: '#64748b' }}>on {new Date(response!.respondedAt).toLocaleString()}</p>
+                <p style={{ margin: 0, fontSize: '13px', color: '#475569' }}>on {new Date(response!.respondedAt).toLocaleString()}</p>
                 {response!.reason && <p style={{ margin: '12px 0 0', fontSize: '14px', fontStyle: 'italic' }}>"{response!.reason}"</p>}
               </div>
             )
           ) : (
             <div style={{ background: '#fff7ed', border: '2px solid #f97316', borderRadius: '12px', padding: '20px' }}>
               <h3 style={{ margin: '0 0 6px', fontSize: '16px' }}>Approve this change?</h3>
-              <p style={{ margin: '0 0 14px', fontSize: '13px', color: '#64748b' }}>Type your full name to sign, then choose Accept or Decline.</p>
-              <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '4px' }}>Your Signature (typed full name) *</label>
+              <p style={{ margin: '0 0 14px', fontSize: '13px', color: '#475569' }}>Type your full name to sign, then choose Accept or Decline.</p>
+              <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '4px' }}>Your Signature (typed full name) *</label>
               <input value={signedName} onChange={e => setSignedName(e.target.value)} placeholder="Type your full name" style={{ width: '100%', padding: '10px', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '15px', fontFamily: 'cursive', marginBottom: '12px', boxSizing: 'border-box' }} />
               {showDeclineBox && (
                 <div style={{ marginBottom: '12px' }}>
-                  <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '4px' }}>Reason for declining (optional)</label>
+                  <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '4px' }}>Reason for declining (optional)</label>
                   <textarea value={declineReason} onChange={e => setDeclineReason(e.target.value)} rows={3} placeholder="Briefly tell your contractor why." style={{ width: '100%', padding: '10px', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '14px', fontFamily: 'inherit', resize: 'vertical', boxSizing: 'border-box' }} />
                 </div>
               )}
-              {submitError && <p style={{ margin: '0 0 12px', fontSize: '13px', color: '#dc2626' }}>⚠ {submitError}</p>}
+              {submitError && <p style={{ margin: '0 0 12px', fontSize: '13px', color: '#b91c1c' }}>⚠ {submitError}</p>}
               <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-                <button onClick={() => submitResponse('approved')} disabled={submitting} style={{ flex: '1 1 200px', background: '#16a34a', color: 'white', border: 'none', padding: '14px 20px', borderRadius: '8px', cursor: submitting ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '15px' }}>✅ Accept Change</button>
-                <button onClick={() => submitResponse('declined')} disabled={submitting} style={{ flex: '1 1 200px', background: showDeclineBox ? '#dc2626' : '#fef2f2', color: showDeclineBox ? 'white' : '#dc2626', border: '1px solid #dc2626', padding: '14px 20px', borderRadius: '8px', cursor: submitting ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '15px' }}>{showDeclineBox ? '❌ Confirm Decline' : '❌ Decline'}</button>
+                <button onClick={() => submitResponse('approved')} disabled={submitting} style={{ flex: '1 1 200px', background: '#15803d', color: 'white', border: 'none', padding: '14px 20px', borderRadius: '8px', cursor: submitting ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '15px' }}>✅ Accept Change</button>
+                <button onClick={() => submitResponse('declined')} disabled={submitting} style={{ flex: '1 1 200px', background: showDeclineBox ? '#dc2626' : '#fef2f2', color: showDeclineBox ? 'white' : '#b91c1c', border: '1px solid #dc2626', padding: '14px 20px', borderRadius: '8px', cursor: submitting ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '15px' }}>{showDeclineBox ? '❌ Confirm Decline' : '❌ Decline'}</button>
               </div>
-              {showDeclineBox && <button onClick={() => { setShowDeclineBox(false); setDeclineReason('') }} style={{ background: 'transparent', border: 'none', color: '#64748b', padding: '8px 0', marginTop: '8px', cursor: 'pointer', fontSize: '13px', textDecoration: 'underline' }}>Cancel — go back</button>}
+              {showDeclineBox && <button onClick={() => { setShowDeclineBox(false); setDeclineReason('') }} style={{ background: 'transparent', border: 'none', color: '#475569', padding: '8px 0', marginTop: '8px', cursor: 'pointer', fontSize: '13px', textDecoration: 'underline' }}>Cancel — go back</button>}
             </div>
           )}
         </div>

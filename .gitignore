@@ -42,3 +42,8 @@ ui-debug.log
 
 # Expo leftovers (this is a Vite web app)
 .expo/
+
+# Browser-test output
+e2e/.out/
+test-results/
+playwright-report/

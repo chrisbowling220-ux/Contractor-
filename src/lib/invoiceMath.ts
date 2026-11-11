@@ -4,6 +4,7 @@
 // screen, the dashboard and the public invoice page.
 import type { ChangeOrder, Estimate, Invoice, InvoiceLine, InvoicePayment, PaymentMethod } from '../data/types'
 import { toCustomerView } from './customerView'
+import { quoteFromManualEstimate } from './manualQuote'
 
 export const money = (n: number): number => +(Number(n) || 0).toFixed(2)
 
@@ -20,7 +21,8 @@ export const money = (n: number): number => +(Number(n) || 0).toFixed(2)
 export function estimateInvoiceLines(e: Estimate, jobTypeName: string): InvoiceLine[] {
   const total = money(e.total)
   const lines: InvoiceLine[] = []
-  const ai = e.aiQuote ? toCustomerView(e.aiQuote) : null
+  // Hand-built estimates carry their items on the estimate itself.
+  const ai = e.aiQuote ? toCustomerView(e.aiQuote) : (e.materials?.length ? quoteFromManualEstimate(e) : null)
 
   if (ai && ai.material_list.length > 0) {
     for (const m of ai.material_list) {
@@ -34,7 +36,7 @@ export function estimateInvoiceLines(e: Estimate, jobTypeName: string): InvoiceL
     const labor = ai.labor
     if (labor && labor.labor_total > 0) {
       lines.push({
-        name: `Labor — ${labor.estimated_hours} hours @ $${labor.hourly_rate}/hr`,
+        name: labor.breakdown === 'Flat rate' ? 'Labor (flat rate)' : `Labor — ${labor.estimated_hours} hours @ $${labor.hourly_rate}/hr`,
         quantity: 1,
         unitPrice: money(labor.labor_total),
         lineTotal: money(labor.labor_total),

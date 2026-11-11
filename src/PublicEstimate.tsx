@@ -193,7 +193,7 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
   if (loading) {
     return (
       <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f8fafc' }}>
-        <p style={{ color: '#64748b' }}>Loading estimate…</p>
+        <p style={{ color: '#475569' }}>Loading estimate…</p>
       </div>
     )
   }
@@ -201,8 +201,8 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
     return (
       <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f8fafc', padding: '24px' }}>
         <div style={{ maxWidth: '460px', textAlign: 'center' }}>
-          <h1 style={{ color: '#dc2626', fontSize: '20px', marginBottom: '12px' }}>Estimate Not Available</h1>
-          <p style={{ color: '#64748b' }}>{error || 'Unknown error.'}</p>
+          <h1 style={{ color: '#b91c1c', fontSize: '20px', marginBottom: '12px' }}>Estimate Not Available</h1>
+          <p style={{ color: '#475569' }}>{error || 'Unknown error.'}</p>
         </div>
       </div>
     )
@@ -254,7 +254,7 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
           )}
 
           {estimate.proposal && (
-            <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#64748b', letterSpacing: '1px', margin: '0 0 10px' }}>
+            <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#475569', letterSpacing: '1px', margin: '0 0 10px' }}>
               The Work &amp; Your Investment
             </h3>
           )}
@@ -270,10 +270,10 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
               estimate is still stored intact for the contractor's records. */}
           {ai ? (
             <>
-              <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#64748b', letterSpacing: '1px', margin: '0 0 6px' }}>Summary</h3>
+              <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#475569', letterSpacing: '1px', margin: '0 0 6px' }}>Summary</h3>
               <p style={{ fontSize: '14px', lineHeight: 1.5, marginTop: 0, marginBottom: '20px' }}>{ai.customer_summary}</p>
 
-              <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#64748b', letterSpacing: '1px', margin: '0 0 6px' }}>Work Scope</h3>
+              <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#475569', letterSpacing: '1px', margin: '0 0 6px' }}>Work Scope</h3>
               <pre style={{ background: '#f8fafc', padding: '12px', borderRadius: '6px', fontFamily: 'inherit', fontSize: '13px', whiteSpace: 'pre-wrap', margin: '0 0 20px' }}>{ai.work_scope}</pre>
             </>
           ) : (
@@ -316,16 +316,16 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
                 </p>
               ) : (
                 <>
-                  <p style={{ margin: '0 0 12px', fontSize: '13px', color: '#64748b' }}>Does this work for you? Confirm it, or suggest a day that fits your schedule better.</p>
+                  <p style={{ margin: '0 0 12px', fontSize: '13px', color: '#475569' }}>Does this work for you? Confirm it, or suggest a day that fits your schedule better.</p>
                   {showDateChange && (
                     <div style={{ marginBottom: '12px' }}>
-                      <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '4px' }}>Your preferred start date</label>
+                      <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '4px' }}>Your preferred start date</label>
                       <input type="date" value={requestedDate} onChange={e => setRequestedDate(e.target.value)} min={new Date().toISOString().slice(0, 10)} style={{ width: '100%', padding: '10px', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '15px', marginBottom: '8px', boxSizing: 'border-box' }} />
                       <textarea value={dateNote} onChange={e => setDateNote(e.target.value)} rows={2} placeholder="Any note for your contractor (optional)" style={{ width: '100%', padding: '8px 10px', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '14px', fontFamily: 'inherit', resize: 'vertical', boxSizing: 'border-box' }} />
                     </div>
                   )}
                   <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                    <button onClick={() => submitDateResponse('confirmed')} disabled={dateSubmitting} style={{ flex: '1 1 160px', background: '#16a34a', color: 'white', border: 'none', padding: '12px', borderRadius: '8px', cursor: dateSubmitting ? 'default' : 'pointer', fontWeight: 700, fontSize: '14px' }}>
+                    <button onClick={() => submitDateResponse('confirmed')} disabled={dateSubmitting} style={{ flex: '1 1 160px', background: '#15803d', color: 'white', border: 'none', padding: '12px', borderRadius: '8px', cursor: dateSubmitting ? 'default' : 'pointer', fontWeight: 700, fontSize: '14px' }}>
                       ✅ This date works
                     </button>
                     <button onClick={() => submitDateResponse('requested_change')} disabled={dateSubmitting} style={{ flex: '1 1 160px', background: showDateChange ? '#1a1f2e' : 'white', color: showDateChange ? 'white' : '#1a1f2e', border: '1px solid #cbd5e1', padding: '12px', borderRadius: '8px', cursor: dateSubmitting ? 'default' : 'pointer', fontWeight: 700, fontSize: '14px' }}>
@@ -346,7 +346,7 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
                 <p style={{ margin: '0 0 4px', fontSize: '14px', color: '#1a1f2e' }}>
                   Signed by <strong>{response!.signedName}</strong>
                 </p>
-                <p style={{ margin: 0, fontSize: '13px', color: '#64748b' }}>
+                <p style={{ margin: 0, fontSize: '13px', color: '#475569' }}>
                   on {new Date(response!.respondedAt).toLocaleString()}
                 </p>
                 <p style={{ margin: '16px 0 0', fontSize: '14px', color: '#1a1f2e' }}>Your contractor has been notified and will be in touch to schedule the work.</p>
@@ -359,16 +359,16 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
                     ) : depositInvoiceId ? (
                       <>
                         <p style={{ fontSize: '13px', color: '#1a1f2e', margin: '0 0 12px', fontWeight: 600 }}>Ready to get started? Choose how you'd like to pay:</p>
-                        <a href={`/inv/${depositInvoiceId}`} style={{ display: 'block', background: '#16a34a', color: 'white', padding: '14px', borderRadius: '8px', fontWeight: 700, fontSize: '15px', textDecoration: 'none', marginBottom: '10px' }}>
+                        <a href={`/inv/${depositInvoiceId}`} style={{ display: 'block', background: '#15803d', color: 'white', padding: '14px', borderRadius: '8px', fontWeight: 700, fontSize: '15px', textDecoration: 'none', marginBottom: '10px' }}>
                           💳 Pay Deposit ${(estimate.depositAmount || 0).toFixed(2)} Now
                         </a>
                         <button onClick={payFullInstead} disabled={preparingDeposit} style={{ display: 'block', width: '100%', background: '#1a1f2e', color: 'white', padding: '14px', borderRadius: '8px', fontWeight: 700, fontSize: '15px', border: 'none', cursor: 'pointer', marginBottom: '10px' }}>
                           💰 Pay Full ${(estimate.total || 0).toFixed(2)} Now Instead
                         </button>
-                        <p style={{ fontSize: '12px', color: '#64748b', margin: 0 }}>Prefer to pay cash? No problem — just arrange it with your contractor. Work begins once the deposit is settled.</p>
+                        <p style={{ fontSize: '12px', color: '#475569', margin: 0 }}>Prefer to pay cash? No problem — just arrange it with your contractor. Work begins once the deposit is settled.</p>
                       </>
                     ) : (
-                      <p style={{ fontSize: '13px', color: '#64748b' }}>Your contractor will send a deposit invoice shortly so you can pay by card or cash.</p>
+                      <p style={{ fontSize: '13px', color: '#475569' }}>Your contractor will send a deposit invoice shortly so you can pay by card or cash.</p>
                     )}
                   </div>
                 )}
@@ -376,11 +376,11 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
             ) : (
               <div style={{ background: '#fef2f2', border: '2px solid #dc2626', borderRadius: '12px', padding: '20px', textAlign: 'center' }}>
                 <div style={{ fontSize: '32px', marginBottom: '8px' }}>📝</div>
-                <h2 style={{ margin: '0 0 8px', color: '#dc2626', fontSize: '20px' }}>Proposal Declined</h2>
+                <h2 style={{ margin: '0 0 8px', color: '#b91c1c', fontSize: '20px' }}>Proposal Declined</h2>
                 <p style={{ margin: '0 0 4px', fontSize: '14px', color: '#1a1f2e' }}>
                   Declined by <strong>{response!.signedName}</strong>
                 </p>
-                <p style={{ margin: 0, fontSize: '13px', color: '#64748b' }}>
+                <p style={{ margin: 0, fontSize: '13px', color: '#475569' }}>
                   on {new Date(response!.respondedAt).toLocaleString()}
                 </p>
                 {response!.reason && (
@@ -388,7 +388,7 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
                     "{response!.reason}"
                   </p>
                 )}
-                <p style={{ margin: '16px 0 0', fontSize: '13px', color: '#64748b' }}>If this was a mistake, contact your contractor directly.</p>
+                <p style={{ margin: '16px 0 0', fontSize: '13px', color: '#475569' }}>If this was a mistake, contact your contractor directly.</p>
               </div>
             )
           ) : (
@@ -399,11 +399,11 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
                 </div>
               )}
               <h3 style={{ margin: '0 0 6px', fontSize: '16px', color: '#1a1f2e' }}>Ready to move forward?</h3>
-              <p style={{ margin: '0 0 14px', fontSize: '13px', color: '#64748b' }}>
+              <p style={{ margin: '0 0 14px', fontSize: '13px', color: '#475569' }}>
                 Type your full name to sign, then choose Accept or Decline.
               </p>
 
-              <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '4px' }}>
+              <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '4px' }}>
                 Your Signature (typed full name) — consent to terms *
               </label>
               <input
@@ -415,7 +415,7 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
 
               {showDeclineBox && (
                 <div style={{ marginBottom: '12px' }}>
-                  <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '4px' }}>
+                  <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#475569', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '4px' }}>
                     Reason for declining (optional)
                   </label>
                   <textarea
@@ -428,42 +428,42 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
                 </div>
               )}
 
-              {submitError && <p style={{ margin: '0 0 12px', fontSize: '13px', color: '#dc2626' }}>⚠ {submitError}</p>}
+              {submitError && <p style={{ margin: '0 0 12px', fontSize: '13px', color: '#b91c1c' }}>⚠ {submitError}</p>}
 
               <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
                 <button
                   onClick={() => submitResponse('approved')}
                   disabled={submitting}
-                  style={{ flex: '1 1 200px', background: '#16a34a', color: 'white', border: 'none', padding: '14px 20px', borderRadius: '8px', cursor: submitting ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '15px' }}
+                  style={{ flex: '1 1 200px', background: '#15803d', color: 'white', border: 'none', padding: '14px 20px', borderRadius: '8px', cursor: submitting ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '15px' }}
                 >
                   ✅ Accept Proposal
                 </button>
                 <button
                   onClick={() => submitResponse('declined')}
                   disabled={submitting}
-                  style={{ flex: '1 1 200px', background: showDeclineBox ? '#dc2626' : '#fef2f2', color: showDeclineBox ? 'white' : '#dc2626', border: '1px solid #dc2626', padding: '14px 20px', borderRadius: '8px', cursor: submitting ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '15px' }}
+                  style={{ flex: '1 1 200px', background: showDeclineBox ? '#dc2626' : '#fef2f2', color: showDeclineBox ? 'white' : '#b91c1c', border: '1px solid #dc2626', padding: '14px 20px', borderRadius: '8px', cursor: submitting ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '15px' }}
                 >
                   {showDeclineBox ? '❌ Confirm Decline' : '❌ Decline'}
                 </button>
               </div>
-              <p style={{ margin: '12px 0 0', fontSize: '11px', color: '#94a3b8', lineHeight: 1.5 }}>
+              <p style={{ margin: '12px 0 0', fontSize: '11px', color: '#475569', lineHeight: 1.5 }}>
                 By typing your name and tapping Accept, you electronically sign this proposal and agree to its scope and pricing
                 {estimate.depositRequested && (estimate.depositAmount || 0) > 0
                   ? `, including the payment terms — a deposit of $${(estimate.depositAmount || 0).toFixed(2)} due upfront and the balance of $${Math.max(0, (estimate.total || 0) - (estimate.depositAmount || 0)).toFixed(2)} due at completion.`
                   : '.'}
               </p>
               {showDeclineBox && (
-                <button onClick={() => { setShowDeclineBox(false); setDeclineReason('') }} style={{ background: 'transparent', border: 'none', color: '#64748b', padding: '8px 0', marginTop: '8px', cursor: 'pointer', fontSize: '13px', textDecoration: 'underline' }}>
+                <button onClick={() => { setShowDeclineBox(false); setDeclineReason('') }} style={{ background: 'transparent', border: 'none', color: '#475569', padding: '8px 0', marginTop: '8px', cursor: 'pointer', fontSize: '13px', textDecoration: 'underline' }}>
                   Cancel — go back
                 </button>
               )}
-              <p style={{ margin: '14px 0 0', fontSize: '11px', color: '#94a3b8', lineHeight: 1.4 }}>
+              <p style={{ margin: '14px 0 0', fontSize: '11px', color: '#475569', lineHeight: 1.4 }}>
                 By accepting, you authorize the contractor to begin the work described above at the quoted price. By declining, you let your contractor know this estimate isn't right for you.
               </p>
             </div>
           )}
 
-          <p style={{ fontSize: '13px', color: '#64748b', margin: '20px 0 0', textAlign: 'center' }}>
+          <p style={{ fontSize: '13px', color: '#475569', margin: '20px 0 0', textAlign: 'center' }}>
             Questions? Reply to the message your contractor sent you, or contact them directly.
           </p>
         </div>

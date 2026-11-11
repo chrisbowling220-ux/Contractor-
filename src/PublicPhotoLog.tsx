@@ -106,14 +106,14 @@ export default function PublicPhotoLog({ customerId }: { customerId: string }) {
 
         <div style={{ padding: '20px' }}>
           {photos.length === 0 ? (
-            <p style={{ color: '#94a3b8', textAlign: 'center', padding: '40px 0' }}>No photos in this log yet.</p>
+            <p style={{ color: '#64748b', textAlign: 'center', padding: '40px 0' }}>No photos in this log yet.</p>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
               {photos.map(p => (
                 <div key={p.id} style={{ border: '1px solid #e2e8f0', borderRadius: '8px', overflow: 'hidden', background: '#fafafa' }}>
                   <img src={p.photoUrl} alt={p.caption} style={{ width: '100%', maxHeight: '600px', objectFit: 'contain', display: 'block', background: '#1a1f2e' }} />
                   <div style={{ padding: '12px 16px' }}>
-                    <p style={{ margin: '0 0 4px', fontSize: '12px', color: '#94a3b8' }}>{new Date(p.createdAt).toLocaleString()}</p>
+                    <p style={{ margin: '0 0 4px', fontSize: '12px', color: '#64748b' }}>{new Date(p.createdAt).toLocaleString()}</p>
                     {p.caption && <p style={{ margin: 0, fontSize: '14px', color: '#1a1f2e' }}>{p.caption}</p>}
                   </div>
                 </div>

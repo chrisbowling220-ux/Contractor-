@@ -1,32 +1,27 @@
 import { SignedIn, SignedOut, SignInButton, UserButton, useUser } from '@clerk/clerk-react'
-import { useState, useEffect } from 'react'
+import { Suspense, lazy, useState, useEffect } from 'react'
 import { collection, getDocs, query, where, onSnapshot } from 'firebase/firestore'
 import { db } from './firebase'
-import Customers from './Customers'
-import Settings from './Settings'
-import { fetchBusinessName } from './lib/businessProfile'
-import ScanRoom from './ScanRoom'
-import Projects from './Projects'
-import Estimates from './Estimates'
-import Schedule from './Schedule'
-import PropertyAdvisor from './PropertyAdvisor'
-import PublicEstimate from './PublicEstimate'
-import PublicPhotoLog from './PublicPhotoLog'
-import PublicChangeOrder from './PublicChangeOrder'
-import PublicThankYou from './PublicThankYou'
-import PublicInvoice from './PublicInvoice'
+import { fetchBusinessName, needsBusinessSetup } from './lib/businessProfile'
 import { autoConvertApprovedEstimates } from './lib/autoConvertEstimates'
 import { useFirebaseBridge } from './lib/useFirebaseBridge'
 import BusinessOnboarding from './BusinessOnboarding'
 import QuickPhotoCapture from './QuickPhotoCapture'
 import QuickAddVoice from './QuickAddVoice'
 import WelcomeTour from './WelcomeTour'
-import { TermsPage, PrivacyPage } from './LegalPages'
-import SafeToSpend from './SafeToSpend'
 import { fireDueReminders, fireMorningAgenda, requestNotificationPermission, alertsEnabled, setAlertsEnabled, playAlertCue } from './lib/reminders'
 import { tipOfTheDay } from './data/contractorTips'
 import type { Invoice, ProjectStatus } from './data/types'
 import { collectedBetween, isOverdue, localDateStr } from './lib/invoiceMath'
+
+// Each screen is its own bundle, fetched the first time it is opened.
+const ScanRoom = lazy(() => import('./ScanRoom'))
+const Projects = lazy(() => import('./Projects'))
+const Estimates = lazy(() => import('./Estimates'))
+const Schedule = lazy(() => import('./Schedule'))
+const PropertyAdvisor = lazy(() => import('./PropertyAdvisor'))
+const Settings = lazy(() => import('./Settings'))
+const Customers = lazy(() => import('./Customers'))
 
 const ORANGE = '#f97316'
 const NAVY = '#1a1f2e'
@@ -768,9 +763,12 @@ function FirebaseGate() {
   useEffect(() => {
     if (!ready || !user?.id) return
     let cancelled = false
-    fetchBusinessName(user.id).then(name => {
-      if (!cancelled) setNeedsOnboarding(!name.trim())
-    }).catch(() => { if (!cancelled) setNeedsOnboarding(false) })
+    // If the lookup fails outright, go to the dashboard rather than the
+    // welcome screen: an existing contractor must never be asked to set up
+    // their business again because of a bad connection.
+    needsBusinessSetup(user.id).then(needs => {
+      if (!cancelled) setNeedsOnboarding(needs)
+    }).catch(err => { console.error('Profile check failed:', err); if (!cancelled) setNeedsOnboarding(false) })
     return () => { cancelled = true }
   }, [ready, user?.id])
 
@@ -1222,6 +1220,7 @@ function Dashboard() {
             <DashboardHome counts={counts} onPick={go} onBox={goWithFilter} onPhotos={() => setPhotoCaptureOpen(true)} onQuickAdd={() => setQuickAddOpen(true)} userName={user?.firstName || undefined} />
           </>
         )}
+        <Suspense fallback={<p role="status" style={{ padding: '32px', color: '#475569' }}>Loading…</p>}>
         {page === 'projects' && <Projects key={projectsFilter} initialStatusFilter={projectsFilter} />}
         {page === 'estimates' && <Estimates />}
         {page === 'schedule' && <Schedule onOpenProject={() => go('projects')} />}
@@ -1229,59 +1228,10 @@ function Dashboard() {
         {page === 'scan-room' && <ScanRoom onNavigate={go} />}
         {page === 'property-advisor' && <PropertyAdvisor />}
         {page === 'settings' && <Settings />}
+        </Suspense>
       </main>
     </div>
   )
-}
-
-// Match /q/<id> — public estimate viewer that doesn't require sign-in.
-function publicEstimateIdFromUrl(): string | null {
-  if (typeof window === 'undefined') return null
-  const m = window.location.pathname.match(/^\/q\/([A-Za-z0-9_-]+)\/?$/)
-  return m ? m[1] : null
-}
-
-// Match /log/<customerId> — public photo log viewer.
-function publicPhotoLogIdFromUrl(): string | null {
-  if (typeof window === 'undefined') return null
-  const m = window.location.pathname.match(/^\/log\/([A-Za-z0-9_-]+)\/?$/)
-  return m ? m[1] : null
-}
-
-// Match /co/<id> — public change order viewer.
-function publicChangeOrderIdFromUrl(): string | null {
-  if (typeof window === 'undefined') return null
-  const m = window.location.pathname.match(/^\/co\/([A-Za-z0-9_-]+)\/?$/)
-  return m ? m[1] : null
-}
-
-// Match /thanks/<id> — public thank-you package viewer.
-function publicThankYouIdFromUrl(): string | null {
-  if (typeof window === 'undefined') return null
-  const m = window.location.pathname.match(/^\/thanks\/([A-Za-z0-9_-]+)\/?$/)
-  return m ? m[1] : null
-}
-
-// Public legal pages — /terms and /privacy (no sign-in).
-function legalPageFromUrl(): 'terms' | 'privacy' | null {
-  if (typeof window === 'undefined') return null
-  const p = window.location.pathname.replace(/\/$/, '')
-  if (p === '/terms') return 'terms'
-  if (p === '/privacy') return 'privacy'
-  return null
-}
-
-// Public free tool — /safe-to-spend (no sign-in).
-function isSafeToSpendUrl(): boolean {
-  if (typeof window === 'undefined') return false
-  return window.location.pathname.replace(/\/$/, '') === '/safe-to-spend'
-}
-
-// Match /inv/<id> — public invoice viewer.
-function publicInvoiceIdFromUrl(): string | null {
-  if (typeof window === 'undefined') return null
-  const m = window.location.pathname.match(/^\/inv\/([A-Za-z0-9_-]+)\/?$/)
-  return m ? m[1] : null
 }
 
 function App() {
@@ -1291,27 +1241,6 @@ function App() {
   // Drives the signed-out landing layout (asymmetric 2-col on desktop, single
   // column on mobile). Must run before the early returns below (Rules of Hooks).
   const isMobile = useIsMobile()
-
-  const publicEstimateId = publicEstimateIdFromUrl()
-  if (publicEstimateId) return <PublicEstimate estimateId={publicEstimateId} />
-
-  const publicLogId = publicPhotoLogIdFromUrl()
-  if (publicLogId) return <PublicPhotoLog customerId={publicLogId} />
-
-  const publicCoId = publicChangeOrderIdFromUrl()
-  if (publicCoId) return <PublicChangeOrder changeOrderId={publicCoId} />
-
-  const publicThxId = publicThankYouIdFromUrl()
-  if (publicThxId) return <PublicThankYou packageId={publicThxId} />
-
-  const publicInvId = publicInvoiceIdFromUrl()
-  if (publicInvId) return <PublicInvoice invoiceId={publicInvId} />
-
-  const legal = legalPageFromUrl()
-  if (legal === 'terms') return <TermsPage />
-  if (legal === 'privacy') return <PrivacyPage />
-
-  if (isSafeToSpendUrl()) return <SafeToSpend />
 
   return (
     <div>

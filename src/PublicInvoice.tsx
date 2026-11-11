@@ -94,14 +94,14 @@ export default function PublicInvoice({ invoiceId }: { invoiceId: string }) {
   }, [invoice])
 
   if (loading) {
-    return <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f8fafc' }}><p style={{ color: '#64748b' }}>Loading…</p></div>
+    return <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f8fafc' }}><p style={{ color: '#475569' }}>Loading…</p></div>
   }
   if (error || !invoice) {
     return (
       <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f8fafc', padding: '24px' }}>
         <div style={{ maxWidth: '460px', textAlign: 'center' }}>
-          <h1 style={{ color: '#dc2626', fontSize: '20px', marginBottom: '12px' }}>Invoice Not Found</h1>
-          <p style={{ color: '#64748b' }}>{error || 'Unknown error.'}</p>
+          <h1 style={{ color: '#b91c1c', fontSize: '20px', marginBottom: '12px' }}>Invoice Not Found</h1>
+          <p style={{ color: '#475569' }}>{error || 'Unknown error.'}</p>
         </div>
       </div>
     )
@@ -134,14 +134,14 @@ export default function PublicInvoice({ invoiceId }: { invoiceId: string }) {
           {/* Status badge */}
           {invoice.status === 'paid' && (
             <div style={{ background: '#f0fdf4', border: '2px solid #16a34a', borderRadius: '12px', padding: '12px 16px', marginBottom: '20px', textAlign: 'center' }}>
-              <strong style={{ color: '#16a34a', fontSize: '15px' }}>✓ Paid in full</strong>
-              {invoice.paidAt && <span style={{ color: '#64748b', fontSize: '13px', marginLeft: '8px' }}>· {new Date(invoice.paidAt).toLocaleDateString()}</span>}
+              <strong style={{ color: '#15803d', fontSize: '15px' }}>✓ Paid in full</strong>
+              {invoice.paidAt && <span style={{ color: '#475569', fontSize: '13px', marginLeft: '8px' }}>· {new Date(invoice.paidAt).toLocaleDateString()}</span>}
             </div>
           )}
           {overdue && (
             <div style={{ background: '#fef2f2', border: '2px solid #dc2626', borderRadius: '12px', padding: '12px 16px', marginBottom: '20px', textAlign: 'center' }}>
-              <strong style={{ color: '#dc2626', fontSize: '15px' }}>⚠ Past Due</strong>
-              <span style={{ color: '#64748b', fontSize: '13px', marginLeft: '8px' }}>· Due {due.toLocaleDateString()}</span>
+              <strong style={{ color: '#b91c1c', fontSize: '15px' }}>⚠ Past Due</strong>
+              <span style={{ color: '#475569', fontSize: '13px', marginLeft: '8px' }}>· Due {due.toLocaleDateString()}</span>
             </div>
           )}
 
@@ -153,24 +153,24 @@ export default function PublicInvoice({ invoiceId }: { invoiceId: string }) {
           {/* Bill-to + Date block */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginBottom: '24px', padding: '16px', background: '#f8fafc', borderRadius: '8px' }}>
             <div>
-              <h4 style={{ fontSize: '11px', textTransform: 'uppercase', color: '#64748b', letterSpacing: '1px', margin: '0 0 4px' }}>Bill to</h4>
+              <h4 style={{ fontSize: '11px', textTransform: 'uppercase', color: '#475569', letterSpacing: '1px', margin: '0 0 4px' }}>Bill to</h4>
               <p style={{ margin: 0, fontSize: '14px', fontWeight: 600 }}>{invoice.customerName}</p>
-              {invoice.customerAddress && <p style={{ margin: '2px 0 0', fontSize: '13px', color: '#64748b' }}>{invoice.customerAddress}</p>}
-              {invoice.customerEmail && <p style={{ margin: '2px 0 0', fontSize: '13px', color: '#64748b' }}>{invoice.customerEmail}</p>}
-              {invoice.customerPhone && <p style={{ margin: '2px 0 0', fontSize: '13px', color: '#64748b' }}>{invoice.customerPhone}</p>}
+              {invoice.customerAddress && <p style={{ margin: '2px 0 0', fontSize: '13px', color: '#475569' }}>{invoice.customerAddress}</p>}
+              {invoice.customerEmail && <p style={{ margin: '2px 0 0', fontSize: '13px', color: '#475569' }}>{invoice.customerEmail}</p>}
+              {invoice.customerPhone && <p style={{ margin: '2px 0 0', fontSize: '13px', color: '#475569' }}>{invoice.customerPhone}</p>}
             </div>
             <div>
-              <h4 style={{ fontSize: '11px', textTransform: 'uppercase', color: '#64748b', letterSpacing: '1px', margin: '0 0 4px' }}>Invoice Date</h4>
+              <h4 style={{ fontSize: '11px', textTransform: 'uppercase', color: '#475569', letterSpacing: '1px', margin: '0 0 4px' }}>Invoice Date</h4>
               <p style={{ margin: 0, fontSize: '14px' }}>{new Date(invoice.createdAt).toLocaleDateString()}</p>
-              <h4 style={{ fontSize: '11px', textTransform: 'uppercase', color: '#64748b', letterSpacing: '1px', margin: '12px 0 4px' }}>Due Date</h4>
+              <h4 style={{ fontSize: '11px', textTransform: 'uppercase', color: '#475569', letterSpacing: '1px', margin: '12px 0 4px' }}>Due Date</h4>
               <p style={{ margin: 0, fontSize: '14px', color: overdue ? '#dc2626' : '#1a1f2e', fontWeight: overdue ? 700 : 400 }}>{due.toLocaleDateString()}</p>
             </div>
           </div>
 
           {/* Line items */}
-          <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#64748b', letterSpacing: '1px', margin: '0 0 8px' }}>Line Items</h3>
-          <div style={{ overflowX: 'auto', marginBottom: '24px' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+          <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#475569', letterSpacing: '1px', margin: '0 0 8px' }}>Line Items</h3>
+          <div tabIndex={0} role="region" aria-label="Line items" style={{ overflowX: 'auto', marginBottom: '24px' }}>
+            <table tabIndex={0} aria-label="Invoice line items" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
               <thead>
                 <tr style={{ borderBottom: '2px solid #e2e8f0', textAlign: 'left' }}>
                   <th style={{ padding: '8px' }}>Item</th>
@@ -223,19 +223,19 @@ export default function PublicInvoice({ invoiceId }: { invoiceId: string }) {
           </div>
 
           {/* Payment terms */}
-          <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#64748b', letterSpacing: '1px', margin: '0 0 6px' }}>Payment Terms</h3>
+          <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#475569', letterSpacing: '1px', margin: '0 0 6px' }}>Payment Terms</h3>
           <p style={{ fontSize: '14px', lineHeight: 1.6, color: '#1a1f2e', marginTop: 0, marginBottom: '24px' }}>{invoice.paymentTerms}</p>
 
           {invoice.status !== 'paid' && invoice.amountDue > 0 && (
             <>
-              <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#64748b', letterSpacing: '1px', margin: '0 0 10px' }}>How would you like to pay?</h3>
+              <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: '#475569', letterSpacing: '1px', margin: '0 0 10px' }}>How would you like to pay?</h3>
               {cardPayOk && (
                 <>
-                  <button onClick={payByCard} disabled={paying} style={{ width: '100%', background: paying ? '#94a3b8' : '#16a34a', color: 'white', border: 'none', padding: '14px', borderRadius: '8px', cursor: paying ? 'default' : 'pointer', fontWeight: 700, fontSize: '15px', marginBottom: '10px' }}>
+                  <button onClick={payByCard} disabled={paying} style={{ width: '100%', background: paying ? '#64748b' : '#15803d', color: 'white', border: 'none', padding: '14px', borderRadius: '8px', cursor: paying ? 'default' : 'pointer', fontWeight: 700, fontSize: '15px', marginBottom: '10px' }}>
                     {paying ? 'Redirecting to secure checkout…' : `💳 Pay Now — $${invoice.amountDue.toFixed(2)} by Card`}
                   </button>
-                  {payError && <p style={{ color: '#dc2626', fontSize: '13px', textAlign: 'center', marginTop: 0, marginBottom: '12px' }}>{payError}</p>}
-                  <p style={{ fontSize: '11px', color: '#94a3b8', textAlign: 'center', margin: '0 0 14px' }}>Secure payment powered by Stripe. Your card details never touch this site.</p>
+                  {payError && <p style={{ color: '#b91c1c', fontSize: '13px', textAlign: 'center', marginTop: 0, marginBottom: '12px' }}>{payError}</p>}
+                  <p style={{ fontSize: '11px', color: '#475569', textAlign: 'center', margin: '0 0 14px' }}>Secure payment powered by Stripe. Your card details never touch this site.</p>
                 </>
               )}
 

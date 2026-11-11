@@ -9,7 +9,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:rules": "firebase emulators:exec --only firestore,storage --project demo-setaside \"vitest run --config vitest.rules.config.ts\""
+    "test:rules": "firebase emulators:exec --only firestore,storage --project demo-setaside \"vitest run --config vitest.rules.config.ts\"",
+    "test:e2e": "firebase emulators:exec --only firestore,auth,storage --project demo-setaside \"playwright test\""
   },
   "dependencies": {
     "@clerk/clerk-react": "^5.61.3",
@@ -21,8 +22,10 @@
     "react-dom": "^19.2.5"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.14.0",
     "@eslint/js": "^10.0.1",
     "@firebase/rules-unit-testing": "^5.0.2",
+    "@playwright/test": "^1.65.0",
     "@types/node": "^24.12.2",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",

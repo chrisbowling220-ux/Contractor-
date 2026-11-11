@@ -59,7 +59,7 @@ export function BrandHeader({ title, subtitle, businessName, logoUrl, businessPh
 
 export function BrandFooter() {
   return (
-    <p style={{ fontSize: '11px', color: '#94a3b8', margin: '24px 0 0', textAlign: 'center', letterSpacing: '0.5px' }}>
+    <p style={{ fontSize: '11px', color: '#64748b', margin: '24px 0 0', textAlign: 'center', letterSpacing: '0.5px' }}>
       Powered by <strong style={{ color: '#1a1f2e' }}>BuildPro<span style={{ color: '#f97316' }}>+</span></strong>
     </p>
   )

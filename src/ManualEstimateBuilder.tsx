@@ -163,9 +163,9 @@ export default function ManualEstimateBuilder({ defaultCustomerName, defaultCust
 
         <div style={{ padding: '16px' }}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '12px', marginBottom: '16px' }}>
-            <div><label style={label}>Customer name *</label><input value={customerName} onChange={e => setCustomerName(e.target.value)} style={input} placeholder="e.g. Sarah Miller" /></div>
-            <div><label style={label}>Job type / title *</label><input value={jobTypeName} onChange={e => setJobTypeName(e.target.value)} style={input} placeholder="e.g. Bathroom remodel" /></div>
-            <div><label style={label}>Job ZIP</label><input value={zip} onChange={e => setZip(e.target.value)} style={input} placeholder="27573" /></div>
+            <div><label style={label}>Customer name *</label><input aria-label="Customer name" value={customerName} onChange={e => setCustomerName(e.target.value)} style={input} placeholder="e.g. Sarah Miller" /></div>
+            <div><label style={label}>Job type / title *</label><input aria-label="Job type / title" value={jobTypeName} onChange={e => setJobTypeName(e.target.value)} style={input} placeholder="e.g. Bathroom remodel" /></div>
+            <div><label style={label}>Job ZIP</label><input aria-label="Job ZIP" value={zip} onChange={e => setZip(e.target.value)} style={input} placeholder="27573" /></div>
           </div>
 
           <div style={{ marginBottom: '16px' }}>
@@ -183,12 +183,12 @@ export default function ManualEstimateBuilder({ defaultCustomerName, defaultCust
                     <option value="">— Pick or type custom —</option>
                     {MATERIALS.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                   </select>
-                  <input value={r.name} onChange={e => updateRow(r.key, { name: e.target.value, materialId: '' })} style={{ ...input, padding: '8px' }} placeholder="Custom item name" />
+                  <input value={r.name} onChange={e => updateRow(r.key, { name: e.target.value, materialId: '' })} style={{ ...input, padding: '8px' }} placeholder="Custom item name" aria-label="Item name" />
                 </div>
-                <input type="number" value={r.quantity} onChange={e => updateRow(r.key, { quantity: e.target.value })} style={{ ...input, padding: '8px' }} placeholder="Qty" />
-                <input value={r.unit} onChange={e => updateRow(r.key, { unit: e.target.value })} style={{ ...input, padding: '8px' }} placeholder="unit" />
-                <input type="number" value={r.unitPrice} onChange={e => updateRow(r.key, { unitPrice: e.target.value })} style={{ ...input, padding: '8px' }} placeholder="$ each" />
-                <button onClick={() => removeRow(r.key)} style={{ background: 'transparent', color: '#dc2626', border: 'none', cursor: 'pointer', fontSize: '18px', padding: '0 4px' }} title="Remove">×</button>
+                <input type="number" value={r.quantity} onChange={e => updateRow(r.key, { quantity: e.target.value })} style={{ ...input, padding: '8px' }} placeholder="Qty" aria-label="Quantity" />
+                <input value={r.unit} onChange={e => updateRow(r.key, { unit: e.target.value })} style={{ ...input, padding: '8px' }} placeholder="unit" aria-label="Unit" />
+                <input type="number" value={r.unitPrice} onChange={e => updateRow(r.key, { unitPrice: e.target.value })} style={{ ...input, padding: '8px' }} placeholder="$ each" aria-label="Price each" />
+                <button onClick={() => removeRow(r.key)} style={{ background: 'transparent', color: '#dc2626', border: 'none', cursor: 'pointer', fontSize: '18px', padding: '0 4px' }} title="Remove" aria-label="Remove item">×</button>
               </div>
             ))}
             <button onClick={() => setRows(prev => [...prev, newRow()])} style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '8px 14px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '13px', marginTop: '4px' }}>+ Add material</button>
@@ -204,11 +204,11 @@ export default function ManualEstimateBuilder({ defaultCustomerName, defaultCust
             </div>
             {rateType === 'hourly' ? (
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                <div><label style={label}>Hours</label><input type="number" value={hours} onChange={e => setHours(e.target.value)} style={input} placeholder="0" /></div>
-                <div><label style={label}>Rate ($/hr)</label><input type="number" value={hourlyRate} onChange={e => setHourlyRate(e.target.value)} style={input} placeholder="65" /></div>
+                <div><label style={label}>Hours</label><input aria-label="Hours" type="number" value={hours} onChange={e => setHours(e.target.value)} style={input} placeholder="0" /></div>
+                <div><label style={label}>Rate ($/hr)</label><input aria-label="Rate ($/hr)" type="number" value={hourlyRate} onChange={e => setHourlyRate(e.target.value)} style={input} placeholder="65" /></div>
               </div>
             ) : (
-              <div><label style={label}>Flat labor amount ($)</label><input type="number" value={flatAmount} onChange={e => setFlatAmount(e.target.value)} style={input} placeholder="0" /></div>
+              <div><label style={label}>Flat labor amount ($)</label><input aria-label="Flat labor amount ($)" type="number" value={flatAmount} onChange={e => setFlatAmount(e.target.value)} style={input} placeholder="0" /></div>
             )}
             <p style={{ textAlign: 'right', margin: '10px 0 0', fontWeight: 700 }}>Labor: ${laborTotal.toFixed(2)}</p>
           </div>

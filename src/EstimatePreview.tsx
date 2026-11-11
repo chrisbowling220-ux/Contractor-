@@ -3,6 +3,7 @@ import { useAuth, useUser } from '@clerk/clerk-react'
 import { doc, updateDoc, deleteField } from 'firebase/firestore'
 import { db } from './firebase'
 import { toCustomerView } from './lib/customerView'
+import { quoteFromManualEstimate } from './lib/manualQuote'
 import { copyShareLink, shareLinkFor, smsHref, mailtoHref, nativeShare, isPhone } from './lib/shareEstimate'
 import { rememberMaterialPrices } from './lib/learnedPrices'
 import { generateProposalLetter, buildProposalFallback } from './lib/proposal'
@@ -28,7 +29,9 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, b
   const { getToken } = useAuth()
 
   // Always work from a customer-view shaped quote so markup is baked in.
-  const initialAi: AIQuote | null = estimate.aiQuote ? toCustomerView(estimate.aiQuote) : null
+  // A hand-built estimate has no itemised quote; build one from its own fields
+  // so its materials and labor show up here (and survive a save).
+  const initialAi: AIQuote = estimate.aiQuote ? toCustomerView(estimate.aiQuote) : quoteFromManualEstimate(estimate)
 
   const [customerName, setCustomerName] = useState(estimate.customerName || '')
   const [customerSummary, setCustomerSummary] = useState(initialAi?.customer_summary || '')

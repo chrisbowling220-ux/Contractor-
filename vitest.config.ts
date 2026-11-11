@@ -4,6 +4,6 @@ import { configDefaults, defineConfig } from 'vitest/config'
 // via `npm run test:rules` (vitest.rules.config.ts).
 export default defineConfig({
   test: {
-    exclude: [...configDefaults.exclude, '**/*.rules.test.ts'],
+    exclude: [...configDefaults.exclude, '**/*.rules.test.ts', 'e2e/**'],
   },
 })

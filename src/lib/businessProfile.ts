@@ -31,6 +31,26 @@ export async function fetchBusinessProfile(userId: string): Promise<BusinessProf
   }
 }
 
+// Does this contractor still need first-time setup (no business name on file)?
+//
+// Unlike fetchBusinessProfile this THROWS when the lookup itself fails. A
+// failed read (weak signal on a job site) must not be mistaken for "no
+// profile": that sent existing contractors back to the welcome screen, where
+// saving would have overwritten their real business details.
+export async function needsBusinessSetup(userId: string): Promise<boolean> {
+  let lastError: unknown
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const snap = await getDoc(doc(db, 'users', userId))
+      return !String((snap.data() as Partial<BusinessProfile> | undefined)?.businessName || '').trim()
+    } catch (err) {
+      lastError = err
+      await new Promise(r => setTimeout(r, 600 * (attempt + 1)))
+    }
+  }
+  throw lastError
+}
+
 export async function fetchBusinessName(userId: string): Promise<string> {
   const p = await fetchBusinessProfile(userId)
   return p.businessName

@@ -23,5 +23,9 @@
   },
   "devDependencies": {
     "typescript": "~5.7.0"
+  },
+  "overrides": {
+    "glob": "^14.0.5",
+    "minimatch": "^11.0.8"
   }
 }

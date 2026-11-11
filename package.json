@@ -38,5 +38,9 @@
     "typescript-eslint": "^8.58.2",
     "vite": "^8.0.10",
     "vitest": "^5.0.5"
+  },
+  "overrides": {
+    "@grpc/grpc-js": "^1.14.7",
+    "minimatch": "^11.0.8"
   }
 }

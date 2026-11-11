@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react'
 import { useUser } from '@clerk/clerk-react'
-import { addDoc, updateDoc, doc, collection } from 'firebase/firestore'
+import { addDoc, collection } from 'firebase/firestore'
+import { createProjectForEstimate } from './lib/projectLink'
 import { db } from './firebase'
 import { MATERIALS } from './data/materials'
 import type { Estimate, MaterialLine, Project } from './data/types'
@@ -134,8 +135,7 @@ export default function ManualEstimateBuilder({ defaultCustomerName, defaultCust
           sourceEstimateId: ref.id,
           estimateTotal: total,
         }
-        const pRef = await addDoc(collection(db, 'projects'), projectPayload)
-        await updateDoc(doc(db, 'estimates', ref.id), { projectAutoCreated: true, projectId: pRef.id })
+        await createProjectForEstimate(ref.id, { ...projectPayload })
       } catch (projErr) {
         console.warn('Manual estimate: project auto-create failed', projErr)
       }

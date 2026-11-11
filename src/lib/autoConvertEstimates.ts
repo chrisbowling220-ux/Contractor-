@@ -1,4 +1,5 @@
-import { collection, getDocs, getDoc, query, where, addDoc, doc, updateDoc } from 'firebase/firestore'
+import { collection, getDocs, getDoc, query, where, doc, updateDoc } from 'firebase/firestore'
+import { createProjectForEstimate } from './projectLink'
 import { db } from '../firebase'
 import type { Estimate, Project, ProjectStatus } from '../data/types'
 import { PROJECT_STATUS_ORDER } from '../data/types'
@@ -197,11 +198,9 @@ async function createProjectFor(e: Estimate, userId: string, status: ProjectStat
       ...(e.customerResponse?.reason ? { declineReason: e.customerResponse.reason } : {}),
     } : {}),
   }
-  const ref = await addDoc(collection(db, 'projects'), project)
-  await updateDoc(doc(db, 'estimates', e.id), {
-    projectAutoCreated: true,
-    projectId: ref.id,
-  })
+  // Same derived id the quote screens use, so a sweep that runs while a quote
+  // is still being saved cannot create a second project for it.
+  const ref = { id: await createProjectForEstimate(e.id, { ...project }) }
   // Migrate any pending Quick Quote photos tagged only by estimate.
   try {
     const photoSnap = await getDocs(query(

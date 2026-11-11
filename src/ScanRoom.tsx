@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { httpsCallable } from 'firebase/functions'
-import { collection, addDoc, getDocs, query, where, doc, updateDoc } from 'firebase/firestore'
+import { collection, addDoc, getDocs, query, where } from 'firebase/firestore'
+import { createProjectForEstimate } from './lib/projectLink'
 import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage'
 import { useAuth, useUser } from '@clerk/clerk-react'
 import { db, functions, storage } from './firebase'
@@ -689,12 +690,7 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
     }
     if (est.customerId) projectPayload.customerId = est.customerId
     try {
-      const pRef = await addDoc(collection(db, 'projects'), projectPayload)
-      await updateDoc(doc(db, 'estimates', estimateId), {
-        projectAutoCreated: true,
-        projectId: pRef.id,
-      })
-      return pRef.id
+      return await createProjectForEstimate(estimateId, projectPayload)
     } catch (err) {
       console.warn('Could not auto-create project for estimate', estimateId, err)
       return null

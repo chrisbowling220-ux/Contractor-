@@ -9,6 +9,7 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   fullyParallel: false,
   workers: 1,   // the tests share one emulator database
+  retries: 1,   // the very first page load can beat the dev server's cold start
   reporter: [['list']],
   use: {
     baseURL: 'http://127.0.0.1:5199',

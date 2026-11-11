@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:rules": "firebase emulators:exec --only firestore,storage --project demo-setaside \"vitest run --config vitest.rules.config.ts\"",
+    "test:functions": "firebase emulators:exec --only firestore --project demo-buildpro-fn \"vitest run --config vitest.functions.config.ts\"",
     "test:e2e": "firebase emulators:exec --only firestore,auth,storage --project demo-setaside \"playwright test\""
   },
   "dependencies": {

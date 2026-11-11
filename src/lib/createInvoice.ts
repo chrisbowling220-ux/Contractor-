@@ -164,6 +164,7 @@ export async function createDepositInvoice(args: {
 
   const payload: Record<string, unknown> = {
     projectId: project.id,
+    estimateId: estimate.id,   // lets the server find this invoice by estimate (one deposit per estimate)
     customerName: estimate.customerName,
     jobTypeName: `${estimate.jobTypeName} — Deposit`,
     invoiceNumber: args.invoiceNumber,

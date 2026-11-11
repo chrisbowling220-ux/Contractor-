@@ -260,6 +260,7 @@ export interface Invoice {
   // True for the upfront-deposit invoice auto-created when a customer approves
   // an estimate that requested a deposit. The final invoice nets this out.
   isDeposit?: boolean
+  estimateId?: string   // the estimate a deposit invoice was raised for
   createdAt: string
   createdBy?: string
 }

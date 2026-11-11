@@ -2031,7 +2031,7 @@ export const generateThankYouLetter = onCall<ThankYouPayload>(
     }
 
     const userId = await verifyClerk(clerkToken)
-    console.log(`generateThankYouLetter user=${userId} customer=${input.customerName}`)
+    console.log(`generateThankYouLetter user=${userId}`)
 
     // Pro-ONLY feature — a premium perk for paying contractors. Free users are
     // blocked here (it doesn't consume a quote credit; it's simply Pro-gated).
@@ -2162,7 +2162,7 @@ export const generateProposal = onCall<ProposalPayload>(
     }
 
     const userId = await verifyClerk(clerkToken)
-    console.log(`generateProposal user=${userId} customer=${input.customerName}`)
+    console.log(`generateProposal user=${userId}`)
 
     // Not gated and not quota-consuming — part of the standard send flow.
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() })
@@ -2256,7 +2256,7 @@ export const generateInvoiceCopy = onCall<{ clerkToken: string; input: InvoiceCo
     if (!input?.customerName) throw new HttpsError('invalid-argument', 'Missing customer name')
 
     const userId = await verifyClerk(clerkToken)
-    console.log(`generateInvoiceCopy user=${userId} customer=${input.customerName}`)
+    console.log(`generateInvoiceCopy user=${userId}`)
 
     // NOTE: Invoice cover notes are FREE for all tiers. Only Quick Quotes count
     // against the 10 free generations.
@@ -2453,13 +2453,23 @@ export const createDepositInvoiceForApproval = onRequest(
       const projectId = est.projectId as string | undefined
       if (!ownerId) { res.status(400).json({ error: 'Estimate missing owner.' }); return }
 
-      // Idempotency: reuse an existing deposit/full invoice for this project.
-      if (projectId) {
-        const existing = await db.collection('invoices')
+      // Idempotency: reuse the deposit/full invoice already made for this
+      // estimate. Looked up by estimate first (an estimate may not have a
+      // project yet when the customer approves, and a second tap would
+      // otherwise bill the deposit twice), then by project for invoices made
+      // before the estimate id was stored on them.
+      {
+        let existing = await db.collection('invoices')
           .where('createdBy', '==', ownerId)
-          .where('projectId', '==', projectId)
-          .where('isDeposit', '==', true)
+          .where('estimateId', '==', estimateId)
           .limit(1).get()
+        if (existing.empty && projectId) {
+          existing = await db.collection('invoices')
+            .where('createdBy', '==', ownerId)
+            .where('projectId', '==', projectId)
+            .where('isDeposit', '==', true)
+            .limit(1).get()
+        }
         if (!existing.empty) {
           // If they previously made a deposit invoice but now want to pay full,
           // bump that same invoice to the full amount so we don't duplicate.
@@ -2494,6 +2504,7 @@ export const createDepositInvoiceForApproval = onRequest(
 
       const payload: Record<string, unknown> = {
         ...(projectId ? { projectId } : {}),
+        estimateId,
         customerName: (est.customerName as string) || 'Customer',
         jobTypeName: payFull ? jobTypeName : `${jobTypeName} — Deposit`,
         invoiceNumber,
@@ -3017,35 +3028,57 @@ export const stripeWebhook = onRequest(
               console.log(`Invoice ${invoiceId} already marked paid — skipping duplicate webhook event`)
               break
             }
+            if (!invSnap.exists) {
+              console.warn(`Paid checkout for unknown invoice ${invoiceId} (session ${session.id}) — nothing to update`)
+              break
+            }
             const invData = (invSnap.data() as InvoiceDoc | undefined) ?? {}
+            // Second line of idempotency: this exact checkout is already in the
+            // payment history (covers a repeat delivery on a part-paid invoice).
+            const paymentId = `stripe_${session.id}`
+            if (Array.isArray(invData.payments) && invData.payments.some(p => (p as { id?: string } | null)?.id === paymentId)) {
+              console.log(`Invoice ${invoiceId}: checkout ${session.id} already recorded — skipping`)
+              break
+            }
             // What Stripe actually collected, in dollars. Falls back to the
             // balance on the invoice if the event carries no total.
+            const balanceBefore = +Number(invData.amountDue ?? 0).toFixed(2)
             const paidDollars = typeof session.amount_total === 'number'
               ? +(session.amount_total / 100).toFixed(2)
-              : +Number(invData.amountDue ?? 0).toFixed(2)
+              : balanceBefore
+            // The checkout was priced from the balance at the time. If the
+            // contractor raised the invoice while the customer was paying, the
+            // card covered only part of it: record the money, keep the rest
+            // owing, and do not call it paid.
+            const remaining = +Math.max(0, balanceBefore - paidDollars).toFixed(2)
+            const fullyPaid = remaining < 0.005
             const nowIso = new Date().toISOString()
             // Eastern calendar day, matching how the app dates payments.
             const payDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
             await invRef.set({
-              status: 'paid',
-              amountDue: 0,
+              ...(fullyPaid ? { status: 'paid' } : {}),
+              amountDue: fullyPaid ? 0 : remaining,
               // Itemise the card payment in the invoice's payment history and
               // count it in amountPaid, so the receipt and the dashboard's
               // "money in" both show it. session.id makes the entry unique.
               amountPaid: +(Number(invData.amountPaid ?? 0) + paidDollars).toFixed(2),
               payments: FieldValue.arrayUnion({
-                id: `stripe_${session.id}`,
+                id: paymentId,
                 amount: paidDollars,
                 method: 'card',
                 date: payDate,
                 recordedAt: nowIso,
                 source: 'stripe',
               }),
-              paidAt: nowIso,
-              paidAtMs: Date.now(),   // numeric anchor for the 2-year retention lock
+              ...(fullyPaid ? {
+                paidAt: nowIso,
+                paidAtMs: Date.now(),   // numeric anchor for the 2-year retention lock
+              } : {}),
               stripePaymentIntentId: typeof session.payment_intent === 'string' ? session.payment_intent : null,
             }, { merge: true })
-            console.log(`Invoice ${invoiceId} marked paid via Stripe`)
+            console.log(fullyPaid
+              ? `Invoice ${invoiceId} marked paid via Stripe`
+              : `Invoice ${invoiceId}: card payment recorded, $${remaining.toFixed(2)} still owing`)
 
             // Auto-close the project when its FINAL invoice is paid — and only
             // from "completed". A DEPOSIT (or pay-in-full-upfront) invoice is
@@ -3053,7 +3086,7 @@ export const stripeWebhook = onRequest(
             // that hadn't begun out of the active list. The contractor's notes
             // are left alone (this used to overwrite them).
             const projectId = invData.projectId
-            if (projectId && !invData.isDeposit) {
+            if (projectId && !invData.isDeposit && fullyPaid) {
               try {
                 const projRef = db.collection('projects').doc(projectId)
                 const projSnap = await projRef.get()

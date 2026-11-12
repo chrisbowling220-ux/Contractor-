@@ -78,13 +78,16 @@ test('a contractor can ask for their account to be deleted, and change their min
   await page.getByLabel(/Anything we should know/).fill('Retiring')
   await send.click()
   await expect(page.getByText(/Deletion requested on/)).toBeVisible()
+  // The card follows the local copy, which updates before the server confirms,
+  // so wait for the server rather than reading it once.
+  await expect.poll(async () => (await read(`accountDeletionRequests/${UID}`))?.note, { timeout: 10_000 }).toBe('Retiring')
   expect(await read(`accountDeletionRequests/${UID}`)).toMatchObject({ status: 'requested', note: 'Retiring' })
   // Nothing was deleted: the profile is still there.
   expect((await read(`users/${UID}`))?.businessName).toBe('Tester Builds LLC')
 
   await page.getByRole('button', { name: 'Keep my account' }).click()
   await expect(page.getByRole('button', { name: 'Delete my account…' })).toBeVisible()
-  expect(await read(`accountDeletionRequests/${UID}`)).toBeUndefined()
+  await expect.poll(async () => read(`accountDeletionRequests/${UID}`), { timeout: 10_000 }).toBeUndefined()
   expect(errors).toEqual([])
 
   // The public instructions page Google Play links to opens signed-out.

@@ -47,6 +47,21 @@ describe('customerSafeQuote', () => {
     expect(q.labor.labor_total).toBe(660)
     expect(isCustomerSafeQuote(q)).toBe(true)
   })
+  it('a labor-only estimate also gets the marked-up hourly rate, beside its hours, so nothing gives the markup away', () => {
+    const e = {
+      ...quickQuote(), hourlyRate: 60, estimatedHours: 10, laborTotal: 600, materialsTotal: 0,
+      aiQuote: quote({
+        material_list: [], labor: { estimated_hours: 10, breakdown: 'Wash', hourly_rate: 60, labor_total: 600 },
+        price_breakdown: { labor_subtotal: 600, materials_subtotal: 0, rentals_subtotal: 0, raw_cost: 600 },
+        profit_markup: { markup_percent: 20, markup_dollars: 120, rationale: '' }, final_customer_quote: 720,
+      }),
+    }
+    const { safe } = customerSafeEstimate(e)
+    const ai = safe.aiQuote as AIQuote
+    expect(ai.labor).toMatchObject({ estimated_hours: 10, hourly_rate: 72, labor_total: 720 })
+    expect(safe).toMatchObject({ hourlyRate: 72, estimatedHours: 10, laborTotal: 720 })
+    expect(ai.final_customer_quote).toBe(720)
+  })
 })
 
 describe('splitEstimateForSharing', () => {

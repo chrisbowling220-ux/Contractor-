@@ -40,9 +40,16 @@ export function toCustomerView(q: AIQuote): AIQuote {
     })
     nextMaterialsSubtotal = target
   } else {
-    // No materials — bake into labor so the total still adds up.
+    // No materials — bake into labor so the total still adds up. Into the
+    // hourly rate too: the print-out, the estimate email and the invoice line
+    // all show "hours × rate", so leaving the cost rate next to a marked-up
+    // labor total would give the markup away by subtraction (10 h × $60 =
+    // $600, shown as $720). The editor also recomputes labor as hours × rate,
+    // and with the cost rate it dropped the markup from the price on save.
     const newLaborTotal = +(q.labor.labor_total + markupDollars).toFixed(2)
-    nextLabor = { ...q.labor, labor_total: newLaborTotal }
+    const hours = Number(q.labor.estimated_hours) || 0
+    const hourlyRate = hours > 0 ? +(newLaborTotal / hours).toFixed(2) : q.labor.hourly_rate
+    nextLabor = { ...q.labor, labor_total: newLaborTotal, hourly_rate: hourlyRate }
     nextLaborSubtotal = newLaborTotal
   }
 

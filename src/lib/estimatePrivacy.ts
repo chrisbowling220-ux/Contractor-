@@ -130,6 +130,13 @@ export function splitEstimateForSharing(e: Record<string, unknown>): SharingSpli
     for (const [k, v] of Object.entries(subtotals)) {
       if (k in e && num(e[k]) !== v) publicPatch[k] = v
     }
+    // Same for the hourly rate kept beside them (a labor-only quote folds its
+    // markup into the rate): the cost rate next to the labor total gives the
+    // markup away.
+    const rateFolded = num(ai.labor.hourly_rate) !== num(safe.labor.hourly_rate)
+    if (rateFolded && 'hourlyRate' in e && num(e.hourlyRate) === num(ai.labor.hourly_rate)) {
+      publicPatch.hourlyRate = num(safe.labor.hourly_rate)
+    }
   }
 
   if (e.jobTypeId === QUICK_QUOTE_JOB_TYPE) {

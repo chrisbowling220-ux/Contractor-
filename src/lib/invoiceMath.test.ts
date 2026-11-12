@@ -67,6 +67,17 @@ describe('markup folded into customer prices', () => {
     const v = toCustomerView(bare)
     expect(v.labor.labor_total).toBe(1257)
     expect(+(v.labor.labor_total + v.price_breakdown.rentals_subtotal).toFixed(2)).toBe(1302)
+    // ...and into the rate, so "hours × rate" on the invoice line does not
+    // give the markup away by subtraction.
+    expect(Math.abs(v.labor.estimated_hours * v.labor.hourly_rate - v.labor.labor_total)).toBeLessThanOrEqual(v.labor.estimated_hours * 0.005 + 1e-9)
+    expect(v.labor.hourly_rate).toBeGreaterThan(q.labor.hourly_rate)
+  })
+  it('leaves the rate alone when the labor has no hours (flat price)', () => {
+    const q = quote(20)
+    const flat: AIQuote = { ...q, material_list: [], labor: { ...q.labor, estimated_hours: 0 }, price_breakdown: { ...q.price_breakdown, materials_subtotal: 0 }, profit_markup: { markup_percent: 20, markup_dollars: 100, rationale: '' } }
+    const v = toCustomerView(flat)
+    expect(v.labor.hourly_rate).toBe(q.labor.hourly_rate)
+    expect(v.labor.labor_total).toBe(+(q.labor.labor_total + 100).toFixed(2))
   })
   it('is a no-op once the markup is already folded in', () => {
     const once = toCustomerView(quote())

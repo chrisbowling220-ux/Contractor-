@@ -86,6 +86,9 @@ Release tools in `scripts/` (all read-only unless given `--write`):
 | `verify-public-access.mjs` | Tries every read a signed-out stranger could attempt against the live project; `--expect final` makes it a pass/fail check. |
 | `publish-public-copies.mjs` | Step 2.4. |
 | `migrate-estimate-privacy.mjs` | Step 2.5; takes an exact backup first and can `--restore` from it. |
+| `backup-firestore.mjs` | A complete, exact copy of the database on this machine (every collection and subcollection; owner-only file). `--compare` shows what changed since; `--restore` puts documents back. Free stand-in for the paid Cloud Storage export. |
+| `release-monitor.mjs` | What is live (site build, hosting, which rules stage, functions), function errors, and Firestore rule refusals per 10 minutes; `--watch 120` repeats. |
+| `rehearsal/rehearse-release.sh` | Plays the whole release (rules stages, 2.4, 2.5, final rules, the 2.5 restore) on a backup loaded into a local emulator, reading every customer share page before and after each step. Never touches the live project. |
 
 An estimate is opened by its link without signing in and the database hands
 over the whole document, so it holds only the customer view of the quote; the

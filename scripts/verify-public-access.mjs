@@ -18,10 +18,15 @@ const value = (name) => { const i = args.indexOf(name); return i >= 0 ? args[i +
 const project = value('--project')
 const expectStage = value('--expect')
 if (!project) { console.error('Usage: --project <id> [--expect final|transition|stage1]'); process.exit(2) }
-if (process.env.FIRESTORE_EMULATOR_HOST) { console.error('This checks the real project; unset FIRESTORE_EMULATOR_HOST.'); process.exit(2) }
+// The release rehearsal runs this same check against a local emulator copy,
+// which must be a demo-* project so it can never be mistaken for the real one.
+const emulator = process.env.FIRESTORE_EMULATOR_HOST
+if (emulator && !project.startsWith('demo-')) { console.error('With FIRESTORE_EMULATOR_HOST set, use a demo-* project (or unset it to check the real project).'); process.exit(2) }
 
 const conn = connect(project)
-const base = `https://firestore.googleapis.com/v1/projects/${project}/databases/(default)/documents`
+const base = emulator
+  ? `http://${emulator}/v1/projects/${project}/databases/(default)/documents`
+  : `https://firestore.googleapis.com/v1/projects/${project}/databases/(default)/documents`
 // No Authorization header: exactly what a signed-out visitor sends.
 const anon = async (path, query = '') => {
   const res = await fetch(`${base}/${path}${query}`)
@@ -90,7 +95,7 @@ const always = {
   'list:publicProfiles': 'CLOSED', 'list:photoLogs': 'CLOSED', 'get:projects': 'CLOSED', 'get:estimates': 'OPEN',
 }
 
-console.log(`Signed-out access to ${project}:`)
+console.log(`Signed-out access to ${project}${emulator ? ` (emulator ${emulator})` : ''}:`)
 let mismatches = 0
 for (const r of results) {
   const want = expectStage ? ({ ...always, ...(expectations[expectStage] || {}) })[r.key] : undefined

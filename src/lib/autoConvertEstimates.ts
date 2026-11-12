@@ -186,7 +186,8 @@ async function createProjectFor(e: Estimate, userId: string, status: ProjectStat
     ...(e.customerId ? { customerId: e.customerId } : {}),
     jobTypeName: e.jobTypeName,
     jobLocationZip: e.jobLocationZip || '',
-    description: e.description || '',
+    // A Quick Quote's walkthrough is kept privately now; the summary stands in.
+    description: e.description || e.aiQuote?.customer_summary || '',
     status,
     notes: notesFor(e),
     createdAt: new Date().toISOString(),

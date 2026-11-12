@@ -3,6 +3,8 @@ import { useAuth, useUser } from '@clerk/clerk-react'
 import { collection, doc, updateDoc, deleteField, writeBatch } from 'firebase/firestore'
 import { db } from './firebase'
 import { isSignedEstimate, revisionFields, revisionNumber } from './lib/estimateRevision'
+import { splitEstimateForSharing } from './lib/estimatePrivacy'
+import { estimatePrivateData, estimatePrivateRef, loadEstimatePrivate } from './lib/estimatePrivateStore'
 import { toCustomerView } from './lib/customerView'
 import { quoteFromManualEstimate } from './lib/manualQuote'
 import { copyShareLink, shareLinkFor, smsHref, mailtoHref, nativeShare, isPhone } from './lib/shareEstimate'
@@ -74,6 +76,29 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, b
   const [savedKey, setSavedKey] = useState(fieldsKey)
   const dirty = fieldsKey !== savedKey
 
+  // The private notes live in estimatePrivate/{id}, not on the estimate the
+  // customer's link opens (lib/estimatePrivacy.ts). Older estimates still
+  // carry them in the quote, which is what the field starts with; the private
+  // copy wins once it loads, unless the contractor has already typed.
+  const notesTouched = useRef(false)
+  useEffect(() => {
+    let cancelled = false
+    void loadEstimatePrivate(estimate.id).then(p => {
+      if (cancelled || notesTouched.current || typeof p?.contractorNotes !== 'string') return
+      const loaded = p.contractorNotes
+      setContractorNotes(loaded)
+      // Loading is not an edit: move the saved baseline along with it.
+      setSavedKey(prev => {
+        try {
+          const arr = JSON.parse(prev) as unknown[]
+          arr[7] = loaded
+          return JSON.stringify(arr)
+        } catch { return prev }
+      })
+    })
+    return () => { cancelled = true }
+  }, [estimate.id])
+
   // Live recalculation. Markup is baked into materials already (customer view),
   // so total = labor + materials + rentals.
   const computed = useMemo(() => {
@@ -131,7 +156,8 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, b
       rationale: '',
     },
     final_customer_quote: computed.total,
-    contractor_notes: contractorNotes,
+    // Never on the shared estimate: the notes are saved to estimatePrivate.
+    contractor_notes: '',
   })
 
   const saveEdits = async () => {
@@ -154,15 +180,28 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, b
         depositRequested: depositRequested && depAmt > 0,
         depositAmount: depositRequested ? depAmt : 0,
       }
+      if (!user?.id) throw new Error('Not signed in')
+      // The notes as typed (empty clears them), plus anything private an older
+      // estimate still carried on the shared document (lib/estimatePrivacy.ts).
+      const privateFor = (e: Record<string, unknown>) => {
+        const split = splitEstimateForSharing(e)
+        if (split.error) throw new Error(split.error)
+        return {
+          patch: split.publicPatch,
+          data: estimatePrivateData(user.id, { ...split.privateFields, contractorNotes: contractorNotes.trim() }),
+        }
+      }
       if (signed) {
         // The customer signed this version: leave it exactly as signed and
         // save the edits as the next revision, in one atomic write that also
         // points the signed version at its successor.
-        if (!user?.id) throw new Error('Not signed in')
-        const fields = revisionFields(estimate, updates, user.id)
+        const draft = revisionFields(estimate, updates, user.id)
+        const priv = privateFor(draft)
+        const fields = { ...draft, ...priv.patch }
         const ref = doc(collection(db, 'estimates'))
         const batch = writeBatch(db)
         batch.set(ref, fields)
+        batch.set(estimatePrivateRef(ref.id), priv.data)
         batch.update(doc(db, 'estimates', estimate.id), { supersededBy: ref.id })
         await batch.commit()
         const revision = { id: ref.id, ...fields } as Estimate
@@ -183,15 +222,20 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, b
       // (instead of seeing the stale "Declined" screen). Nothing was signed, so
       // the same document is reused.
       const reset = estimate.status !== 'pending'
-      const writePayload: Record<string, unknown> = { ...updates }
+      const priv = privateFor({ ...estimate, ...updates })
+      const writePayload: Record<string, unknown> = { ...updates, ...priv.patch }
       if (reset) {
         writePayload.status = 'pending'
         writePayload.customerResponse = deleteField()
       }
-      await updateDoc(doc(db, 'estimates', estimate.id), writePayload)
+      const batch = writeBatch(db)
+      batch.update(doc(db, 'estimates', estimate.id), writePayload)
+      batch.set(estimatePrivateRef(estimate.id), priv.data, { merge: true })
+      await batch.commit()
       const updated: Estimate = {
         ...estimate,
         ...updates,
+        ...priv.patch,
         ...(reset ? { status: 'pending' as const, customerResponse: undefined } : {}),
       } as Estimate
       current.current = updated
@@ -479,7 +523,7 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, b
           {/* Contractor notes */}
           <div style={card}>
             <label style={label}>🔒 Contractor Notes (private — not shown to customer)</label>
-            <textarea value={contractorNotes} onChange={e => setContractorNotes(e.target.value)} rows={3} style={{ ...input, fontFamily: 'inherit', resize: 'vertical', background: '#fef3c7' }} />
+            <textarea value={contractorNotes} onChange={e => { notesTouched.current = true; setContractorNotes(e.target.value) }} rows={3} style={{ ...input, fontFamily: 'inherit', resize: 'vertical', background: '#fef3c7' }} />
           </div>
 
           {/* Live totals */}

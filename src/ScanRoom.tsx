@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
 import { httpsCallable } from 'firebase/functions'
-import { collection, addDoc, getDocs, query, where } from 'firebase/firestore'
+import { collection, addDoc, doc, getDocs, query, where, writeBatch } from 'firebase/firestore'
+import { customerSafeEstimate } from './lib/estimatePrivacy'
+import { estimatePrivateData, estimatePrivateRef } from './lib/estimatePrivateStore'
 import { createProjectForEstimate } from './lib/projectLink'
 import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage'
 import { useAuth, useUser } from '@clerk/clerk-react'
@@ -651,7 +653,15 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
     if (proposedStartDate) payload.proposedStartDate = proposedStartDate
     if (customerId) payload.customerId = customerId
     try {
-      const docRef = await addDoc(collection(db, 'estimates'), payload)
+      // The estimate is what the customer's link opens, so it holds only the
+      // customer view; the markup, the private notes and the spoken
+      // walkthrough go to estimatePrivate in the same write.
+      const { safe, privateFields } = customerSafeEstimate(payload)
+      const docRef = doc(collection(db, 'estimates'))
+      const batch = writeBatch(db)
+      batch.set(docRef, safe)
+      batch.set(estimatePrivateRef(docRef.id), estimatePrivateData(user.id, privateFields))
+      await batch.commit()
       setSavedId(docRef.id)
       // Create the project FIRST (so we have its id), then upload photos
       // directly into that project's album. Chained — not parallel — so the
@@ -664,7 +674,8 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
           console.warn('Post-save project/photo flow failed:', err)
         }
       })()
-      return { id: docRef.id, ...payload } as Estimate
+      // The editor reads the private notes back from estimatePrivate.
+      return { id: docRef.id, ...safe } as Estimate
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Save failed')
       return null

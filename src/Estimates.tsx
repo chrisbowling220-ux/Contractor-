@@ -2,8 +2,10 @@ import { duplicateEstimateFields } from './lib/duplicateEstimate'
 import { isSignedEstimate, revisionNumber } from './lib/estimateRevision'
 import { useEffect, useMemo, useState } from 'react'
 import { useUser } from '@clerk/clerk-react'
-import { collection, query, where, onSnapshot, doc, deleteDoc, addDoc } from 'firebase/firestore'
+import { collection, query, where, onSnapshot, doc, deleteDoc, writeBatch } from 'firebase/firestore'
 import { db } from './firebase'
+import { customerSafeEstimate } from './lib/estimatePrivacy'
+import { estimatePrivateData, estimatePrivateRef, loadEstimatePrivate } from './lib/estimatePrivateStore'
 import EstimatePreview from './EstimatePreview'
 import { openEstimatePrintWindow } from './lib/printEstimate'
 import { copyShareLink, shareLinkFor } from './lib/shareEstimate'
@@ -73,7 +75,11 @@ export default function Estimates({ initialTab = 'pending' }: { initialTab?: Tab
       await deleteDoc(doc(db, 'estimates', e.id))
     } catch (err) {
       alert('Delete failed: ' + (err instanceof Error ? err.message : String(err)))
+      return
     }
+    // Its private notes go with it. Older estimates have none; a leftover is
+    // readable only by this contractor, so a failure here is not worth a prompt.
+    deleteDoc(estimatePrivateRef(e.id)).catch(() => { /* none, or already gone */ })
   }
 
   // Clone an estimate as a fresh, pending one — "same as the last bathroom".
@@ -82,8 +88,19 @@ export default function Estimates({ initialTab = 'pending' }: { initialTab?: Tab
   const duplicateEstimate = async (e: Estimate) => {
     if (!user?.id) { alert('Not signed in.'); return }
     try {
-      const clone = duplicateEstimateFields(e, user.id)
-      const ref = await addDoc(collection(db, 'estimates'), clone)
+      // The copy carries the original's private notes in its own private
+      // record, never on the shared document (lib/estimatePrivacy.ts).
+      const { safe: clone, privateFields } = customerSafeEstimate(duplicateEstimateFields(e, user.id))
+      const source = await loadEstimatePrivate(e.id)
+      const carried = source ? { ...source } : {}
+      delete (carried as Record<string, unknown>).createdBy
+      delete (carried as Record<string, unknown>).updatedAt
+      const ref = doc(collection(db, 'estimates'))
+      const batch = writeBatch(db)
+      batch.set(ref, clone)
+      // What the app saved privately wins over leftovers on an older estimate.
+      batch.set(estimatePrivateRef(ref.id), estimatePrivateData(user.id, { ...privateFields, ...carried }))
+      await batch.commit()
       // Open the new copy in the editor so they can tweak customer/details.
       setPreview({ id: ref.id, ...clone } as Estimate)
     } catch (err) {

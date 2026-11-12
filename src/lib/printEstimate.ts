@@ -1,4 +1,4 @@
-import { toCustomerView } from './customerView'
+import { customerSafeQuote } from './estimatePrivacy'
 import type { Estimate } from '../data/types'
 
 function esc(s: unknown): string {
@@ -39,7 +39,7 @@ export function openEstimatePrintWindow(e: Estimate, profileOrName?: string | Pr
     return
   }
   // Customer-facing view: markup distributed into material unit prices.
-  const ai = e.aiQuote ? toCustomerView(e.aiQuote) : undefined
+  const ai = e.aiQuote ? customerSafeQuote(e.aiQuote) : undefined
 
   w.document.write(`<!doctype html><html><head><meta charset="utf-8"/><title>Estimate — ${esc(e.customerName)}</title>
     <style>

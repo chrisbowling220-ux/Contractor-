@@ -25,6 +25,8 @@ rules_version = '2';
 // customer can sign off (only the response fields — never totals/line items).
 // Contractor-private records (users, customers, photos, projects) have no
 // public access at all; share pages read publicProfiles and photoLogs.
+// An estimate holds only the customer view; the contractor's private side of
+// it (notes, markup, a Quick Quote's walkthrough) is in estimatePrivate.
 
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -95,6 +97,23 @@ service cloud.firestore {
         && (!('requestedDate' in d) || (d.requestedDate is string && d.requestedDate.size() <= 10))
         && (!('note' in d) || (d.note is string && d.note.size() <= 1000))
         && d.respondedAt is string && d.respondedAt.size() <= 40;
+    }
+
+    // ── ESTIMATE PRIVACY (src/lib/estimatePrivacy.ts) ──
+    // A customer opens an estimate by its link without signing in, and the
+    // database hands over the WHOLE document, not just what the page draws.
+    // So the estimate may hold only the customer view of the quote: no private
+    // notes, no markup figures (the markup is folded into the prices), and for
+    // a Quick Quote no spoken walkthrough. Those live in estimatePrivate.
+    function customerSafeQuote(q) {
+      return q.get('contractor_notes', '') == ''
+        && q.get(['profit_markup', 'markup_dollars'], 0) == 0
+        && q.get(['profit_markup', 'markup_percent'], 0) == 0
+        && q.get(['profit_markup', 'rationale'], '') == '';
+    }
+    function customerSafeEstimate(d) {
+      return (d.get('aiQuote', null) == null || customerSafeQuote(d.aiQuote))
+        && (d.get('jobTypeId', '') != 'quick-quote' || d.get('description', '') == '');
     }
 
     // ── users/{userId}: the owner's profile, plan and billing state. Readable
@@ -187,7 +206,8 @@ service cloud.firestore {
       // validSignoff), so nobody can create one that is already approved.
       allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy
         && request.resource.data.get('status', 'pending') == 'pending'
-        && !request.resource.data.keys().hasAny(['customerResponse', 'signedAtMs', 'supersededBy']);
+        && !request.resource.data.keys().hasAny(['customerResponse', 'signedAtMs', 'supersededBy'])
+        && customerSafeEstimate(request.resource.data);
       // Owner: full update while the estimate is unsigned, but never signs it
       // themselves. Once the customer has signed (approved), the signed terms
       // are a legal record and never change: the owner may only set
@@ -202,7 +222,12 @@ service cloud.firestore {
                 ? (onlyChanges(['projectAutoCreated', 'projectId', 'depositInvoiceCreated', 'supersededBy'])
                    && request.resource.data.get('supersededBy', '') is string)
                 : (request.resource.data.get('status', 'pending') != 'approved'
-                   && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['signedAtMs']))))
+                   && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['signedAtMs'])
+                   // Saving the quote saves it customer-safe. Other writes
+                   // (proposal, project link) on an older estimate that has
+                   // not been cleaned yet are left alone.
+                   && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['aiQuote', 'description', 'jobTypeId'])
+                       || customerSafeEstimate(request.resource.data)))))
         || (onlyChanges(['customerResponse', 'status', 'signedAtMs']) && validSignoff())
         // Customer may respond to the proposed start date ONCE — only if no
         // response exists yet. Prevents an anonymous actor overwriting a prior
@@ -212,6 +237,31 @@ service cloud.firestore {
       // Owner may delete UNLESS the document is e-signed and still within the
       // 2-year legal-retention window.
       allow delete: if isOwner(resource.data) && !signedDocLocked(resource.data);
+    }
+
+    // ── estimatePrivate/{estimateId}: the contractor's private side of one
+    //    estimate: their notes, a Quick Quote's spoken walkthrough, and the
+    //    markup the AI first proposed. Owner-only, read and write; created
+    //    only by the contractor who owns that estimate. ──
+    function validEstimatePrivate() {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['createdBy', 'contractorNotes', 'narration', 'aiMarkupPercent',
+                               'aiMarkupDollars', 'aiMarkupRationale', 'aiCostSubtotal', 'updatedAt'])
+        && d.createdBy == request.auth.uid
+        && (!('contractorNotes' in d) || (d.contractorNotes is string && d.contractorNotes.size() <= 20000))
+        && (!('narration' in d) || (d.narration is string && d.narration.size() <= 20000))
+        && (!('aiMarkupRationale' in d) || (d.aiMarkupRationale is string && d.aiMarkupRationale.size() <= 5000))
+        && (!('aiMarkupPercent' in d) || d.aiMarkupPercent is number)
+        && (!('aiMarkupDollars' in d) || d.aiMarkupDollars is number)
+        && (!('aiCostSubtotal' in d) || d.aiCostSubtotal is number)
+        && (!('updatedAt' in d) || (d.updatedAt is string && d.updatedAt.size() <= 40));
+    }
+    match /estimatePrivate/{estimateId} {
+      allow read: if isOwner(resource.data);
+      allow create: if isSignedIn() && validEstimatePrivate()
+        && getAfter(/databases/$(database)/documents/estimates/$(estimateId)).data.createdBy == request.auth.uid;
+      allow update: if isOwner(resource.data) && validEstimatePrivate();
+      allow delete: if isOwner(resource.data);
     }
 
     // ── changeOrders: same pattern as estimates (incl. 2-year retention lock). ──

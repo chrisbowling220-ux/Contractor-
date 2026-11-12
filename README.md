@@ -71,11 +71,26 @@ customers have to keep working while contractors move to the new app version:
 | Step | When | What | Command |
 |---|---|---|---|
 | 1 | Done 2026-11-12 (owner-approved) | Stops anyone listing contractors' data; locks customer sign-off | Deployed `firestore.rules` from tag `rules/stage1-urgent` |
-| 2 | With the new app version | Adds the collections the new app writes; keeps old share links working; locks signed estimates and change orders (edits become revisions or new change orders) | `npx firebase deploy --only firestore:rules --config firebase.transition.json`, then `npx firebase deploy --only storage,functions`, then `npm run build && npx firebase deploy --only hosting` |
-| 3 | Once active contractors have opened the new app (it republishes their share data on open) | Makes customers, photos and billing profiles owner-only | `npx firebase deploy --only firestore:rules` |
+| 2 | With the new app version | Adds the collections the new app writes; keeps old share links working; locks signed estimates and change orders (edits become revisions or new change orders); refuses estimates that carry private notes or markup | `npx firebase deploy --only firestore:rules --config firebase.transition.json`, then `npx firebase deploy --only storage,functions`, then `npm run build && npx firebase deploy --only hosting` |
+| 2.4 / 2.5 | Right after the new app is live | Publishes every contractor's customer-safe copies; moves older estimates' private notes, markup and walkthrough into `estimatePrivate` | `scripts/publish-public-copies.mjs --write`, `scripts/migrate-estimate-privacy.mjs --write` (both dry-run by default) |
+| 3 | Once 2.4 reports nothing left to publish | Makes customers, photos and billing profiles owner-only | `npx firebase deploy --only firestore:rules` |
 
-The full runbook for steps 2 and 3, with checks and rollback for each
-command, is in `RELEASE_STEP2.md`.
+Steps 2 to 3 are released together in one sitting. The runbook, with the
+approval gates, checks and rollback for each command, is in `RELEASE_STEP2.md`.
+
+Release tools in `scripts/` (all read-only unless given `--write`):
+
+| Script | What it does |
+|---|---|
+| `snapshot-live-config.mjs` | Saves the live rules, hosting version and function list, and compares them with the rollback tags. |
+| `verify-public-access.mjs` | Tries every read a signed-out stranger could attempt against the live project; `--expect final` makes it a pass/fail check. |
+| `publish-public-copies.mjs` | Step 2.4. |
+| `migrate-estimate-privacy.mjs` | Step 2.5; takes an exact backup first and can `--restore` from it. |
+
+An estimate is opened by its link without signing in and the database hands
+over the whole document, so it holds only the customer view of the quote; the
+contractor's private side of it lives in `estimatePrivate/{estimateId}`
+(`src/lib/estimatePrivacy.ts`).
 
 Roll back any step by redeploying the same thing from tag
 `checkpoint/pre-audit-2026-11-10`, which matches what was live on 2026-11-11

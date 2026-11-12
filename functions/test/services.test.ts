@@ -52,6 +52,21 @@ describe('estimate email', () => {
     expect((await read(`emailUsage/${USER}/days/${today()}`))?.count).toBe(1)
   })
 
+  it('an AI quote is emailed as the customer sees it: no markup line, same total', async () => {
+    const aiQuote = {
+      customer_summary: 'Deck boards', work_scope: 'Replace boards',
+      material_list: [{ name: 'Board', base_quantity: 10, waste_percent: 0, quantity_with_waste: 10, quantity_math: '', unit: 'each', unit_price: 12, line_total: 120 }],
+      labor: { estimated_hours: 2, breakdown: '', hourly_rate: 50, labor_total: 100 },
+      price_breakdown: { labor_subtotal: 100, materials_subtotal: 120, rentals_subtotal: 0, raw_cost: 220 },
+      profit_markup: { markup_percent: 0, markup_dollars: 0, rationale: '' },
+      final_customer_quote: 220, contractor_notes: '',
+    }
+    await call(sendEstimateEmail, USER, input({ estimate: { customerName: 'Pat', jobTypeName: 'Deck', total: 220, scopeOfWork: 'x', aiQuote } }))
+    const html = String(outbound[0].body.html)
+    expect(html).toContain('$220.00')
+    expect(html).not.toMatch(/Markup/i)
+  })
+
   it('strips line breaks and angle brackets a caller could use to forge headers', async () => {
     await call(sendEstimateEmail, USER, input({
       fromName: 'Owner Co\r\nBcc: victim@example.com <x>', subject: 'Your estimate\nBcc: someone@example.com', replyTo: 'not-an-address',

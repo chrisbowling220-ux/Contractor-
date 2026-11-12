@@ -15,7 +15,7 @@
 //
 // Against the emulator, set FIRESTORE_EMULATOR_HOST (e.g. 127.0.0.1:8380).
 // Against a real project it signs in with the Firebase CLI's login.
-import { createRequire } from 'node:module'
+import { connect, listAll as listAllIn, toFields } from './lib/firestore-rest.mjs'
 import { buildPhotoLog, publicProfileFrom, sameContent } from '../src/lib/publicCopies.ts'
 
 const args = process.argv.slice(2)
@@ -25,68 +25,9 @@ const project = value('--project')
 const write = flag('--write')
 if (!project) { console.error('Usage: --project <id> [--write]'); process.exit(2) }
 
-const emulator = process.env.FIRESTORE_EMULATOR_HOST
-const docsPath = `projects/${project}/databases/(default)/documents`
-
-// ── Firestore REST, against the emulator or the real project ────────────────
-let request
-if (emulator) {
-  request = async (method, path, body, query = {}) => {
-    const qs = new URLSearchParams(query).toString()
-    const res = await fetch(`http://${emulator}/v1/${path}${qs ? '?' + qs : ''}`, {
-      method, headers: { Authorization: 'Bearer owner', 'Content-Type': 'application/json' },
-      body: body ? JSON.stringify(body) : undefined,
-    })
-    if (!res.ok) throw new Error(`${method} ${path}: HTTP ${res.status}`)
-    return res.json()
-  }
-} else {
-  const require = createRequire(import.meta.url)
-  const root = require('node:path').join(require('node:child_process')
-    .execFileSync('npm', ['root', '-g']).toString().trim(), 'firebase-tools/lib')
-  const { requireAuth } = require(`${root}/requireAuth.js`)
-  const { Client } = require(`${root}/apiv2.js`)
-  const { firestoreOrigin } = require(`${root}/api.js`)
-  const acct = require(`${root}/auth.js`).getGlobalDefaultAccount()
-  if (!acct) throw new Error('The Firebase CLI is not signed in (run: npx firebase login)')
-  await requireAuth({ project, projectId: project, user: acct.user, tokens: acct.tokens })
-  const client = new Client({ urlPrefix: firestoreOrigin(), apiVersion: 'v1' })
-  request = async (method, path, body, query = {}) =>
-    (await client.request({ method, path: `/${path}`, body, queryParams: query, skipLog: { body: true, resBody: true } })).body
-}
-
-const fromValue = (v) => {
-  if ('stringValue' in v) return v.stringValue
-  if ('booleanValue' in v) return v.booleanValue
-  if ('integerValue' in v) return Number(v.integerValue)
-  if ('doubleValue' in v) return v.doubleValue
-  if ('timestampValue' in v) return v.timestampValue
-  if ('nullValue' in v) return null
-  if ('arrayValue' in v) return (v.arrayValue.values || []).map(fromValue)
-  if ('mapValue' in v) return fromFields(v.mapValue.fields || {})
-  return undefined   // references, bytes, geo points: never used by the copies
-}
-const fromFields = (fields) => Object.fromEntries(Object.entries(fields || {}).map(([k, v]) => [k, fromValue(v)]))
-const toValue = (v) => {
-  if (v === null || v === undefined) return { nullValue: null }
-  if (typeof v === 'string') return { stringValue: v }
-  if (typeof v === 'boolean') return { booleanValue: v }
-  if (typeof v === 'number') return Number.isInteger(v) ? { integerValue: String(v) } : { doubleValue: v }
-  if (Array.isArray(v)) return { arrayValue: { values: v.map(toValue) } }
-  return { mapValue: { fields: toFields(v) } }
-}
-const toFields = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, toValue(v)]))
-
-async function listAll(collection) {
-  const out = []
-  let pageToken
-  do {
-    const page = await request('GET', `${docsPath}/${collection}`, undefined, { pageSize: '300', ...(pageToken ? { pageToken } : {}) })
-    for (const d of page.documents || []) out.push({ id: d.name.split('/').pop(), ...fromFields(d.fields) })
-    pageToken = page.nextPageToken
-  } while (pageToken)
-  return out
-}
+const conn = connect(project)
+const { request, docsPath, emulator } = conn
+const listAll = (collection) => listAllIn(conn, collection)
 
 // ── Build the copies ─────────────────────────────────────────────────────────
 const [users, customers, photos, profiles, logs] = await Promise.all(

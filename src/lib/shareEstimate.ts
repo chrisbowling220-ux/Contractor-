@@ -1,6 +1,6 @@
 import { httpsCallable } from 'firebase/functions'
 import { functions } from '../firebase'
-import { toCustomerView } from './customerView'
+import { customerSafeQuote } from './estimatePrivacy'
 import type { Estimate } from '../data/types'
 
 const sendCallable = httpsCallable<
@@ -21,7 +21,7 @@ const sendCallable = httpsCallable<
         estimatedHours?: number
         flatAmount?: number
         scopeOfWork?: string
-        aiQuote?: ReturnType<typeof toCustomerView>
+        aiQuote?: ReturnType<typeof customerSafeQuote>
       }
     }
   },
@@ -92,7 +92,7 @@ export async function sendEstimateByEmail(args: {
   subject?: string
 }): Promise<void> {
   const { estimate, ...rest } = args
-  const ai = estimate.aiQuote ? toCustomerView(estimate.aiQuote) : undefined
+  const ai = estimate.aiQuote ? customerSafeQuote(estimate.aiQuote) : undefined
   const link = shareLinkFor(estimate.id)
   const scopeWithLink = (estimate.scopeOfWork || '') + `\n\nView this estimate online: ${link}`
   const res = await sendCallable({

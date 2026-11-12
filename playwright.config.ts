@@ -5,6 +5,7 @@ import { defineConfig, devices } from '@playwright/test'
 // throwaway account; nothing here can reach the live project.
 export default defineConfig({
   testDir: 'e2e',
+  globalSetup: './e2e/warmup.ts',
   timeout: 60_000,
   expect: { timeout: 10_000 },
   fullyParallel: false,
@@ -28,6 +29,9 @@ export default defineConfig({
     timeout: 60_000,
     env: {
       VITE_USE_EMULATORS: '1',
+      VITE_EMULATOR_FIRESTORE_PORT: '8380',
+      VITE_EMULATOR_STORAGE_PORT: '9499',
+      VITE_EMULATOR_AUTH_PORT: '9399',
       VITE_FIREBASE_PROJECT_ID: 'demo-setaside',
       VITE_FIREBASE_API_KEY: 'demo-key',
       VITE_FIREBASE_AUTH_DOMAIN: 'demo-setaside.firebaseapp.com',

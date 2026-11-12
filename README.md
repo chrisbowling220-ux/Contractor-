@@ -50,6 +50,10 @@ ignores it.
 | `npm run build` | Type-check and production build into `dist/`. |
 | `cd functions && npm run build` | Compile the Cloud Functions. |
 
+The three emulator suites start their emulators from `firebase.test.json`,
+which uses its own ports (Firestore 8380, Auth 9399, Storage 9499) so they do
+not collide with emulators another project has running on the default ports.
+
 The browser tests replace the sign-in service with a stand-in (`e2e/stubs/`),
 so they cover everything except the Clerk sign-in screens themselves and the
 features that call paid outside services (AI quoting, voice, email, card

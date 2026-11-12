@@ -27,9 +27,12 @@ export const firebaseAuth = getAuth(app)
 // Only honoured by the dev server. A production build ignores the flag
 // entirely (import.meta.env.DEV is false and this block is compiled out).
 if (import.meta.env.DEV && import.meta.env.VITE_USE_EMULATORS === '1') {
-  connectFirestoreEmulator(db, '127.0.0.1', 8080)
-  connectStorageEmulator(storage, '127.0.0.1', 9199)
-  connectFunctionsEmulator(functions, '127.0.0.1', 5001)
-  connectAuthEmulator(firebaseAuth, 'http://127.0.0.1:9099', { disableWarnings: true })
+  // The automated tests use their own ports (firebase.test.json) so they do
+  // not collide with other emulators running on this machine.
+  const port = (name: string, fallback: number) => Number(import.meta.env[`VITE_EMULATOR_${name}_PORT`]) || fallback
+  connectFirestoreEmulator(db, '127.0.0.1', port('FIRESTORE', 8080))
+  connectStorageEmulator(storage, '127.0.0.1', port('STORAGE', 9199))
+  connectFunctionsEmulator(functions, '127.0.0.1', port('FUNCTIONS', 5001))
+  connectAuthEmulator(firebaseAuth, `http://127.0.0.1:${port('AUTH', 9099)}`, { disableWarnings: true })
   console.info('[BuildPro+] Using local Firebase emulators — not the live project.')
 }

@@ -13,8 +13,8 @@ let env: RulesTestEnvironment | undefined
 export async function testEnv(): Promise<RulesTestEnvironment> {
   env ??= await initializeTestEnvironment({
     projectId: 'demo-setaside',
-    firestore: { host: '127.0.0.1', port: 8080, rules: readFileSync('firestore.rules', 'utf8') },
-    storage: { host: '127.0.0.1', port: 9199, rules: readFileSync('storage.rules', 'utf8') },
+    firestore: { host: '127.0.0.1', port: 8380, rules: readFileSync('firestore.rules', 'utf8') },
+    storage: { host: '127.0.0.1', port: 9499, rules: readFileSync('storage.rules', 'utf8') },
   })
   return env
 }

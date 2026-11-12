@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { scheduleConflicts } from './lib/scheduleConflicts'
 import { useUser } from '@clerk/clerk-react'
 import { collection, query, where, onSnapshot, addDoc, updateDoc, deleteDoc, doc } from 'firebase/firestore'
 import { db } from './firebase'
@@ -170,6 +171,9 @@ function DayModal({ date, items, userId, onClose, onOpenProject }: {
 
   const save = async () => {
     if (!userId || !title.trim()) return
+    // Double-booking check: a warning the contractor can override, never a block.
+    const clashes = scheduleConflicts({ time, kind, editingId }, items || {})
+    if (clashes.length > 0 && !confirm('Heads up, this day already has:\n\n• ' + clashes.join('\n• ') + '\n\nSave anyway?')) return
     setSaving(true)
     try {
       const payload: Record<string, unknown> = {

@@ -1,7 +1,8 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useRef, useEffect } from 'react'
 import { useAuth, useUser } from '@clerk/clerk-react'
-import { doc, updateDoc, deleteField } from 'firebase/firestore'
+import { collection, doc, updateDoc, deleteField, writeBatch } from 'firebase/firestore'
 import { db } from './firebase'
+import { isSignedEstimate, revisionFields, revisionNumber } from './lib/estimateRevision'
 import { toCustomerView } from './lib/customerView'
 import { quoteFromManualEstimate } from './lib/manualQuote'
 import { copyShareLink, shareLinkFor, smsHref, mailtoHref, nativeShare, isPhone } from './lib/shareEstimate'
@@ -27,6 +28,18 @@ interface Props {
 export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, businessName }: Props) {
   const { user } = useUser()
   const { getToken } = useAuth()
+
+  // A signed (approved) estimate is a legal record and is never edited:
+  // saving creates the next revision instead (lib/estimateRevision.ts). A
+  // version that has already been replaced is read-only.
+  const signed = isSignedEstimate(estimate)
+  const superseded = !!estimate.supersededBy
+  const nextRevision = revisionNumber(estimate) + 1
+  // The version this editor is showing right now. Saving a signed estimate
+  // switches it to the new revision part-way through "save, then send", so
+  // the send step must read this rather than the `estimate` it started with.
+  const current = useRef(estimate)
+  useEffect(() => { current.current = estimate }, [estimate])
 
   // Always work from a customer-view shaped quote so markup is baked in.
   // A hand-built estimate has no itemised quote; build one from its own fields
@@ -122,6 +135,7 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, b
   })
 
   const saveEdits = async () => {
+    if (superseded) return
     setSaving(true)
     setSaveStatus('')
     try {
@@ -140,10 +154,34 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, b
         depositRequested: depositRequested && depAmt > 0,
         depositAmount: depositRequested ? depAmt : 0,
       }
-      // If the customer had already DECLINED (or approved) this estimate and the
-      // contractor is now editing it to re-send, reset it to "pending" and clear
-      // the old response so the customer gets a fresh Accept/Decline on the
-      // improved version (instead of seeing the stale "Declined" screen).
+      if (signed) {
+        // The customer signed this version: leave it exactly as signed and
+        // save the edits as the next revision, in one atomic write that also
+        // points the signed version at its successor.
+        if (!user?.id) throw new Error('Not signed in')
+        const fields = revisionFields(estimate, updates, user.id)
+        const ref = doc(collection(db, 'estimates'))
+        const batch = writeBatch(db)
+        batch.set(ref, fields)
+        batch.update(doc(db, 'estimates', estimate.id), { supersededBy: ref.id })
+        await batch.commit()
+        const revision = { id: ref.id, ...fields } as Estimate
+        current.current = revision
+        // The proposal letter was written for the signed terms; a fresh one is
+        // written for the revision when it is sent.
+        setProposal(null)
+        setProposalEdited(false)
+        onSaved(revision)
+        if (user?.id) rememberMaterialPrices(user.id, materials)
+        setSavedKey(fieldsKey)
+        setSaveStatus(`✓ Saved as Revision ${fields.revision}. The signed version is kept unchanged. Send this revision for the customer to sign.`)
+        return revision
+      }
+      // If the customer DECLINED this estimate and the contractor is now
+      // editing it to re-send, reset it to "pending" and clear the old response
+      // so the customer gets a fresh Accept/Decline on the improved version
+      // (instead of seeing the stale "Declined" screen). Nothing was signed, so
+      // the same document is reused.
       const reset = estimate.status !== 'pending'
       const writePayload: Record<string, unknown> = { ...updates }
       if (reset) {
@@ -156,28 +194,36 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, b
         ...updates,
         ...(reset ? { status: 'pending' as const, customerResponse: undefined } : {}),
       } as Estimate
+      current.current = updated
       onSaved(updated)
       // Learn the contractor's edited material prices for smarter future quotes.
       if (user?.id) rememberMaterialPrices(user.id, materials)
       setSavedKey(fieldsKey)
       setSaveStatus('✓ Saved')
       setTimeout(() => setSaveStatus(''), 2500)
+      return updated
     } catch (err) {
       setSaveStatus('⚠ Save failed: ' + (err instanceof Error ? err.message : String(err)))
+      return null
     } finally {
       setSaving(false)
     }
   }
 
-  const requireSaveBeforeSend = (action: () => void | Promise<void>) => async () => {
-    if (dirty) {
-      if (!confirm('You have unsaved edits. Save before sharing?')) return
-      await saveEdits()
+  // Sends always act on the version the customer should see: after a save
+  // that created a revision, that is the revision, not the signed original.
+  const saveThenSend = async (action: (target: Estimate) => void | Promise<void>) => {
+    if (dirty && !superseded) {
+      const question = signed
+        ? `You have unsaved edits. Save them as Revision ${nextRevision} and send that for the customer to sign?`
+        : 'You have unsaved edits. Save before sharing?'
+      if (!confirm(question)) return
+      if (!(await saveEdits())) return
     }
     // The proposal is the customer's first paperwork — make sure it exists
     // before any share/copy/print so the customer always receives it.
     await ensureProposal()
-    await action()
+    await action(current.current)
   }
 
   const fromName = user?.fullName || user?.firstName || undefined
@@ -201,11 +247,19 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, b
   // Persist a proposal letter onto the estimate doc (and local state). `edited`
   // marks a hand-edited version so a future regenerate won't silently clobber it.
   const persistProposal = async (p: ProposalLetter, edited: boolean) => {
+    const target = current.current
+    // The letter is part of what the customer signed.
+    if (isSignedEstimate(target)) {
+      setSaveStatus(`🔒 The customer signed with this letter, so it can't change. Save your edits as Revision ${revisionNumber(target) + 1} to send a new one.`)
+      return
+    }
     setProposal(p)
     setProposalEdited(edited)
     try {
-      await updateDoc(doc(db, 'estimates', estimate.id), { proposal: p, proposalEdited: edited })
-      onSaved({ ...estimate, proposal: p, proposalEdited: edited } as Estimate)
+      await updateDoc(doc(db, 'estimates', target.id), { proposal: p, proposalEdited: edited })
+      const updated = { ...target, proposal: p, proposalEdited: edited } as Estimate
+      current.current = updated
+      onSaved(updated)
     } catch (err) {
       console.error('Failed to save proposal', err)
     }
@@ -218,7 +272,7 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, b
     setProposalBusy(true)
     try {
       const ctx = await proposalCtx()
-      const edited = { ...estimate, aiQuote: buildEditedQuote(), customerName, total: computed.total } as Estimate
+      const edited = { ...current.current, aiQuote: buildEditedQuote(), customerName, total: computed.total } as Estimate
       let letter: ProposalLetter
       try {
         const token = await getToken()
@@ -239,28 +293,45 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, b
 
   // Ensure a proposal exists before sending. If one is already saved, keep it
   // (never overwrite the contractor's edited copy); otherwise generate one.
+  // A signed or replaced version is sent exactly as it stands.
   const ensureProposal = async (): Promise<void> => {
-    if (proposal) return
+    const target = current.current
+    if (proposal || isSignedEstimate(target) || target.supersededBy) return
     await generateAndSaveProposal()
   }
 
-  const doShare = requireSaveBeforeSend(async () => {
-    const ok = await nativeShare(estimate, fromName)
+  const doShare = () => saveThenSend(async (target) => {
+    const ok = await nativeShare(target, fromName)
     if (!ok) {
-      const copied = await copyShareLink(estimate.id)
+      const copied = await copyShareLink(target.id)
       if (copied) { setLinkCopied(true); setTimeout(() => setLinkCopied(false), 2500) }
     }
   })
 
-  const doCopy = requireSaveBeforeSend(async () => {
-    const ok = await copyShareLink(estimate.id)
+  const doCopy = () => saveThenSend(async (target) => {
+    const ok = await copyShareLink(target.id)
     if (ok) { setLinkCopied(true); setTimeout(() => setLinkCopied(false), 2500) }
-    else setSaveStatus(`Manual link: ${shareLinkFor(estimate.id)}`)
+    else setSaveStatus(`Manual link: ${shareLinkFor(target.id)}`)
   })
 
-  const doPrint = requireSaveBeforeSend(async () => {
-    onPrint({ ...estimate, aiQuote: buildEditedQuote(), customerName, total: computed.total } as Estimate)
+  // A replaced version prints exactly as it was saved, not with the form's
+  // (read-only) values.
+  const doPrint = () => saveThenSend(async (target) => {
+    onPrint(superseded ? target : { ...target, aiQuote: buildEditedQuote(), customerName, total: computed.total } as Estimate)
   })
+
+  // Text and email links carry the estimate link in their href, built before
+  // any save. When unsaved edits would become a NEW revision, that href still
+  // points at the signed version, so ask for the save first.
+  const linkSaveFirst = (ev: React.MouseEvent) => {
+    if (!dirty || superseded) return
+    if (signed) {
+      ev.preventDefault()
+      setSaveStatus(`Save your edits as Revision ${nextRevision} first, then send the new version.`)
+      return
+    }
+    void saveEdits()
+  }
 
   // The materials shopping list is the contractor's OWN list, not sent to the
   // customer — so it's always available, even on an unsaved draft. It reflects
@@ -296,13 +367,32 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, b
       <div onClick={e => e.stopPropagation()} style={{ maxWidth: '780px', margin: '24px auto', background: '#f8fafc', borderRadius: '12px', overflow: 'hidden' }}>
         <div style={{ background: '#1a1f2e', color: 'white', padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
           <div>
-            <h2 style={{ margin: 0, color: '#f97316', fontSize: '18px' }}>Edit & Send Estimate</h2>
+            <h2 style={{ margin: 0, color: '#f97316', fontSize: '18px' }}>
+              {superseded ? 'Signed Estimate (replaced)' : signed ? 'Signed Estimate' : 'Edit & Send Estimate'}
+              {revisionNumber(estimate) > 1 && <span style={{ color: '#cbd5e1', fontWeight: 600 }}> · Revision {revisionNumber(estimate)}</span>}
+            </h2>
             <p style={{ margin: '2px 0 0', color: '#94a3b8', fontSize: '12px' }}>Customer-facing preview. Markup is baked in — no markup line is shown.</p>
           </div>
           <button onClick={onClose} style={{ background: 'transparent', color: 'white', border: '1px solid #475569', padding: '6px 14px', borderRadius: '6px', cursor: 'pointer' }}>Close</button>
         </div>
 
         <div style={{ padding: '16px' }}>
+          {signed && (
+            <div role="note" style={{ background: superseded ? '#f1f5f9' : '#f0fdf4', border: `1px solid ${superseded ? '#cbd5e1' : '#86efac'}`, borderRadius: '8px', padding: '12px 14px', marginBottom: '12px', fontSize: '13px', color: '#1a1f2e', lineHeight: 1.5 }}>
+              <p style={{ margin: 0, fontWeight: 700 }}>
+                🔒 Signed by {estimate.customerResponse?.signedName || estimate.customerName}
+                {estimate.customerResponse?.respondedAt ? ` on ${new Date(estimate.customerResponse.respondedAt).toLocaleDateString()}` : ''}. This version is a legal record and can't be changed.
+              </p>
+              <p style={{ margin: '4px 0 0', color: '#475569' }}>
+                {superseded
+                  ? 'A newer revision has replaced it. It stays on file exactly as signed. Open the latest version from your estimates to make changes.'
+                  : `To change the job, edit below and save: that creates Revision ${nextRevision} for the customer to review and sign. This signed version stays on file, and stays the one you bill until they sign the revision.`}
+              </p>
+            </div>
+          )}
+
+          {/* A replaced version is read-only: every field below is disabled. */}
+          <fieldset disabled={superseded} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
           {/* Header card — customer name */}
           <div style={card}>
             <label style={label}>Customer Name</label>
@@ -432,12 +522,16 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, b
             )}
           </div>
 
+          </fieldset>
+
           {/* Save + share row */}
           <div style={{ position: 'sticky', bottom: 0, background: 'rgba(248,250,252,0.95)', backdropFilter: 'blur(4px)', padding: '12px', borderRadius: '8px', border: '1px solid #e2e8f0', marginTop: '8px' }}>
             <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-              <button onClick={saveEdits} disabled={saving || !dirty} style={{ background: dirty ? '#f97316' : '#cbd5e1', color: 'white', border: 'none', padding: '10px 18px', borderRadius: '6px', cursor: dirty ? 'pointer' : 'not-allowed', fontWeight: 700 }}>
-                {saving ? 'Saving…' : dirty ? '💾 Save Changes' : '✓ Up to date'}
-              </button>
+              {!superseded && (
+                <button onClick={saveEdits} disabled={saving || !dirty} style={{ background: dirty ? '#f97316' : '#cbd5e1', color: 'white', border: 'none', padding: '10px 18px', borderRadius: '6px', cursor: dirty ? 'pointer' : 'not-allowed', fontWeight: 700 }}>
+                  {saving ? 'Saving…' : !dirty ? '✓ Up to date' : signed ? `💾 Save as Revision ${nextRevision}` : '💾 Save Changes'}
+                </button>
+              )}
               <div style={{ width: '1px', height: '24px', background: '#cbd5e1', margin: '0 4px' }} />
               {/* Native share sheet — phones only. On desktops navigator.share is
                   unavailable; doShare falls back to copy-link automatically. */}
@@ -448,12 +542,12 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, b
               )}
               {/* SMS link — phones only (laptops don't have an SMS app). */}
               {isPhone() && (
-                <a href={smsHref({ ...estimate, customerName }, fromName)} onClick={() => dirty && saveEdits()} style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '10px 14px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, textDecoration: 'none', color: '#1a1f2e', display: 'inline-block' }}>
+                <a href={smsHref({ ...estimate, customerName }, fromName)} onClick={linkSaveFirst} style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '10px 14px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, textDecoration: 'none', color: '#1a1f2e', display: 'inline-block' }}>
                   💬 Text
                 </a>
               )}
               {/* Email link — works on every device. Opens user's default mail app. */}
-              <a href={mailtoHref({ ...estimate, customerName }, fromName)} onClick={() => dirty && saveEdits()} style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '10px 14px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, textDecoration: 'none', color: '#1a1f2e', display: 'inline-block' }}>
+              <a href={mailtoHref({ ...estimate, customerName }, fromName)} onClick={linkSaveFirst} style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '10px 14px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, textDecoration: 'none', color: '#1a1f2e', display: 'inline-block' }}>
                 ✉️ Email
               </a>
               <button onClick={doCopy} style={{ background: '#16a34a', color: 'white', border: 'none', padding: '10px 14px', borderRadius: '6px', cursor: 'pointer', fontWeight: 700 }}>
@@ -474,16 +568,20 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, b
           <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '8px', padding: '14px', marginTop: '12px' }}>
             <div style={{ fontWeight: 800, color: '#1e3a8a', fontSize: '14px', marginBottom: '2px' }}>📄 Professional Proposal</div>
             <p style={{ margin: '0 0 10px', fontSize: '12px', color: '#1e40af', lineHeight: 1.5 }}>
-              {proposal
-                ? 'This polished proposal letter is what your customer sees first, above the estimate. Review or tweak it before sending.'
-                : 'A professional proposal letter is written automatically when you send — it frames your estimate for the customer. You can preview and edit it now.'}
+              {signed
+                ? (proposal
+                    ? 'The customer signed with this letter, so it stays as it is. A revision gets a fresh letter written for its new terms.'
+                    : 'This estimate was signed without a proposal letter. A revision gets one written for its new terms when you send it.')
+                : proposal
+                  ? 'This polished proposal letter is what your customer sees first, above the estimate. Review or tweak it before sending.'
+                  : 'A professional proposal letter is written automatically when you send — it frames your estimate for the customer. You can preview and edit it now.'}
             </p>
             <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
               {proposal ? (
                 <button onClick={() => setProposalOpen(true)} style={{ background: '#1d4ed8', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 700 }}>
-                  📄 View / Edit Proposal
+                  {signed ? '📄 View Proposal' : '📄 View / Edit Proposal'}
                 </button>
-              ) : (
+              ) : signed ? null : (
                 <button onClick={async () => { await generateAndSaveProposal(); setProposalOpen(true) }} disabled={proposalBusy} style={{ background: '#1d4ed8', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '6px', cursor: proposalBusy ? 'not-allowed' : 'pointer', fontWeight: 700 }}>
                   {proposalBusy ? 'Writing…' : '✍️ Preview Proposal'}
                 </button>

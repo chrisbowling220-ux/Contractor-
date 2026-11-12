@@ -134,6 +134,14 @@ describe('contract total and change orders', () => {
     expect(changeOrderBaseTotal([e], [first], undefined)).toBe(4500)
     expect(changeOrderBaseTotal([e], [first], 'first')).toBe(4000)   // editing the first one
   })
+  it('a revised estimate is billed once, at the version the customer signed', () => {
+    const v1 = estimate({ id: 'v1', total: 4000, aiQuote: undefined, status: 'approved', supersededBy: 'v2' })
+    const v2 = (status: Estimate['status']) => estimate({ id: 'v2', total: 4600, aiQuote: undefined, status, revision: 2, previousVersionId: 'v1', originalEstimateId: 'v1' })
+    expect(contractTotal([v1, v2('pending')], [])).toBe(4000)    // revision not signed yet
+    expect(contractTotal([v1, v2('declined')], [])).toBe(4000)   // customer kept the original
+    expect(contractTotal([v1, v2('approved')], [])).toBe(4600)   // revision signed, replaces v1
+    expect(sumLines(buildInvoiceLineItems([v1, v2('approved')], [], 'Paint'))).toBe(4600)
+  })
 })
 
 describe('recording payments', () => {

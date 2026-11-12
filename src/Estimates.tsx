@@ -1,4 +1,5 @@
 import { duplicateEstimateFields } from './lib/duplicateEstimate'
+import { isSignedEstimate, revisionNumber } from './lib/estimateRevision'
 import { useEffect, useMemo, useState } from 'react'
 import { useUser } from '@clerk/clerk-react'
 import { collection, query, where, onSnapshot, doc, deleteDoc, addDoc } from 'firebase/firestore'
@@ -142,7 +143,18 @@ export default function Estimates({ initialTab = 'pending' }: { initialTab?: Tab
             <div key={e.id} style={card}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', gap: '12px', flexWrap: 'wrap' }}>
                 <div style={{ minWidth: 0, flex: 1 }}>
-                  <p style={{ margin: 0, fontWeight: 700, fontSize: '16px' }}>{e.customerName}</p>
+                  <p style={{ margin: 0, fontWeight: 700, fontSize: '16px' }}>
+                    {e.customerName}
+                    {revisionNumber(e) > 1 && <span style={{ marginLeft: '8px', fontSize: '12px', fontWeight: 700, color: '#475569', background: '#f1f5f9', borderRadius: '999px', padding: '2px 8px' }}>Revision {revisionNumber(e)}</span>}
+                  </p>
+                  {e.supersededBy && (
+                    <p style={{ margin: '4px 0 0', fontSize: '12px', color: '#475569' }}>
+                      📚 Replaced by Revision {revisionNumber(estimates.find(x => x.id === e.supersededBy) ?? { revision: revisionNumber(e) + 1 })}{(() => {
+                        const next = estimates.find(x => x.id === e.supersededBy)
+                        return next ? ` (${next.status === 'pending' ? 'awaiting signature' : next.status})` : ''
+                      })()}. Kept on file as signed.
+                    </p>
+                  )}
                   <p style={{ margin: '2px 0 0', fontSize: '13px', color: '#64748b' }}>
                     {e.jobTypeName} · <strong style={{ color: ORANGE }}>${(e.total || 0).toFixed(2)}</strong> · {new Date(e.createdAt).toLocaleDateString()}
                   </p>
@@ -167,7 +179,7 @@ export default function Estimates({ initialTab = 'pending' }: { initialTab?: Tab
                 </div>
                 <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                   <button onClick={() => setPreview(e)} style={{ background: '#1a1f2e', color: 'white', border: 'none', padding: '8px 14px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}>
-                    {tab === 'declined' ? '✏️ Adjust & Resend' : '✏️ Edit'}
+                    {e.supersededBy ? '📄 View' : isSignedEstimate(e) ? '✏️ Revise' : tab === 'declined' ? '✏️ Adjust & Resend' : '✏️ Edit'}
                   </button>
                   <button onClick={() => shareEstimate(e)} style={{ background: '#0ea5e9', color: 'white', border: 'none', padding: '8px 14px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}>
                     {copiedId === e.id ? '✓ Copied' : '📤 Share'}

@@ -70,8 +70,8 @@ customers have to keep working while contractors move to the new app version:
 
 | Step | When | What | Command |
 |---|---|---|---|
-| 1 | Now (works with the app that is live today) | Stops anyone listing contractors' data; locks customer sign-off | Deploy `firestore.rules` from tag `rules/stage1-urgent` |
-| 2 | With the new app version | Adds the collections the new app writes; keeps old share links working | `npx firebase deploy --only firestore:rules --config firebase.transition.json`, then `npx firebase deploy --only storage,functions`, then `npm run build && npx firebase deploy --only hosting` |
+| 1 | Done 2026-11-12 (owner-approved) | Stops anyone listing contractors' data; locks customer sign-off | Deployed `firestore.rules` from tag `rules/stage1-urgent` |
+| 2 | With the new app version | Adds the collections the new app writes; keeps old share links working; locks signed estimates and change orders (edits become revisions or new change orders) | `npx firebase deploy --only firestore:rules --config firebase.transition.json`, then `npx firebase deploy --only storage,functions`, then `npm run build && npx firebase deploy --only hosting` |
 | 3 | Once active contractors have opened the new app (it republishes their share data on open) | Makes customers, photos and billing profiles owner-only | `npx firebase deploy --only firestore:rules` |
 
 Roll back any step by redeploying the same thing from tag

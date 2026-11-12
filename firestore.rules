@@ -171,12 +171,26 @@ service cloud.firestore {
       // estimates — names, scopes and prices — and walk the ids.
       allow get: if true;
       allow list: if isOwner(resource.data);
-      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
-      // Owner: full update. Anonymous customer may ONLY:
+      // A new estimate always starts unsigned: only the customer signs (see
+      // validSignoff), so nobody can create one that is already approved.
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy
+        && request.resource.data.get('status', 'pending') == 'pending'
+        && !request.resource.data.keys().hasAny(['customerResponse', 'signedAtMs', 'supersededBy']);
+      // Owner: full update while the estimate is unsigned, but never signs it
+      // themselves. Once the customer has signed (approved), the signed terms
+      // are a legal record and never change: the owner may only set
+      // bookkeeping links, and any change to the job goes into a new revision
+      // (src/lib/estimateRevision.ts).
+      // Anonymous customer may ONLY:
       //  - approve/decline once, while pending (see validSignoff), or
       //  - respond to the proposed start date (startDateResponse only).
       // Cannot touch amounts, totals, deposit, or forge other status values.
-      allow update: if isOwner(resource.data)
+      allow update: if (isOwner(resource.data)
+            && (resource.data.get('status', 'pending') == 'approved'
+                ? (onlyChanges(['projectAutoCreated', 'projectId', 'depositInvoiceCreated', 'supersededBy'])
+                   && request.resource.data.get('supersededBy', '') is string)
+                : (request.resource.data.get('status', 'pending') != 'approved'
+                   && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['signedAtMs']))))
         || (onlyChanges(['customerResponse', 'status', 'signedAtMs']) && validSignoff())
         // Customer may respond to the proposed start date ONCE — only if no
         // response exists yet. Prevents an anonymous actor overwriting a prior
@@ -192,8 +206,17 @@ service cloud.firestore {
     match /changeOrders/{id} {
       allow get: if true;
       allow list: if isOwner(resource.data);
-      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy;
-      allow update: if isOwner(resource.data)
+      // Starts unsigned; only the customer signs (validSignoff).
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.createdBy
+        && request.resource.data.get('status', 'pending') == 'pending'
+        && !request.resource.data.keys().hasAny(['customerResponse', 'signedAtMs']);
+      // Owner may edit and re-send an UNSIGNED change order. A signed one is a
+      // legal record and is never changed; a further change is a new change
+      // order.
+      allow update: if (isOwner(resource.data)
+            && resource.data.get('status', 'pending') != 'approved'
+            && request.resource.data.get('status', 'pending') != 'approved'
+            && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['signedAtMs']))
         || (onlyChanges(['customerResponse', 'status', 'signedAtMs']) && validSignoff());
       allow delete: if isOwner(resource.data) && !signedDocLocked(resource.data);
     }

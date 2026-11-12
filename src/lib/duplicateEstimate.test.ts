@@ -22,6 +22,11 @@ describe('duplicating an estimate', () => {
       expect(copy, key).not.toHaveProperty(key)
     }
   })
+  it('a copy of a revision is a new estimate, not another version of the old job', () => {
+    const revision = { ...signed, revision: 2, originalEstimateId: 'e0', previousVersionId: 'e0', supersededBy: 'e3' } as Estimate
+    const copy = duplicateEstimateFields(revision, 'user_1')
+    for (const key of ['revision', 'originalEstimateId', 'previousVersionId', 'supersededBy']) expect(copy, key).not.toHaveProperty(key)
+  })
   it('does not change the original', () => {
     duplicateEstimateFields(signed, 'user_1')
     expect(signed.signedAtMs).toBe(1790000000000)

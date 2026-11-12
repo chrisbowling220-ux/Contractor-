@@ -212,7 +212,7 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
     <div style={{ minHeight: '100vh', background: '#f8fafc', padding: 'clamp(16px, 4vw, 32px)' }}>
       <div style={{ maxWidth: '720px', margin: '0 auto', background: 'white', borderRadius: '12px', boxShadow: '0 1px 2px rgba(15,23,42,0.04), 0 8px 24px rgba(15,23,42,0.06)', overflow: 'hidden' }}>
         <BrandHeader
-          title="Estimate"
+          title={(estimate.revision || 1) > 1 ? `Estimate · Revision ${estimate.revision}` : 'Estimate'}
           subtitle={`${estimate.jobTypeName}${estimate.jobLocationZip ? ` · ZIP ${estimate.jobLocationZip}` : ''}${estimate.createdAt ? ` · ${new Date(estimate.createdAt).toLocaleDateString()}` : ''}`}
           businessName={businessName}
           logoUrl={logoUrl}
@@ -225,6 +225,20 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
           <p style={{ fontSize: '15px', marginTop: 0, marginBottom: '12px' }}>
             Hi <strong>{estimate.customerName}</strong>, here's your proposal.
           </p>
+
+          {/* An older version: point the customer at the newer one. A signed
+              version stays readable exactly as signed. */}
+          {estimate.supersededBy && (
+            <div role="note" style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '10px', padding: '14px 16px', marginBottom: '20px', fontSize: '14px', color: '#1e3a8a', lineHeight: 1.5 }}>
+              <p style={{ margin: 0, fontWeight: 700 }}>Your contractor has sent a revised version of this estimate.</p>
+              <p style={{ margin: '4px 0 8px' }}>
+                {responded && response?.action === 'approved'
+                  ? 'Below is the version you signed. It stays on file unchanged.'
+                  : 'Below is the earlier version.'}
+              </p>
+              <a href={`/q/${estimate.supersededBy}`} style={{ color: '#1d4ed8', fontWeight: 700 }}>View the revised estimate →</a>
+            </div>
+          )}
 
           {/* Professional proposal letter — the first thing the customer reads,
               framing the estimate below. Only shown when one was generated. */}

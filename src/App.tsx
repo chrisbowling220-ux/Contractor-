@@ -12,8 +12,9 @@ import QuickAddVoice from './QuickAddVoice'
 import WelcomeTour from './WelcomeTour'
 import { fireDueReminders, fireMorningAgenda, requestNotificationPermission, alertsEnabled, setAlertsEnabled, playAlertCue } from './lib/reminders'
 import { tipOfTheDay } from './data/contractorTips'
-import type { Invoice, ProjectStatus } from './data/types'
+import type { Estimate, Invoice, ProjectStatus } from './data/types'
 import { collectedBetween, isOverdue, localDateStr } from './lib/invoiceMath'
+import { bindingVersions } from './lib/estimateRevision'
 
 // Each screen is its own bundle, fetched the first time it is opened.
 const ScanRoom = lazy(() => import('./ScanRoom'))
@@ -123,8 +124,11 @@ function useDashboardCounts(userId: string | undefined, refreshKey = 0) {
         const activeJobs = projects.docs.filter(d => activeStatuses.has(d.data().status as string)).length
         const estDocs = estimates.docs.map(d => ({ id: d.id, ...d.data() } as Record<string, unknown> & { id: string }))
         const pendingEstimates = estDocs.filter(e => e.status === 'pending').length
-        const won = estDocs.filter(e => e.status === 'approved')
-        const lost = estDocs.filter(e => e.status === 'declined').length
+        // Won/lost count jobs, not documents: a revised estimate counts once,
+        // at the version that binds (see lib/estimateRevision.ts).
+        const jobs = bindingVersions(estDocs as unknown as Estimate[]) as unknown as typeof estDocs
+        const won = jobs.filter(e => e.status === 'approved')
+        const lost = jobs.filter(e => e.status === 'declined').length
         const avgJobSize = won.length > 0 ? +(won.reduce((s, e) => s + ((e.total as number) || 0), 0) / won.length).toFixed(0) : 0
 
         // Revenue this calendar month = paid invoices with paidAt in this month.

@@ -29,9 +29,14 @@ import { fetchBusinessProfile } from './businessProfile'
 // advanced this sweep, split by approved/declined, so the dashboard can show an
 // accurate "a customer decided" notification.
 
+//
+// Revisions (lib/estimateRevision.ts): a version that has been replaced by a
+// newer one no longer steers the project, and a customer declining a REVISION
+// does not mark the job declined, because the version they signed earlier
+// still stands.
 function desiredStatusFor(e: Estimate): { status: ProjectStatus; declined: boolean } {
   const approved = e.status === 'approved' && e.customerResponse?.action === 'approved'
-  const declined = e.status === 'declined' && e.customerResponse?.action === 'declined'
+  const declined = e.status === 'declined' && e.customerResponse?.action === 'declined' && !e.previousVersionId
   if (approved) return { status: 'in_progress', declined: false }
   if (declined) return { status: 'lead', declined: true }
   return { status: 'lead', declined: false }
@@ -75,6 +80,7 @@ export async function autoConvertApprovedEstimates(userId: string): Promise<{
 
   const changed: Estimate[] = []
   for (const e of all) {
+    if (e.supersededBy) continue
     try {
       const { status: target, declined } = desiredStatusFor(e)
 

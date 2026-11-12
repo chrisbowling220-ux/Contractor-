@@ -130,6 +130,12 @@ export interface Estimate {
   // retention lock — while within 2 years, this doc can't be deleted (enforced
   // in Firestore rules).
   signedAtMs?: number
+  // Revisions (see lib/estimateRevision.ts). A signed estimate is never
+  // edited; changes go into a new estimate that replaces it once signed.
+  revision?: number              // 2, 3, …; absent on the first version
+  originalEstimateId?: string    // first version of this estimate
+  previousVersionId?: string     // the version this one revises
+  supersededBy?: string          // set on a version once a newer one exists
 }
 
 export interface ChangeOrderLine {

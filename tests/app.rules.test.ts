@@ -6,11 +6,11 @@
 // with a link can open and answer ONE document, and nobody can browse anyone
 // else's data.
 import { readFileSync } from 'node:fs'
-import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { assertFails, assertSucceeds, initializeTestEnvironment } from '@firebase/rules-unit-testing'
 import type { RulesTestEnvironment } from '@firebase/rules-unit-testing'
 import {
-  addDoc, collection, deleteDoc, doc, getDoc, getDocs, query, setDoc, updateDoc, where,
+  addDoc, collection, deleteDoc, deleteField, doc, getDoc, getDocs, query, setDoc, updateDoc, where, writeBatch,
 } from 'firebase/firestore'
 import { deleteObject, getBytes, ref, uploadBytes } from 'firebase/storage'
 
@@ -167,6 +167,73 @@ describe('customer sign-off on an estimate', () => {
     await assertFails(deleteDoc(doc(as(ALICE), 'estimates', 'e1')))
     await seed('estimates/old', estimate({ status: 'approved', signedAtMs: Date.now() - 3 * 365 * 86400000 }))
     await assertSucceeds(deleteDoc(doc(as(ALICE), 'estimates', 'old')))
+  })
+})
+
+describe('a signed estimate is never edited; changes become a revision', () => {
+  const signedAt = Date.now()
+  beforeEach(async () => {
+    await seed('estimates/e1', estimate({ status: 'approved', customerResponse: response('approved'), signedAtMs: signedAt }))
+  })
+  const mine = (id = 'e1') => doc(as(ALICE), 'estimates', id)
+
+  it('the contractor cannot change what the customer signed', async () => {
+    await assertFails(updateDoc(mine(), { total: 9999 }))
+    await assertFails(updateDoc(mine(), { customerName: 'Someone Else' }))
+    await assertFails(updateDoc(mine(), { depositAmount: 0 }))
+    await assertFails(updateDoc(mine(), { aiQuote: { final_customer_quote: 1 } }))
+    await assertFails(updateDoc(mine(), { signedAtMs: 1 }))
+    await assertFails(updateDoc(mine(), { customerResponse: response('approved', { signedName: 'Forged' }) }))
+  })
+  it('the contractor cannot un-sign it by resetting it to pending', async () => {
+    await assertFails(updateDoc(mine(), { status: 'pending', total: 3900 }))
+  })
+  it('bookkeeping links can still be set on a signed estimate', async () => {
+    await assertSucceeds(updateDoc(mine(), { projectId: 'est_e1', projectAutoCreated: true }))
+    await assertSucceeds(updateDoc(mine(), { depositInvoiceCreated: true }))
+    await assertSucceeds(updateDoc(mine(), { supersededBy: 'e2' }))
+    await assertFails(updateDoc(mine(), { supersededBy: 42 }))
+    await assertFails(updateDoc(doc(as(BOB), 'estimates', 'e1'), { supersededBy: 'e2' }))
+  })
+  it('a revision is saved as a new estimate in one write, and the customer signs it', async () => {
+    const db = as(ALICE)
+    const batch = writeBatch(db)
+    batch.set(doc(db, 'estimates', 'e2'), estimate({ total: 4600, revision: 2, previousVersionId: 'e1', originalEstimateId: 'e1', projectId: 'est_e1' }))
+    batch.update(doc(db, 'estimates', 'e1'), { supersededBy: 'e2' })
+    await assertSucceeds(batch.commit())
+    await assertSucceeds(updateDoc(doc(anon(), 'estimates', 'e2'), { status: 'approved', customerResponse: response('approved'), signedAtMs: Date.now() }))
+    // The original stays exactly as signed, and cannot be answered again.
+    await assertFails(updateDoc(doc(anon(), 'estimates', 'e1'), { status: 'declined', customerResponse: response('declined') }))
+    let e1: Record<string, unknown> | undefined
+    await env.withSecurityRulesDisabled(async ctx => { e1 = (await getDoc(doc(ctx.firestore(), 'estimates/e1'))).data() })
+    expect(e1).toMatchObject({ total: 4200, status: 'approved', signedAtMs: signedAt, supersededBy: 'e2' })
+  })
+  it('only the customer can sign: the contractor cannot approve or create a signed estimate', async () => {
+    await seed('estimates/p1', estimate())
+    await assertFails(updateDoc(mine('p1'), { status: 'approved' }))
+    await assertFails(updateDoc(mine('p1'), { signedAtMs: Date.now() }))
+    await assertFails(setDoc(mine('n1'), estimate({ status: 'approved' })))
+    await assertFails(setDoc(mine('n2'), estimate({ customerResponse: response('approved') })))
+    await assertFails(setDoc(mine('n3'), estimate({ signedAtMs: Date.now() })))
+    await assertSucceeds(setDoc(mine('n4'), estimate()))
+  })
+  it('an unsigned (declined) estimate can still be adjusted and re-sent in place', async () => {
+    await seed('estimates/d1', estimate({ status: 'declined', customerResponse: response('declined') }))
+    await assertSucceeds(updateDoc(mine('d1'), { status: 'pending', customerResponse: deleteField(), total: 3900 }))
+  })
+})
+
+describe('a signed change order is never edited', () => {
+  it('the contractor can edit an unsigned one but not a signed one, and cannot sign it themselves', async () => {
+    await seed('changeOrders/open', { createdBy: ALICE, status: 'pending', delta: 350, newTotal: 4550 })
+    await seed('changeOrders/signed', { createdBy: ALICE, status: 'approved', delta: 350, newTotal: 4550, customerResponse: response('approved'), signedAtMs: Date.now() })
+    const co = (id: string) => doc(as(ALICE), 'changeOrders', id)
+    await assertSucceeds(updateDoc(co('open'), { delta: 400, newTotal: 4600 }))
+    await assertFails(updateDoc(co('open'), { status: 'approved' }))
+    await assertFails(updateDoc(co('signed'), { delta: 1, newTotal: 4201 }))
+    await assertFails(updateDoc(co('signed'), { status: 'pending', customerResponse: deleteField() }))
+    await assertFails(setDoc(co('n1'), { createdBy: ALICE, status: 'approved', delta: 1, newTotal: 1 }))
+    await assertSucceeds(setDoc(co('n2'), { createdBy: ALICE, status: 'pending', delta: 1, newTotal: 1 }))
   })
 })
 

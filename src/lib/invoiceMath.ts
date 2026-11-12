@@ -5,6 +5,7 @@
 import type { ChangeOrder, Estimate, Invoice, InvoiceLine, InvoicePayment, PaymentMethod } from '../data/types'
 import { toCustomerView } from './customerView'
 import { quoteFromManualEstimate } from './manualQuote'
+import { bindingVersions } from './estimateRevision'
 
 export const money = (n: number): number => +(Number(n) || 0).toFixed(2)
 
@@ -59,9 +60,11 @@ export function estimateInvoiceLines(e: Estimate, jobTypeName: string): InvoiceL
 }
 
 // Estimates that count toward what the customer owes: everything the customer
-// has not declined.
+// has not declined, and of a revised estimate only the version that binds
+// (the newest one the customer signed), so a revision is never billed on top
+// of the version it replaces.
 export const billableEstimates = (estimates: Estimate[]): Estimate[] =>
-  estimates.filter(e => e.status !== 'declined')
+  bindingVersions(estimates).filter(e => e.status !== 'declined')
 
 // The contract value of a job: its live estimates plus APPROVED change orders.
 // Pending and declined change orders never change what is owed.

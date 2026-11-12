@@ -144,6 +144,9 @@ export default function ChangeOrderForm({ projectId, customerName, jobTypeName, 
         createdBy: user.id,
       }
       let savedId: string
+      // A signed change order is a legal record (the database refuses the
+      // write too); a further change is a new change order.
+      if (existing?.status === 'approved') throw new Error('This change order is signed and can no longer be edited. Add a new change order instead.')
       if (existing?.id) {
         // Re-sending an edited change order puts it back to pending, so the
         // customer's earlier answer no longer applies: clear it, the same way

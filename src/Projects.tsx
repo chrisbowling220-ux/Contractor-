@@ -648,7 +648,11 @@ ${link}
                     >
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', gap: '8px', flexWrap: 'wrap' }}>
                         <div style={{ flex: 1, minWidth: 0 }}>
-                          <p style={{ margin: 0, fontWeight: 700, fontSize: '15px', color: '#f97316' }}>${e.total.toFixed(2)}</p>
+                          <p style={{ margin: 0, fontWeight: 700, fontSize: '15px', color: '#f97316' }}>
+                            ${e.total.toFixed(2)}
+                            {(e.revision || 1) > 1 && <span style={{ marginLeft: '8px', fontSize: '11px', color: '#475569', fontWeight: 700 }}>Revision {e.revision}</span>}
+                            {e.supersededBy && <span style={{ marginLeft: '8px', fontSize: '11px', color: '#475569', fontWeight: 600 }}>· replaced, kept as signed</span>}
+                          </p>
                           <p style={{ margin: '2px 0 0', fontSize: '12px', color: '#64748b' }}>
                             {e.rateType === 'flat' ? 'Flat rate' : `${e.estimatedHours}h × $${e.hourlyRate}/hr`} · {new Date(e.createdAt).toLocaleDateString()}
                           </p>
@@ -660,7 +664,9 @@ ${link}
                         </div>
                         <span style={{ background: statusColor.bg, color: statusColor.text, padding: '3px 10px', borderRadius: '999px', fontSize: '11px', fontWeight: 700, textTransform: 'capitalize' }}>{e.status}</span>
                       </div>
-                      <p style={{ margin: '8px 0 0', fontSize: '11px', color: '#94a3b8' }}>👁️ Tap to preview, edit & send →</p>
+                      <p style={{ margin: '8px 0 0', fontSize: '11px', color: '#94a3b8' }}>
+                        {e.supersededBy ? '👁️ Tap to view →' : e.status === 'approved' ? '👁️ Tap to view or revise →' : '👁️ Tap to preview, edit & send →'}
+                      </p>
                     </div>
                   )
                 })}
@@ -704,7 +710,9 @@ ${link}
                       </p>
                     )}
                     <div style={{ display: 'flex', gap: '6px', marginTop: '10px', flexWrap: 'wrap' }}>
-                      <button onClick={() => { setCoEditing(c); setCoFormOpen(true) }} style={{ background: 'white', border: '1px solid #cbd5e1', padding: '4px 10px', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: 600 }}>✏️ Edit</button>
+                      {c.status === 'approved'
+                        ? <span style={{ fontSize: '12px', color: '#475569', padding: '4px 0' }}>🔒 Signed. To change it, add a new change order.</span>
+                        : <button onClick={() => { setCoEditing(c); setCoFormOpen(true) }} style={{ background: 'white', border: '1px solid #cbd5e1', padding: '4px 10px', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: 600 }}>✏️ Edit</button>}
                       {isPhone() && (
                         <a href={smsCoHref(c, user?.fullName || user?.firstName || undefined)} style={{ background: 'white', border: '1px solid #cbd5e1', padding: '4px 10px', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: 600, textDecoration: 'none', color: '#1a1f2e', display: 'inline-block' }}>💬 Text</a>
                       )}

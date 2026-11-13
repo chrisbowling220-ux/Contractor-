@@ -356,7 +356,9 @@ test('coordinated release, rehearsed on a copy of production data', async ({ bro
   // What the cleanup did, document by document, against the original.
   const cleaned = await listEmu('estimates')
   const privates = new Map((await listEmu('estimatePrivate')).map(d => [rel(d.name).split('/')[1], d]))
-  const moved = new Set(['aiQuote', 'laborTotal', 'materialsTotal', 'rentalsTotal', 'description'])
+  // hourlyRate: a labor-only quote's rate carries its markup (D1), checked below.
+  const moved = new Set(['aiQuote', 'laborTotal', 'materialsTotal', 'rentalsTotal', 'description', 'hourlyRate'])
+  let rateChanged = 0, rateOk = 0
   let untouchedOk = 0, signedOk = 0, signedCount = 0, notesOk = 0, notesWant = 0, narrationOk = 0, narrationWant = 0, markupOk = 0, markupWant = 0
   for (const d of cleaned) {
     const id = rel(d.name).split('/')[1]
@@ -376,7 +378,18 @@ test('coordinated release, rehearsed on a copy of production data', async ({ bro
     if (narration) { narrationWant++; if (p && field(p, 'narration') === narration) narrationOk++ }
     const md = Number(q?.profit_markup?.markup_dollars) || 0
     if (md) { markupWant++; if (p && field(p, 'aiMarkupDollars') === md) markupOk++ }
+    if (canon(o.fields.hourlyRate) !== canon(d.fields.hourlyRate)) {
+      rateChanged++
+      const nq = field(d, 'aiQuote') as { labor?: { hourly_rate?: number; labor_total?: number; estimated_hours?: number }; final_customer_quote?: number } | undefined
+      const oq = field(o, 'aiQuote') as { final_customer_quote?: number } | undefined
+      if (field(o, 'status') !== 'approved' && nq?.labor && field(d, 'hourlyRate') === nq.labor.hourly_rate
+        && Math.abs((nq.labor.estimated_hours || 0) * (nq.labor.hourly_rate || 0) - (nq.labor.labor_total || 0)) <= (nq.labor.estimated_hours || 0) * 0.005 + 1e-9
+        && nq.final_customer_quote === oq?.final_customer_quote && canon(o.fields.total) === canon(d.fields.total)) rateOk++
+    }
   }
+  const plannedRates = Number((/labor-only hourly rate folded in: (\d+)/.exec(migW.out) || [])[1] ?? -1)
+  must(rateChanged === plannedRates && rateOk === rateChanged,
+    `labor-only hourly rate (D1): changed on ${rateChanged} estimate(s), as 2.5 planned (${plannedRates}); unsigned, rate = quote's marked-up rate, hours × rate = labor price, total unchanged on ${rateOk} of ${rateChanged}`)
   must(untouchedOk === cleaned.length, `every field other than the moved ones is byte-identical: ${untouchedOk} of ${cleaned.length} estimates`)
   must(signedOk === signedCount, `signed estimates: signature, signing time, total, status, date, letter and scope identical on ${signedOk} of ${signedCount}`)
   must(notesOk === notesWant && narrationOk === narrationWant && markupOk === markupWant,

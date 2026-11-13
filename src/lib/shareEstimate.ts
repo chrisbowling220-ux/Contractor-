@@ -92,7 +92,7 @@ export async function sendEstimateByEmail(args: {
   subject?: string
 }): Promise<void> {
   const { estimate, ...rest } = args
-  const ai = estimate.aiQuote ? customerSafeQuote(estimate.aiQuote) : undefined
+  const ai = estimate.aiQuote ? customerSafeQuote(estimate.aiQuote, estimate) : undefined
   const link = shareLinkFor(estimate.id)
   const scopeWithLink = (estimate.scopeOfWork || '') + `\n\nView this estimate online: ${link}`
   const res = await sendCallable({

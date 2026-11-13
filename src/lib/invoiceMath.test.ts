@@ -105,9 +105,16 @@ describe('invoice line items', () => {
     expect(lines).toEqual([{ name: 'Deck repair (per estimate)', quantity: 1, unitPrice: 1800, lineTotal: 1800 }])
   })
   it('shows a difference from the agreed total as its own line rather than dropping it', () => {
-    const lines = estimateInvoiceLines(estimate({ total: 2600 }), 'Flooring')
+    const lines = estimateInvoiceLines(estimate({ total: 2600, status: 'pending' }), 'Flooring')
     expect(sumLines(lines)).toBe(2600)
     expect(lines.at(-1)).toMatchObject({ name: 'Adjustment to agreed estimate total', lineTotal: 88.17 })
+  })
+  it('bills a signed estimate at the line prices it was signed with; the agreed total still holds', () => {
+    // Signed under the old rounding: materials printed as 1429.04, not 1426.83.
+    const lines = estimateInvoiceLines(estimate({ total: 2600 }), 'Flooring')
+    expect(lines.slice(0, 3).map(l => [l.unitPrice, l.lineTotal])).toEqual([[4.66, 1178.98], [0.67, 169.51], [26.85, 80.55]])
+    expect(sumLines(lines)).toBe(2600)
+    expect(lines.at(-1)).toMatchObject({ name: 'Adjustment to agreed estimate total', lineTotal: 85.96 })
   })
   it('adds approved change orders only, credits included', () => {
     const e = estimate()

@@ -22,7 +22,7 @@
 // migration script, and by the tests.
 import type { AIQuote } from '../data/types'
 // Explicit extension: the migration script loads this file directly in Node.
-import { toCustomerView } from './customerView.ts'
+import { customerViewFor } from './customerView.ts'
 
 export const ESTIMATE_PRIVATE_COLLECTION = 'estimatePrivate'
 
@@ -63,10 +63,12 @@ const text = (v: unknown): string => (typeof v === 'string' ? v : '')
 const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : Number(v) || 0)
 
 // The quote as the customer sees it, with the private sections emptied.
-// toCustomerView folds any markup into the prices and leaves the total alone;
-// on a quote that is already customer-safe it changes nothing.
-export function customerSafeQuote(q: AIQuote): AIQuote {
-  const view = toCustomerView(q)
+// The customer view folds any markup into the prices and leaves the total
+// alone; on a quote that is already customer-safe it changes nothing. Pass
+// the estimate's signature state: a signed estimate keeps the exact figures
+// it was printed and signed with (customerView.ts, toLegacyCustomerView).
+export function customerSafeQuote(q: AIQuote, signed: { status?: unknown; signedAtMs?: unknown; customerResponse?: unknown } = {}): AIQuote {
+  const view = customerViewFor({ ...signed, aiQuote: q })
   return {
     ...view,
     profit_markup: { markup_percent: 0, markup_dollars: 0, rationale: '' },
@@ -117,7 +119,7 @@ export function splitEstimateForSharing(e: Record<string, unknown>): SharingSpli
       privateFields.aiCostSubtotal = num(ai.price_breakdown.raw_cost)
     }
 
-    const safe = customerSafeQuote(ai)
+    const safe = customerSafeQuote(ai, e)
     if (!isCustomerSafeQuote(ai)) publicPatch.aiQuote = safe
 
     // The headline subtotals must match the customer view too: a cost-price
@@ -133,6 +135,7 @@ export function splitEstimateForSharing(e: Record<string, unknown>): SharingSpli
     // Same for the hourly rate kept beside them (a labor-only quote folds its
     // markup into the rate): the cost rate next to the labor total gives the
     // markup away.
+    // (A signed estimate keeps the rate it was signed with, so nothing moves.)
     const rateFolded = num(ai.labor.hourly_rate) !== num(safe.labor.hourly_rate)
     if (rateFolded && 'hourlyRate' in e && num(e.hourlyRate) === num(ai.labor.hourly_rate)) {
       publicPatch.hourlyRate = num(safe.labor.hourly_rate)
@@ -164,7 +167,7 @@ export function customerVisibleContent(e: Record<string, unknown>): unknown {
   const ai = e.aiQuote
   let quote: unknown = null
   if (readableQuote(ai)) {
-    const v = toCustomerView(ai)
+    const v = customerViewFor({ ...e, aiQuote: ai })
     quote = { ...v, contractor_notes: '', profit_markup: null }
   }
   const pick = (k: string) => (k in e ? e[k] : null)

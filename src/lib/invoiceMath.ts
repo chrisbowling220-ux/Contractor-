@@ -3,7 +3,7 @@
 // (invoiceMath.test.ts) and the same functions drive the editor, the project
 // screen, the dashboard and the public invoice page.
 import type { ChangeOrder, Estimate, Invoice, InvoiceLine, InvoicePayment, PaymentMethod } from '../data/types'
-import { toCustomerView } from './customerView'
+import { customerViewFor } from './customerView'
 import { quoteFromManualEstimate } from './manualQuote'
 import { bindingVersions } from './estimateRevision'
 
@@ -17,13 +17,14 @@ export const money = (n: number): number => +(Number(n) || 0).toFixed(2)
 // The stored quote keeps the contractor's markup as a separate, internal figure
 // (materials + labor + rentals = raw cost; markup on top). Billing the raw
 // lines as they sit would leave the markup off the invoice, so the quote goes
-// through toCustomerView first, which folds the markup into the prices exactly
-// the way the estimate page showed it.
+// through the customer view first (customerViewFor), which folds the markup
+// into the prices exactly the way the estimate was shown and signed.
 export function estimateInvoiceLines(e: Estimate, jobTypeName: string): InvoiceLine[] {
   const total = money(e.total)
   const lines: InvoiceLine[] = []
   // Hand-built estimates carry their items on the estimate itself.
-  const ai = e.aiQuote ? toCustomerView(e.aiQuote) : (e.materials?.length ? quoteFromManualEstimate(e) : null)
+  // A signed estimate is billed at the line prices it was signed with.
+  const ai = e.aiQuote ? customerViewFor({ ...e, aiQuote: e.aiQuote }) : (e.materials?.length ? quoteFromManualEstimate(e) : null)
 
   if (ai && ai.material_list.length > 0) {
     for (const m of ai.material_list) {

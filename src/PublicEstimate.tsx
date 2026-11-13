@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { doc, getDoc, updateDoc } from 'firebase/firestore'
 import { db } from './firebase'
 import { fetchPublicProfile } from './lib/publishCopies'
-import { toCustomerView } from './lib/customerView'
+import { customerViewFor } from './lib/customerView'
 import { BrandHeader, BrandFooter } from './lib/BrandHeader'
 import { FUNCTIONS_BASE_URL } from './lib/config'
 import type { Estimate } from './data/types'
@@ -10,7 +10,7 @@ import type { Estimate } from './data/types'
 const DEPOSIT_INVOICE_URL = `${FUNCTIONS_BASE_URL}/createDepositInvoiceForApproval`
 
 // Renders a single estimate at /q/<id> for the customer to view without signing in.
-// Markup is hidden via toCustomerView so the customer sees baked-in material prices.
+// Markup is hidden via the customer view (customerViewFor) so the customer sees baked-in prices.
 // Customer can accept or decline; the response is written back to the same doc.
 export default function PublicEstimate({ estimateId }: { estimateId: string }) {
   const [estimate, setEstimate] = useState<Estimate | null>(null)
@@ -204,7 +204,7 @@ export default function PublicEstimate({ estimateId }: { estimateId: string }) {
     )
   }
 
-  const ai = estimate.aiQuote ? toCustomerView(estimate.aiQuote) : undefined
+  const ai = estimate.aiQuote ? customerViewFor({ ...estimate, aiQuote: estimate.aiQuote }) : undefined
   const response = estimate.customerResponse
   const responded = !!response
 

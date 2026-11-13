@@ -27,14 +27,16 @@
 // Against the emulator, set FIRESTORE_EMULATOR_HOST (e.g. 127.0.0.1:8380).
 // Against a real project it signs in with the Firebase CLI's login.
 import { createHash } from 'node:crypto'
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from 'node:fs'
+import { mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { connect, listRaw, toFields } from './lib/firestore-rest.mjs'
+import { readBackupFile, writeBackupFile } from './lib/backup-crypto.mjs'
 import {
   ESTIMATE_PRIVATE_COLLECTION, customerVisibleContent, splitEstimateForSharing,
 } from '../src/lib/estimatePrivacy.ts'
 import { sameContent } from '../src/lib/publicCopies.ts'
+import { customerViewFor, hasBeenSigned, toCustomerView, toLegacyCustomerView } from '../src/lib/customerView.ts'
 
 const args = process.argv.slice(2)
 const flag = (name) => args.includes(name)
@@ -43,7 +45,7 @@ const project = value('--project')
 const write = flag('--write')
 const restoreFrom = value('--restore')
 const backupDir = value('--backup-dir') || join(homedir(), 'buildpro-backups')
-if (!project) { console.error('Usage: --project <id> [--write] [--backup-dir <dir>] | --restore <backup.json> [--write]'); process.exit(2) }
+if (!project) { console.error('Usage: --project <id> [--write] [--backup-dir <dir>] | --restore <backup.json[.gpg]> [--write]'); process.exit(2) }
 
 const conn = connect(project)
 const { request, docsPath, emulator } = conn
@@ -55,17 +57,14 @@ const tag = (id) => createHash('sha256').update(id).digest('hex').slice(0, 10)
 function writeBackup(entries) {
   mkdirSync(backupDir, { recursive: true, mode: 0o700 })
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-  const file = join(backupDir, `estimate-privacy-${project}-${stamp}.json`)
-  const fd = openSync(file, 'wx', 0o600)
-  writeSync(fd, JSON.stringify({ project, takenAt: new Date().toISOString(), entries }, null, 1))
-  fsyncSync(fd)
-  closeSync(fd)
-  return file
+  // Encrypted for a live project (scripts/lib/backup-crypto.mjs): .json.gpg.
+  return writeBackupFile(join(backupDir, `estimate-privacy-${project}-${stamp}.json`),
+    JSON.stringify({ project, takenAt: new Date().toISOString(), entries }, null, 1), { requireEncryption: !emulator })
 }
 
 // ── Restore ─────────────────────────────────────────────────────────────────
 if (restoreFrom) {
-  const backup = JSON.parse(readFileSync(restoreFrom, 'utf8'))
+  const backup = JSON.parse(readBackupFile(restoreFrom))
   if (backup.project !== project) { console.error(`Backup is for project ${backup.project}, not ${project}.`); process.exit(2) }
   console.log(`${where}: RESTORE from backup taken ${backup.takenAt}: ${write ? 'WRITING' : 'dry run, nothing written'}`)
   console.log(`Estimates in backup: ${backup.entries.length}`)
@@ -99,8 +98,19 @@ const counts = {
   signed: 0, pending: 0, declined: 0, otherStatus: 0,
   notes: 0, markup: 0, narration: 0, subtotals: 0, privateCreate: 0, privateMerge: 0,
   failed: 0,
+  // What happens to the printed prices (print-out, estimate email, invoice).
+  signedKept: 0, signedOldRounding: 0, signedLaborRateKept: 0, unsignedLinesChanged: 0, rateFolded: 0,
 }
 const failures = []
+
+// The figures a print-out, the estimate email and an invoice draw.
+const drawn = (q) => JSON.stringify([
+  (q.material_list || []).map(m => [m.name, m.quantity_with_waste, m.unit, m.unit_price, m.line_total]),
+  [q.labor?.estimated_hours, q.labor?.hourly_rate, q.labor?.labor_total],
+  [q.price_breakdown?.materials_subtotal, q.price_breakdown?.labor_subtotal, q.price_breakdown?.rentals_subtotal],
+  q.final_customer_quote,
+])
+const readable = (q) => !!q && Array.isArray(q.material_list) && !!q.labor && !!q.price_breakdown
 const plan = []
 
 for (const est of estimates) {
@@ -115,6 +125,29 @@ for (const est of estimates) {
   }
   if (!sameContent(customerVisibleContent(e), customerVisibleContent({ ...e, ...split.publicPatch }))) {
     counts.failed++; failures.push(`estimate #${tag(est.id)}: cleaning would change what the customer sees, left as is`); continue
+  }
+  // A signed estimate must print exactly as the live app printed it when it
+  // was signed (src/lib/customerView.ts: toLegacyCustomerView), before and
+  // after cleaning, to the cent.
+  const signedRecord = hasBeenSigned(e)
+  let printChange = null
+  if (readable(e.aiQuote)) {
+    const livePrint = drawn(toLegacyCustomerView(e.aiQuote))
+    const after = { ...e, ...split.publicPatch }
+    const cleanedPrint = drawn(customerViewFor({ ...after, aiQuote: after.aiQuote }))
+    if (signedRecord && cleanedPrint !== livePrint) {
+      counts.failed++; failures.push(`estimate #${tag(est.id)}: cleaning would change a signed estimate's printed prices, left as is`); continue
+    }
+    if (signedRecord) {
+      // Counted apart when the new rounding would have printed it differently.
+      printChange = livePrint !== drawn(toCustomerView(e.aiQuote)) ? 'signedOldRounding' : 'signedKept'
+      const pm = e.aiQuote.profit_markup || {}
+      const laborOnly = !(e.aiQuote.material_list.length > 0 && Number(e.aiQuote.price_breakdown.materials_subtotal) > 0)
+      if (laborOnly && Number(pm.markup_dollars) > 0 && Number(e.aiQuote.labor.estimated_hours) > 0) printChange += '+laborRateKept'
+    } else if (cleanedPrint !== livePrint) {
+      printChange = 'unsignedLinesChanged'
+    }
+    if ('hourlyRate' in split.publicPatch || (split.publicPatch.aiQuote && split.publicPatch.aiQuote.labor.hourly_rate !== e.aiQuote.labor.hourly_rate)) printChange = `${printChange || ''}+rateFolded`
   }
   counts.toClean++
   const status = e.status === 'approved' ? 'signed' : e.status === 'pending' ? 'pending' : e.status === 'declined' ? 'declined' : 'otherStatus'
@@ -135,6 +168,12 @@ for (const est of estimates) {
     continue
   }
   counts[existing ? 'privateMerge' : 'privateCreate']++
+  const pc = printChange || ''
+  if (pc.startsWith('signed')) counts.signedKept++
+  if (pc.startsWith('signedOldRounding')) counts.signedOldRounding++
+  if (pc.startsWith('unsignedLinesChanged')) counts.unsignedLinesChanged++
+  if (pc.includes('+laborRateKept')) counts.signedLaborRateKept++
+  if (pc.includes('+rateFolded')) counts.rateFolded++
   plan.push({ est, patch: split.publicPatch, privateData, privateExists: !!existing })
 }
 
@@ -143,6 +182,8 @@ console.log(`Read: ${counts.read} estimates (${counts.withAiQuote} with an AI qu
 console.log(`Already customer-safe: ${counts.alreadyClean}.`)
 console.log(`To clean: ${counts.toClean} (signed ${counts.signed}, pending ${counts.pending}, declined ${counts.declined}, other ${counts.otherStatus}).`)
 console.log(`  carrying private notes: ${counts.notes}; markup figures: ${counts.markup}; spoken walkthrough: ${counts.narration}; cost-price subtotals: ${counts.subtotals}.`)
+console.log(`  printed prices: signed, kept exactly as signed: ${counts.signedKept} (of which with the old rounding: ${counts.signedOldRounding}); unsigned whose print-out lines change (now adding up to the total): ${counts.unsignedLinesChanged}; labor-only hourly rate folded in: ${counts.rateFolded}.`)
+if (counts.signedLaborRateKept) console.log(`  NOTE: ${counts.signedLaborRateKept} signed labor-only estimate(s) keep the hourly rate they were signed with; hours x rate still shows the markup. Owner decision; not changed here.`)
 console.log(`Private records: ${counts.privateCreate} to create, ${counts.privateMerge} to add to.`)
 console.log(`Failures (left exactly as they are): ${counts.failed}.`)
 for (const f of failures) console.log(`  ${f}`)

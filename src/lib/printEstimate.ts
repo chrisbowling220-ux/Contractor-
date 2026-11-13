@@ -39,7 +39,8 @@ export function openEstimatePrintWindow(e: Estimate, profileOrName?: string | Pr
     return
   }
   // Customer-facing view: markup distributed into material unit prices.
-  const ai = e.aiQuote ? customerSafeQuote(e.aiQuote) : undefined
+  // A signed estimate prints exactly as it was signed (customerView.ts).
+  const ai = e.aiQuote ? customerSafeQuote(e.aiQuote, e) : undefined
 
   w.document.write(`<!doctype html><html><head><meta charset="utf-8"/><title>Estimate — ${esc(e.customerName)}</title>
     <style>

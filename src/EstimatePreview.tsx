@@ -5,7 +5,7 @@ import { db } from './firebase'
 import { isSignedEstimate, revisionFields, revisionNumber } from './lib/estimateRevision'
 import { splitEstimateForSharing } from './lib/estimatePrivacy'
 import { estimatePrivateData, estimatePrivateRef, loadEstimatePrivate } from './lib/estimatePrivateStore'
-import { toCustomerView } from './lib/customerView'
+import { customerViewFor } from './lib/customerView'
 import { quoteFromManualEstimate } from './lib/manualQuote'
 import { copyShareLink, shareLinkFor, smsHref, mailtoHref, nativeShare, isPhone } from './lib/shareEstimate'
 import { rememberMaterialPrices } from './lib/learnedPrices'
@@ -23,6 +23,11 @@ interface Props {
   // Business name for the materials-list letterhead. Optional.
   businessName?: string
 }
+
+// The figures that make up an estimate's price: a change to any of them
+// reprices it; anything else (names, wording) does not.
+const pricingKey = (ms: AIMaterialLine[], rentals: string) =>
+  JSON.stringify([ms.map(m => [Number(m.quantity_with_waste) || 0, Number(m.unit_price) || 0, Number(m.line_total) || 0]), Number(rentals) || 0])
 
 // Editable customer-facing preview of an estimate. Edits are saved back to
 // Firestore on Save; the public share view, print, SMS link, and Copy link all
@@ -46,7 +51,9 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, b
   // Always work from a customer-view shaped quote so markup is baked in.
   // A hand-built estimate has no itemised quote; build one from its own fields
   // so its materials and labor show up here (and survive a save).
-  const initialAi: AIQuote = estimate.aiQuote ? toCustomerView(estimate.aiQuote) : quoteFromManualEstimate(estimate)
+  // A signed estimate opens with the figures it was signed with, so a revision
+  // starts from exactly what the customer agreed to.
+  const initialAi: AIQuote = estimate.aiQuote ? customerViewFor({ ...estimate, aiQuote: estimate.aiQuote }) : quoteFromManualEstimate(estimate)
 
   const [customerName, setCustomerName] = useState(estimate.customerName || '')
   const [customerSummary, setCustomerSummary] = useState(initialAi?.customer_summary || '')
@@ -99,15 +106,37 @@ export default function EstimatePreview({ estimate, onClose, onSaved, onPrint, b
     return () => { cancelled = true }
   }, [estimate.id])
 
+  // The labor price as quoted, with the hours and rate it opened with. Labor is
+  // only recomputed as hours × rate once one of those two is changed: a rate
+  // rounded to the cent (a labor-only quote folds its markup into the rate)
+  // times the hours can miss the quoted labor price by a few cents, and
+  // editing the summary must never move the price.
+  const [quotedLabor] = useState(() => ({ rate: hourlyRate, hours: estimatedHours, total: initialAi?.labor.labor_total }))
+  // Likewise the total: until a price, quantity, the labor or the rentals
+  // change, it stays the quoted (or signed) total. An estimate signed under
+  // the old rounding has lines that add up to a few cents more or less than
+  // what was signed; a revision that only rewords the scope keeps both the
+  // signed lines and the signed total, exactly as the signed print-out shows.
+  const [quotedTotal] = useState(() => ({ key: pricingKey(materials, rentalsTotal), total: initialAi?.final_customer_quote }))
+
   // Live recalculation. Markup is baked into materials already (customer view),
   // so total = labor + materials + rentals.
   const computed = useMemo(() => {
     const materialsSubtotal = +materials.reduce((s, m) => s + (Number(m.line_total) || 0), 0).toFixed(2)
-    const laborSubtotal = +((Number(hourlyRate) || 0) * (Number(estimatedHours) || 0)).toFixed(2)
+    const q = quotedLabor
+    const laborUntouched = hourlyRate === q.rate && estimatedHours === q.hours && typeof q.total === 'number' && Number.isFinite(q.total)
+    const laborSubtotal = laborUntouched
+      ? +(q.total as number).toFixed(2)
+      : +((Number(hourlyRate) || 0) * (Number(estimatedHours) || 0)).toFixed(2)
     const rentals = Number(rentalsTotal) || 0
-    const total = +(materialsSubtotal + laborSubtotal + rentals).toFixed(2)
+    const qt = quotedTotal
+    const pricingUntouched = laborUntouched && pricingKey(materials, rentalsTotal) === qt.key
+      && typeof qt.total === 'number' && Number.isFinite(qt.total) && qt.total > 0
+    const total = pricingUntouched
+      ? +(qt.total as number).toFixed(2)
+      : +(materialsSubtotal + laborSubtotal + rentals).toFixed(2)
     return { materialsSubtotal, laborSubtotal, rentals, total }
-  }, [materials, hourlyRate, estimatedHours, rentalsTotal])
+  }, [materials, hourlyRate, estimatedHours, rentalsTotal, quotedLabor, quotedTotal])
 
   const updateMaterial = (i: number, patch: Partial<AIMaterialLine>) => {
     setMaterials(prev => prev.map((m, idx) => {

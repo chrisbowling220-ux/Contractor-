@@ -103,6 +103,24 @@ Verified against the live project on 2026-11-12 with
   - For information: the G5 switch changes wording on 10 invoice pages
     ("Receipt — Invoice", "Paid in full"; amounts identical).
 
+## At every gate: the check, and what to do if it fails
+
+Each gate starts only after the previous gate's check has passed, and the
+monitor (second terminal) shows nothing unexpected. "Stop" means change
+nothing more and report; "roll back" uses the table under Rollback, in the
+order its pairing rules give.
+
+| Gate | Pass when | If not |
+|---|---|---|
+| G1 | tax timer inactive; live config identical to the table above; backup written and `--verify` reads it; all tests pass; dry runs show the numbers in section 0 | Stop. Nothing in production has changed. |
+| G2 | `--ff-only` succeeds; tests and build pass on `master`; push accepted | Stop. If pushed already: nothing is deployed by a push; leave it, or revert later. |
+| G3 | deploy succeeds; every estimate link OPEN; contractor can sign in and open Estimates; refusals per 10 min near baseline | Roll back step 2.1 (stage-1 rules). The app live today is unchanged. |
+| G4 | storage + functions deploy succeed; 28 ACTIVE, last updated now; no new errors in the logs | Roll back the part that failed (functions or storage, from the checkpoint tag) and stop; the transition rules can stay (the app live today runs on them). |
+| G5 | site serves this `dist/` build; sign-in, Estimates, Customers, Schedule open; a share link opens with the business name | Roll back 2.3 (hosting clone) and stop. The app live today runs on the transition rules and the new functions (same inputs); undo those too only if the fault is in them. |
+| G6 | fresh backup + `--compare` shows only expected changes; dry-run numbers as in section 0; 2.4 second dry run 0/0; 2.5 "Cleaned 17; not cleaned 0", second dry run "To clean: 0, Failures: 0"; `verify-public-access` shows no estimate leaking | Numbers differ before writing: stop. 2.4 failure: stop (additive, nothing to undo). 2.5 "not cleaned": re-run once. Anything else: restore 2.5 from its printed backup and stop before G7 (new app + transition rules is a stable state; estimates leak as today until fixed). |
+| G7 | "Matches the final stage."; share pages still open with the business name; refusals settle near baseline | Roll back step 3 (transition rules) at once; everything else can stay. |
+| G8 | tax timer active with the next 1st/15th shown; tag created | Not a production risk: fix the timer by hand. |
+
 ## 0. Pre-flight (no production changes)
 
 Best done **before Sunday 15 Nov, 06:10 Eastern** (the next scheduled tax
@@ -218,14 +236,11 @@ payment, deposit-invoice and email fixes; the estimate email no longer prints a
 "Markup (0%)" line. Without `FUNCTIONS_DISCOVERY_TIMEOUT` the CLI gives the code
 10 s to load (98 s seen on a busy machine).
 
-The functions deploy ends by asking **"How many days do you want to keep
-container images before they're deleted?"** (no clean-up rule is set up for
-the function images yet). Answering (default 1) sets that rule on the
-project's image store, which keeps a small monthly storage bill from building
-up; a rollback rebuilds from source, so old images are not needed. This
-question comes after the functions are already deployed. (Run without a
-terminal, the deploy succeeds and then reports that it could not set the rule;
-`--force` sets the default instead.)
+No clean-up question is asked at the end: the function image store already
+has Firebase's own clean-up rule (`firebase-functions-cleanup`, deletes images
+older than 30 days, set 2026-10-18; checked live 2026-11-13), and the CLI only
+asks when that rule is missing. Nothing to decide; a rollback rebuilds from
+source, so old images are not needed.
 
 Check: `npx firebase functions:log --project contractors-office-96731` shows no new errors.
 Monitor: `Storage rules: this release`; `Functions: 28 deployed, all ACTIVE`,
@@ -352,8 +367,8 @@ step 3 first, then hosting.
   brought up to date and retested. A run uses Claude Code on
   the owner's account, exactly as a scheduled run would.
 - **Costs.** Functions deploy: Cloud Build minutes and image storage, normally
-  inside the free allowance (at most a few cents); the image clean-up rule at
-  G4 keeps storage near zero afterwards. Rules, Storage, Hosting deploys, the
+  inside the free allowance (at most a few cents); the existing 30-day image
+  clean-up rule keeps storage small. Rules, Storage, Hosting deploys, the
   ~45 database writes of G6 and all reads, backups and monitoring: free at this
   size. No other paid service is touched.
 - **Window.** From 2.1 to step 3 the three old reads stay open (as today);
@@ -371,7 +386,11 @@ not itself encrypted, so a copied, synced or attached backup file is otherwise
 everything: customers' contact details, signatures, private notes, markup.
 
 - **Store the passphrase off this machine** (a password manager): without it
-  the backups cannot be read. See it with `cat ~/.config/buildpro-plus/backup-passphrase`.
+  the backups cannot be read. Open it in your own terminal or a text editor
+  (`cat ~/.config/buildpro-plus/backup-passphrase`), not through an assistant
+  session, so it never lands in a chat transcript. It is 43 letters, digits,
+  `-` and `_`; decrypting with it typed in (no file, empty GnuPG home) was
+  checked on both backups 2026-11-13.
 - Decrypt without this repo: `gpg --batch --pinentry-mode loopback --passphrase-file ~/.config/buildpro-plus/backup-passphrase --decrypt <file>.json.gpg > <file>.json`
 - Check one: `node scripts/backup-key.mjs --verify <file>.json.gpg` (hash and document count only).
 - The 2026-11-12 backup was encrypted (identical content, sha256 07380913…) and

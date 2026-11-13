@@ -12,6 +12,7 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { appendFileSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
+import { readBackupFile } from '../lib/backup-crypto.mjs'
 import { join, resolve } from 'node:path'
 import { expect, test } from '@playwright/test'
 import type { Browser, Page } from '@playwright/test'
@@ -103,7 +104,8 @@ const getAs = async (uid: string | null, path: string) =>
   (await fetch(`${docsBase}/${path}`, { headers: uid ? { Authorization: `Bearer ${tokenFor(uid)}` } : {} })).status
 
 // ── The real data ───────────────────────────────────────────────────────────
-const backup = JSON.parse(readFileSync(BACKUP, 'utf8')) as { project: string; documents: RawDoc[] }
+// The production backup is encrypted at rest (scripts/lib/backup-crypto.mjs).
+const backup = JSON.parse(readBackupFile(BACKUP)) as { project: string; documents: RawDoc[] }
 const ofColl = (c: string) => backup.documents.filter(d => top(d).length === 2 && top(d)[0] === c)
 const idOf = (d: RawDoc) => top(d)[1]
 const originalEstimates = new Map(ofColl('estimates').map(d => [idOf(d), d]))
@@ -218,6 +220,60 @@ function compare(label: string, want: Map<string, string>, got: Map<string, stri
 }
 const notSettled = (m: Map<string, string>) => [...m.values()].filter(v => v.endsWith('[NOT SETTLED]')).length
 
+// ── The estimate's other paperwork: print-out, email, invoice ───────────────
+// The share page shows the total only; the print-out and the estimate email
+// show every line price, and an invoice bills them. Each app's OWN code
+// (served by its dev server) produces them from the estimates in the emulator
+// right now: the print-out's full HTML (minus its "Generated <now>" footer),
+// the prices the estimate email is sent with, and (new app) invoice lines.
+type Paper = { print: string; email: string; invoice: string }
+async function paperwork(browser: Browser, base: string, isNew: boolean): Promise<Map<string, Paper>> {
+  const ests = (await listEmu('estimates')).map(d => ({ id: rel(d.name).split('/')[1], ...Object.fromEntries(Object.entries(d.fields).map(([k, v]) => [k, plain(v)])) }))
+  const ctx = await browser.newContext()
+  await ctx.route(url => url.hostname !== '127.0.0.1' && url.hostname !== 'localhost', route => route.abort())
+  const p = await ctx.newPage()
+  await p.goto(`${base}/`, { waitUntil: 'domcontentloaded', timeout: 300_000 })
+  // Plain browser JavaScript, passed as text so nothing rewrites the imports.
+  const out = await p.evaluate(`(async () => {
+    const ests = ${JSON.stringify(ests)}
+    const isNew = ${isNew}
+    const drawn = q => q ? JSON.stringify([
+      (q.material_list || []).map(m => [m.name, m.quantity_with_waste, m.unit, m.unit_price, m.line_total]),
+      [q.labor && q.labor.estimated_hours, q.labor && q.labor.hourly_rate, q.labor && q.labor.labor_total],
+      [q.price_breakdown && q.price_breakdown.materials_subtotal, q.price_breakdown && q.price_breakdown.labor_subtotal, q.price_breakdown && q.price_breakdown.rentals_subtotal],
+      q.final_customer_quote]) : ''
+    const pr = await import('/src/lib/printEstimate.ts')
+    const priv = isNew ? await import('/src/lib/estimatePrivacy.ts') : null
+    const cv = isNew ? null : await import('/src/lib/customerView.ts')
+    const inv = isNew ? await import('/src/lib/invoiceMath.ts') : null
+    let html = ''
+    window.open = () => ({ document: { write: s => { html += s }, close: () => {} } })
+    const res = {}
+    for (const e of ests) {
+      html = ''
+      pr.openEstimatePrintWindow(e, { businessName: 'Rehearsal Builders', businessPhone: '000', businessEmail: 'r@example.test' })
+      const q = e.aiQuote ? (isNew ? priv.customerSafeQuote(e.aiQuote, e) : cv.toCustomerView(e.aiQuote)) : null
+      res[e.id] = {
+        print: html.replace(/<div class="footer">[\\s\\S]*?<\\/div>/, ''),
+        email: drawn(q),
+        invoice: inv ? JSON.stringify(inv.estimateInvoiceLines(e, e.jobTypeName || 'Job')) : '',
+      }
+    }
+    return res
+  })()`) as Record<string, Paper>
+  await ctx.close()
+  return new Map(Object.entries(out))
+}
+const signedIds = () => [...originalEstimates].filter(([, d]) => field(d, 'status') === 'approved').map(([id]) => id)
+// How many estimates' paperwork is the same in two readings; and, of the
+// signed ones, how many (they must all be).
+function samePaper(a: Map<string, Paper>, b: Map<string, Paper>, part: keyof Paper) {
+  const ids = [...a.keys()]
+  const same = ids.filter(id => b.has(id) && a.get(id)![part] === b.get(id)![part])
+  const signed = signedIds()
+  return { same: same.length, of: ids.length, signedSame: signed.filter(id => same.includes(id)).length, signedOf: signed.length, differ: ids.filter(id => !same.includes(id)) }
+}
+
 // ── The rehearsal ───────────────────────────────────────────────────────────
 test('coordinated release, rehearsed on a copy of production data', async ({ browser }) => {
   expect(BACKUP, 'REHEARSAL_BACKUP must point at a full backup (scripts/backup-firestore.mjs)').not.toBe('')
@@ -239,8 +295,8 @@ test('coordinated release, rehearsed on a copy of production data', async ({ bro
   const emuDir = join(OUT, 'buildpro-rehearsal-emulator-backup')
   const again = script('backup-firestore.mjs', ['--out', emuDir])
   must(again.code === 0, 'emulator copy backed up again')
-  const emuFile = readdirSync(emuDir).filter(f => f.endsWith('.json')).sort().pop()!
-  const emuDocs = new Map((JSON.parse(readFileSync(join(emuDir, emuFile), 'utf8')).documents as RawDoc[]).map(d => [rel(d.name), d]))
+  const emuFile = readdirSync(emuDir).filter(f => /\.json(\.gpg)?$/.test(f)).sort().pop()!
+  const emuDocs = new Map((JSON.parse(readBackupFile(join(emuDir, emuFile))).documents as RawDoc[]).map(d => [rel(d.name), d]))
   const mismatched = backup.documents.filter(d => !emuDocs.has(rel(d.name)) || canon(emuDocs.get(rel(d.name))!.fields) !== canon(d.fields)).length
   must(mismatched === 0 && emuDocs.size === backup.documents.length, `restored copy identical to production backup: ${backup.documents.length - mismatched} of ${backup.documents.length} documents (emulator holds ${emuDocs.size})`)
 
@@ -254,6 +310,7 @@ test('coordinated release, rehearsed on a copy of production data', async ({ bro
     A_old = await captureReference(browser, OLD_APP)
     must(notSettled(A_old) === 0, `today (app live today): all ${A_old.size} share pages load (${notSettled(A_old)} did not)`)
   }
+  const P_today = OLD ? await paperwork(browser, OLD_APP, false) : undefined
 
   // ── G3: transition rules (the app live today keeps running until G5) ──
   log('\n== G3 transition rules, before the data steps')
@@ -268,6 +325,19 @@ test('coordinated release, rehearsed on a copy of production data', async ({ bro
   const A_new = await captureReference(browser, NEW_APP)
   must(notSettled(A_new) === 0, `new app: all ${A_new.size} share pages load (${notSettled(A_new)} did not)`)
   if (OLD && A_old) compare('for information, what the G5 switch changes on customer pages: app live today vs new app', A_old, A_new, false)
+  const P_G5 = await paperwork(browser, NEW_APP, true)
+  {
+    const totalOf = (id: string) => Number(field(originalEstimates.get(id)!, 'total')) || 0
+    const sums = [...P_G5].filter(([id, x]) => Math.abs(JSON.parse(x.invoice).reduce((t: number, l: { lineTotal: number }) => t + l.lineTotal, 0) - totalOf(id)) < 0.005).length
+    must(sums === P_G5.size, `new app: invoice lines add up to the estimate total on ${sums} of ${P_G5.size} estimates`)
+  }
+  if (P_today) {
+    for (const part of ['print', 'email'] as const) {
+      const r = samePaper(P_today, P_G5, part)
+      must(r.signedSame === r.signedOf, `G5: signed estimates' ${part === 'print' ? 'print-out (full HTML)' : 'email prices'} identical in the app live today and the new app: ${r.signedSame} of ${r.signedOf}`)
+      log(`  • for information: ${part === 'print' ? 'print-outs' : 'email prices'} the G5 switch changes: ${r.of - r.same} of ${r.of} (all unsigned)${r.differ.length ? ': ' + r.differ.map(id => '#' + tag(id)).join(', ') : ''}`)
+    }
+  }
 
   // ── G6: customer-safe copies, then the estimate cleanup ──
   log('\n== G6 data steps (2.4 copies, 2.5 estimate cleanup)')
@@ -316,6 +386,20 @@ test('coordinated release, rehearsed on a copy of production data', async ({ bro
   must(t2.code === 0, 'access matches the transition stage (no estimate hands over private parts)')
   failures += await check('after G6: new app vs right after G5', A_new, browser, NEW_APP, true)
   if (OLD && A_old) failures += await check('rollback check: app live today on cleaned data (hosting rolled back after G6) vs today', A_old, browser, OLD_APP, true)
+  const P_G6 = await paperwork(browser, NEW_APP, true)
+  for (const part of ['print', 'email', 'invoice'] as const) {
+    const r = samePaper(P_G5, P_G6, part)
+    must(r.same === r.of, `after G6: new app ${part === 'print' ? 'print-outs' : part === 'email' ? 'email prices' : 'invoice lines'} unchanged by the cleanup: ${r.same} of ${r.of}`)
+  }
+  if (P_today) {
+    const P_oldG6 = await paperwork(browser, OLD_APP, false)
+    for (const part of ['print', 'email'] as const) {
+      const r = samePaper(P_today, P_oldG6, part)
+      must(r.signedSame === r.signedOf, `rollback check: app live today on cleaned data prints signed estimates exactly as today (${part}): ${r.signedSame} of ${r.signedOf}`)
+      const n = samePaper(P_G6, P_oldG6, part)
+      must(n.same === n.of, `rollback check: app live today and new app produce the same ${part === 'print' ? 'print-outs' : 'email prices'} from cleaned data: ${n.same} of ${n.of}`)
+    }
+  }
 
   // ── G7: final rules ──
   log('\n== G7 final rules')
@@ -327,7 +411,7 @@ test('coordinated release, rehearsed on a copy of production data', async ({ bro
 
   // Signed in as one real contractor, reaching for another's records.
   const owners = new Map<string, string>()   // path -> owner uid
-  for (const c of ['customers', 'customerPhotos', 'projects']) for (const d of ofColl(c)) { const u = field(d, 'createdBy'); if (typeof u === 'string') owners.set(`${c}/${idOf(d)}`, u) }
+  for (const c of ['customers', 'customerPhotos', 'projects', 'propertyAdvisorSessions']) for (const d of ofColl(c)) { const u = field(d, 'createdBy'); if (typeof u === 'string') owners.set(`${c}/${idOf(d)}`, u) }
   for (const d of ofColl('users')) owners.set(`users/${idOf(d)}`, idOf(d))
   for (const [id, p] of privates) { const u = field(p, 'createdBy'); if (typeof u === 'string') owners.set(`estimatePrivate/${id}`, u) }
   const uids = [...new Set(owners.values())]
@@ -339,7 +423,7 @@ test('coordinated release, rehearsed on a copy of production data', async ({ bro
     }
   }
   must(ownOk === ownTried && ownTried > 0, `each contractor still opens their own records (control): ${ownOk} of ${ownTried}`)
-  must(allowed === 0 && tried > 0, `another signed-in contractor is refused: ${tried - allowed} of ${tried} attempts on customers, photos, projects, billing profiles and estimate notes`)
+  must(allowed === 0 && tried > 0, `another signed-in contractor is refused: ${tried - allowed} of ${tried} attempts on customers, photos, projects, billing profiles, estimate notes and property-advisor sessions`)
   let strangerAllowed = 0
   for (const path of owners.keys()) if ((await getAs(null, path)) !== 403) strangerAllowed++
   must(strangerAllowed === 0, `signed-out visitor refused on all ${owners.size} of those records`)
@@ -356,6 +440,15 @@ test('coordinated release, rehearsed on a copy of production data', async ({ bro
   }
   must(exact === originalEstimates.size, `restored estimates identical to production, every field: ${exact} of ${originalEstimates.size} (signed: ${signedExact} of ${signedCount})`)
   failures += await check('after restore: new app vs right after G5', A_new, browser, NEW_APP, true)
+  {
+    const P_R = await paperwork(browser, NEW_APP, true)
+    const r = ['print', 'email', 'invoice'].map(part => samePaper(P_G5, P_R, part as keyof Paper))
+    must(r.every(x => x.same === x.of), `after restore: new app print-outs, email prices and invoice lines as before the cleanup: ${r.map(x => `${x.same}/${x.of}`).join(', ')}`)
+    if (P_today) {
+      const o = samePaper(P_today, await paperwork(browser, OLD_APP, false), 'print')
+      must(o.same === o.of, `after restore: app live today prints every estimate exactly as today: ${o.same} of ${o.of}`)
+    }
+  }
   const r1 = script('verify-public-access.mjs', []); showScript('signed-out access after restore (leaks back, as expected)', r1)
 
   const again2 = script('migrate-estimate-privacy.mjs', ['--write', '--backup-dir', join(OUT, 'buildpro-rehearsal-migrate-backup-2')]); showScript('2.5 again after restore', again2)

@@ -18,10 +18,11 @@
 // local emulator project named demo-* (used by the release rehearsal).
 // Against the emulator, set FIRESTORE_EMULATOR_HOST.
 import { createHash } from 'node:crypto'
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from 'node:fs'
+import { mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { connect } from './lib/firestore-rest.mjs'
+import { readBackupFile, writeBackupFile } from './lib/backup-crypto.mjs'
 
 const args = process.argv.slice(2)
 const flag = (name) => args.includes(name)
@@ -82,7 +83,7 @@ const countByGroup = (docs) => {
 
 // ── Restore ─────────────────────────────────────────────────────────────────
 if (restoreFrom) {
-  const backup = JSON.parse(readFileSync(restoreFrom, 'utf8'))
+  const backup = JSON.parse(readBackupFile(restoreFrom))
   const crossProject = backup.project !== project
   if (crossProject && !(emulator && project.startsWith('demo-'))) {
     console.error(`Backup is for project ${backup.project}; it restores only there (or into a demo-* emulator project).`)
@@ -120,16 +121,20 @@ const live = await readAll(docsPath, [])
 
 // ── Compare ─────────────────────────────────────────────────────────────────
 if (compareWith) {
-  const backup = JSON.parse(readFileSync(compareWith, 'utf8'))
+  const backup = JSON.parse(readBackupFile(compareWith))
   if (backup.project !== project) { console.error(`Backup is for project ${backup.project}, not ${project}.`); process.exit(2) }
   const before = new Map(backup.documents.map(d => [relative(d.name), d]))
   const now = new Map(live.map(d => [relative(d.name), d]))
+  // Field order in the database's answers is not stable; compare content.
+  const canon = (v) => Array.isArray(v) ? `[${v.map(canon).join(',')}]`
+    : v && typeof v === 'object' ? `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}`
+      : JSON.stringify(v)
   const tally = new Map()
   const bump = (g, k) => { const t = tally.get(g) || { same: 0, changed: 0, added: 0, gone: 0 }; t[k]++; tally.set(g, t) }
   for (const [rel, d] of now) {
     const b = before.get(rel)
     if (!b) bump(groupOf(rel), 'added')
-    else bump(groupOf(rel), JSON.stringify(b.fields) === JSON.stringify(d.fields) ? 'same' : 'changed')
+    else bump(groupOf(rel), canon(b.fields) === canon(d.fields) ? 'same' : 'changed')
   }
   for (const rel of before.keys()) if (!now.has(rel)) bump(groupOf(rel), 'gone')
   console.log(`${where} compared with the backup taken ${backup.takenAt}:`)
@@ -142,16 +147,13 @@ if (compareWith) {
 // ── Back up ─────────────────────────────────────────────────────────────────
 mkdirSync(outDir, { recursive: true, mode: 0o700 })
 const takenAt = new Date().toISOString()
-const file = join(outDir, `firestore-${project}-${takenAt.replace(/[:.]/g, '-')}.json`)
 const body = JSON.stringify({ project, takenAt, documents: live })
-const fd = openSync(file, 'wx', 0o600)
-writeSync(fd, body)
-fsyncSync(fd)
-closeSync(fd)
+// Encrypted for a live project (scripts/lib/backup-crypto.mjs): the file is
+// written as .json.gpg and decrypted again before it counts as a backup.
+const file = writeBackupFile(join(outDir, `firestore-${project}-${takenAt.replace(/[:.]/g, '-')}.json`), body, { requireEncryption: !emulator })
 
-// Read it back and check it parses to the same documents before calling it a backup.
-const check = JSON.parse(readFileSync(file, 'utf8'))
-if (check.documents.length !== live.length) { console.error('Backup file did not read back intact.'); process.exit(1) }
+// Read it back and check it is the same content before calling it a backup.
+if (readBackupFile(file) !== body) { console.error('Backup file did not read back intact.'); process.exit(1) }
 
 console.log(`${where}: backed up ${live.length} documents to ${file}`)
 console.log(`  sha256 ${createHash('sha256').update(body).digest('hex')}`)

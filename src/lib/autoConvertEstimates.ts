@@ -2,8 +2,8 @@ import { collection, getDocs, getDoc, query, where, doc, updateDoc } from 'fireb
 import { createProjectForEstimate } from './projectLink'
 import { db } from '../firebase'
 import type { Estimate, Project, ProjectStatus } from '../data/types'
-import { PROJECT_STATUS_ORDER } from '../data/types'
 import { createDepositInvoice, nextInvoiceNumber } from './createInvoice'
+import { shouldAutoAdvance } from './projectStatus'
 import { fetchBusinessProfile } from './businessProfile'
 
 // We've merged Estimates into Projects — every estimate should belong to a
@@ -23,7 +23,10 @@ import { fetchBusinessProfile } from './businessProfile'
 //   pending   → "lead".
 //
 // We only ever advance a project FORWARD. If the contractor has already moved
-// a project further along (e.g. "completed"), we never knock it back.
+// a project further along (e.g. "completed"), we never knock it back. And once
+// the contractor has picked a stage by hand, a customer answer that was already
+// on file no longer moves it (lib/projectStatus.ts shouldAutoAdvance); only a
+// newer answer does.
 //
 // Idempotent. Returns counts of estimates whose project was newly created OR
 // advanced this sweep, split by approved/declined, so the dashboard can show an
@@ -40,11 +43,6 @@ function desiredStatusFor(e: Estimate): { status: ProjectStatus; declined: boole
   if (approved) return { status: 'in_progress', declined: false }
   if (declined) return { status: 'lead', declined: true }
   return { status: 'lead', declined: false }
-}
-
-// Is target strictly further along the pipeline than current?
-function isForward(current: ProjectStatus, target: ProjectStatus): boolean {
-  return PROJECT_STATUS_ORDER.indexOf(target) > PROJECT_STATUS_ORDER.indexOf(current)
 }
 
 function notesFor(e: Estimate): string {
@@ -97,7 +95,7 @@ export async function autoConvertApprovedEstimates(userId: string): Promise<{
         const updates: Record<string, unknown> = {}
         let didAdvance = false
 
-        if (isForward(proj.status, target)) {
+        if (shouldAutoAdvance(proj, e, target)) {
           updates.status = target
           updates.notes = notesFor(e)
           didAdvance = true

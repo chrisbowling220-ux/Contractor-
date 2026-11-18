@@ -352,4 +352,8 @@ export interface Project {
   closedAt?: string
   // Set when the contractor taps "Mark Job Complete" (In Progress → Completed).
   completedAt?: string
+  // ISO time the contractor last picked this project's stage by hand. A
+  // customer decision already on file before then no longer moves the stage
+  // (see lib/projectStatus.ts).
+  statusSetByHandAt?: string
 }

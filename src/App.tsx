@@ -120,8 +120,8 @@ function useDashboardCounts(userId: string | undefined, refreshKey = 0) {
           getDocs(query(collection(db, 'invoices'), where('createdBy', '==', userId))),
           getDocs(query(collection(db, 'calendarEvents'), where('createdBy', '==', userId))),
         ])
-        const activeStatuses = new Set(['estimated', 'contracted', 'in_progress'])
-        const activeJobs = projects.docs.filter(d => activeStatuses.has(d.data().status as string)).length
+        // Jobs underway: the same list the Active Jobs tile opens (In Progress, not filed away or declined).
+        const activeJobs = projects.docs.map(d => d.data()).filter(p => p.status === 'in_progress' && !p.archived && !p.declined).length
         const estDocs = estimates.docs.map(d => ({ id: d.id, ...d.data() } as Record<string, unknown> & { id: string }))
         const pendingEstimates = estDocs.filter(e => e.status === 'pending').length
         // Won/lost count jobs, not documents: a revised estimate counts once,
@@ -360,7 +360,7 @@ const TITLE_MAP: Record<string, string> = {
   ...Object.fromEntries(TILES.map(t => [t.key, t.label])),
 }
 
-function DashboardHome({ counts, onPick, onBox, onPhotos, onQuickAdd, userName }: { counts: ReturnType<typeof useDashboardCounts>; onPick: (key: string) => void; onBox: (key: string, filter: ProjectStatus | 'all') => void; onPhotos: () => void; onQuickAdd: () => void; userName?: string }) {
+function DashboardHome({ counts, onPick, onBox, onOpenProject, onPhotos, onQuickAdd, userName }: { counts: ReturnType<typeof useDashboardCounts>; onPick: (key: string) => void; onBox: (key: string, filter: ProjectStatus | 'all') => void; onOpenProject: (projectId: string) => void; onPhotos: () => void; onQuickAdd: () => void; userName?: string }) {
   const isMobile = useIsMobile()
   // Browser-notification permission, tracked as state so the UI updates the
   // moment the user responds to the prompt (granted → hide button + show "on";
@@ -595,7 +595,12 @@ function DashboardHome({ counts, onPick, onBox, onPhotos, onQuickAdd, userName }
                 {visibleAttention.map(a => (
                   // Tap → go to where it's about AND clear it from the list. It
                   // stays cleared for the day, then returns tomorrow if still due.
-                  <button key={a.id} onClick={() => { dismissReminder(a.id); onPick(a.goto || 'projects') }} style={{ textAlign: 'left', background: 'white', border: '1px solid #fde68a', borderRadius: '8px', padding: '10px 12px', cursor: 'pointer', fontSize: '13px', color: '#1a1f2e', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  // A reminder about one job opens that job, not the whole list.
+                  <button key={a.id} onClick={() => {
+                    dismissReminder(a.id)
+                    if ((a.goto || 'projects') === 'projects' && a.projectId) onOpenProject(a.projectId)
+                    else onPick(a.goto || 'projects')
+                  }} style={{ textAlign: 'left', background: 'white', border: '1px solid #fde68a', borderRadius: '8px', padding: '10px 12px', cursor: 'pointer', fontSize: '13px', color: '#1a1f2e', display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <span>{ATTENTION_ICON[a.kind] || '•'}</span>
                     <span style={{ flex: 1 }}>{a.label}</span>
                     <span style={{ color: '#94a3b8' }}>›</span>
@@ -849,6 +854,8 @@ function Dashboard() {
   }, [])
   // When the dashboard boxes deep-link into Projects, this seeds its status filter.
   const [projectsFilter, setProjectsFilter] = useState<ProjectStatus | 'all'>('all')
+  // A project to open straight away on the Projects page (from the schedule or a reminder).
+  const [projectToOpen, setProjectToOpen] = useState<string | null>(null)
   // Bumped by the live listeners below so the count tiles + reminders feed
   // recompute whenever the underlying data changes (no page reload needed).
   const [countsRefresh, setCountsRefresh] = useState(0)
@@ -1064,7 +1071,7 @@ function Dashboard() {
   const go = (key: string) => {
     // Reset the Projects filter when navigating via the sidebar/tiles so you
     // don't land on a stale deep-linked filter from a dashboard box.
-    if (key === 'projects') setProjectsFilter('all')
+    if (key === 'projects') { setProjectsFilter('all'); setProjectToOpen(null) }
     setPage(key)
     setMenuOpen(false)
   }
@@ -1072,7 +1079,15 @@ function Dashboard() {
   // clickable dashboard summary boxes).
   const goWithFilter = (key: string, filter: ProjectStatus | 'all') => {
     setProjectsFilter(filter)
+    setProjectToOpen(null)
     setPage(key)
+    setMenuOpen(false)
+  }
+  // Go to Projects with one project already open.
+  const openProject = (projectId: string) => {
+    setProjectsFilter('all')
+    setProjectToOpen(projectId)
+    setPage('projects')
     setMenuOpen(false)
   }
 
@@ -1231,13 +1246,13 @@ function Dashboard() {
                 </div>
               </div>
             )}
-            <DashboardHome counts={counts} onPick={go} onBox={goWithFilter} onPhotos={() => setPhotoCaptureOpen(true)} onQuickAdd={() => setQuickAddOpen(true)} userName={user?.firstName || undefined} />
+            <DashboardHome counts={counts} onPick={go} onBox={goWithFilter} onOpenProject={openProject} onPhotos={() => setPhotoCaptureOpen(true)} onQuickAdd={() => setQuickAddOpen(true)} userName={user?.firstName || undefined} />
           </>
         )}
         <Suspense fallback={<p role="status" style={{ padding: '32px', color: '#475569' }}>Loading…</p>}>
-        {page === 'projects' && <Projects key={projectsFilter} initialStatusFilter={projectsFilter} />}
+        {page === 'projects' && <Projects key={`${projectsFilter}:${projectToOpen ?? ''}`} initialStatusFilter={projectsFilter} initialOpenProjectId={projectToOpen} />}
         {page === 'estimates' && <Estimates />}
-        {page === 'schedule' && <Schedule onOpenProject={() => go('projects')} />}
+        {page === 'schedule' && <Schedule onOpenProject={openProject} />}
         {page === 'customers' && <Customers />}
         {page === 'scan-room' && <ScanRoom onNavigate={go} />}
         {page === 'property-advisor' && <PropertyAdvisor />}

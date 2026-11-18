@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { db } from './firebase'
-import { collection, addDoc, getDocs, query, updateDoc, deleteDoc, doc, where, onSnapshot } from 'firebase/firestore'
+import { collection, addDoc, getDocs, query, updateDoc, deleteDoc, deleteField, doc, where, onSnapshot } from 'firebase/firestore'
 import { useUser } from '@clerk/clerk-react'
 import { JOB_CATALOG } from './data/jobCatalog'
 import type { Estimate, Project, ProjectStatus, ChangeOrder } from './data/types'
@@ -27,6 +27,7 @@ import type { BusinessProfile } from './lib/businessProfile'
 import type { ThankYouPackage } from './data/types'
 import { useAuth } from '@clerk/clerk-react'
 import { isPhone } from './lib/shareEstimate'
+import { confirmMessage, nextStatus, previousStatus, statusUpdate } from './lib/projectStatus'
 
 interface Customer { id: string; name: string; phone: string; email: string; address: string }
 
@@ -39,7 +40,9 @@ const STATUS_COLOR: Record<ProjectStatus, { bg: string; text: string }> = {
   closed: { bg: '#1a1f2e', text: '#cbd5e1' },
 }
 
-export default function Projects({ initialStatusFilter }: { initialStatusFilter?: ProjectStatus | 'all' } = {}) {
+// `initialOpenProjectId` opens one project straight away (from a schedule entry
+// or a dashboard reminder about that job).
+export default function Projects({ initialStatusFilter, initialOpenProjectId }: { initialStatusFilter?: ProjectStatus | 'all'; initialOpenProjectId?: string | null } = {}) {
   const { user } = useUser()
   const { getToken } = useAuth()
   const { tier } = useTier()  // 'pro' unlocks the thank-you letter feature
@@ -49,7 +52,8 @@ export default function Projects({ initialStatusFilter }: { initialStatusFilter?
   const [changeOrders, setChangeOrders] = useState<ChangeOrder[]>([])
   const [showForm, setShowForm] = useState(false)
   const [loading, setLoading] = useState(false)
-  const [activeId, setActiveId] = useState<string | null>(null)
+  const [activeId, setActiveId] = useState<string | null>(initialOpenProjectId ?? null)
+  const [statusSaving, setStatusSaving] = useState<string | null>(null)   // project id whose stage is being saved
   const [coFormOpen, setCoFormOpen] = useState(false)
   const [coEditing, setCoEditing] = useState<ChangeOrder | null>(null)
   const [coCopied, setCoCopied] = useState<string | null>(null)
@@ -178,27 +182,51 @@ export default function Projects({ initialStatusFilter }: { initialStatusFilter?
     }
   }
 
-  const advance = async (p: Project, status: ProjectStatus) => {
-    try {
-      const extra = status === 'closed' ? { closedAt: new Date().toISOString() } : {}
-      await updateDoc(doc(db, 'projects', p.id), { status, ...extra })
-      setProjects(prev => prev.map(x => x.id === p.id ? { ...x, status, ...extra } : x))
-    } catch (err) {
-      console.error('Status update failed:', err)
-      alert('Could not update status: ' + (err instanceof Error ? err.message : String(err)))
-    }
+  // Opening or leaving a project starts its panels fresh, so a photo picker or
+  // invoice form left open on one job never carries over to the next.
+  const selectProject = (id: string | null) => {
+    setActiveId(id)
+    setThankYouPanelOpen(false)
+    setThankYouHighlights('')
+    setThankYouAvailablePhotos([])
+    setThankYouSelectedIds(new Set())
+    setInvoicePanelOpen(false)
+    setInvoiceAmountPaid('')
+    setInvoiceDueDays('14')
   }
 
-  // The one manual milestone: In Progress → Completed. The app can't detect
-  // when physical work is done, so this button is the contractor's signal.
-  const markComplete = async (p: Project) => {
-    if (!confirm(`Mark the ${p.jobTypeName} job for "${p.customerName}" as complete? This moves it to Completed and lets you send the thank-you letter and final invoice.`)) return
+  // Move a project to another stage. A click by the contractor (byHand) asks
+  // first when the move needs it (going back, skipping ahead, completing,
+  // closing) and is remembered, so the estimate sweep won't undo it. The
+  // automatic close after the final invoice is paid passes byHand: false.
+  const setStatus = async (p: Project, to: ProjectStatus, { byHand = true } = {}) => {
+    if (to === p.status || statusSaving) return
+    if (byHand) {
+      const finalInvoices = invoices.filter(inv => inv.projectId === p.id && !inv.isDeposit)
+      const msg = confirmMessage(p, to, {
+        signed: aggregateForProject(p).ests.some(e => e.status === 'approved'),
+        hasInvoice: finalInvoices.length > 0,
+        unpaidInvoice: finalInvoices.some(inv => inv.status !== 'paid'),
+      })
+      if (msg && !confirm(msg)) return
+    }
+    const { set, clear } = statusUpdate(p, to, new Date().toISOString(), byHand)
+    const write: Record<string, unknown> = { ...set }
+    for (const k of clear) write[k] = deleteField()
+    setStatusSaving(p.id)
     try {
-      const completedAt = new Date().toISOString()
-      await updateDoc(doc(db, 'projects', p.id), { status: 'completed', completedAt })
-      setProjects(prev => prev.map(x => x.id === p.id ? { ...x, status: 'completed', completedAt } : x))
+      await updateDoc(doc(db, 'projects', p.id), write)
+      setProjects(prev => prev.map(x => {
+        if (x.id !== p.id) return x
+        const next: Record<string, unknown> = { ...x, ...set }
+        for (const k of clear) delete next[k]
+        return next as unknown as Project
+      }))
     } catch (err) {
-      alert('Could not mark complete: ' + (err instanceof Error ? err.message : String(err)))
+      console.error('Stage change failed:', err)
+      alert('Could not change the stage: ' + (err instanceof Error ? err.message : String(err)))
+    } finally {
+      setStatusSaving(null)
     }
   }
 
@@ -218,7 +246,7 @@ export default function Projects({ initialStatusFilter }: { initialStatusFilter?
     try {
       await deleteDoc(doc(db, 'projects', p.id))
       setProjects(prev => prev.filter(x => x.id !== p.id))
-      setActiveId(null)
+      selectProject(null)
     } catch (err) {
       alert('Delete failed: ' + (err instanceof Error ? err.message : String(err)))
     }
@@ -233,7 +261,7 @@ export default function Projects({ initialStatusFilter }: { initialStatusFilter?
       const archivedAt = new Date().toISOString()
       await updateDoc(doc(db, 'projects', p.id), { archived: true, archivedAt })
       setProjects(prev => prev.map(x => x.id === p.id ? { ...x, archived: true, archivedAt } : x))
-      setActiveId(null)
+      selectProject(null)
     } catch (err) {
       alert('Archive failed: ' + (err instanceof Error ? err.message : String(err)))
     }
@@ -279,7 +307,7 @@ export default function Projects({ initialStatusFilter }: { initialStatusFilter?
     try { window.sessionStorage?.removeItem(sessionKey) } catch { /* noop */ }
     // Deferred a tick: this reacts to data arriving, it isn't part of rendering.
     const t = window.setTimeout(() => {
-      setActiveId(target.id)
+      selectProject(target.id)
       openThankYouPanel(target).catch(err => console.error('Auto-open thank-you failed:', err))
     }, 0)
     return () => window.clearTimeout(t)
@@ -475,12 +503,15 @@ ${link}
 
   const archivedCount = useMemo(() => projects.filter(p => p.archived && !p.declined).length, [projects])
   const declinedCount = useMemo(() => projects.filter(p => p.declined).length, [projects])
+  // Three buckets: active (default), completed (archived), declined. The stage
+  // chips count within the bucket on screen, so their numbers match the list.
+  const viewPool = useMemo(() => {
+    if (viewMode === 'declined') return projects.filter(p => p.declined)
+    if (viewMode === 'completed') return projects.filter(p => p.archived && !p.declined)
+    return projects.filter(p => !p.archived && !p.declined)
+  }, [projects, viewMode])
   const filtered = useMemo(() => {
-    // Three buckets: active (default), completed (archived), declined.
-    let pool: Project[]
-    if (viewMode === 'declined') pool = projects.filter(p => p.declined)
-    else if (viewMode === 'completed') pool = projects.filter(p => p.archived && !p.declined)
-    else pool = projects.filter(p => !p.archived && !p.declined)
+    let pool = viewPool
     if (statusFilter !== 'all') pool = pool.filter(p => p.status === statusFilter)
     // Free-text search across customer name, job type, ZIP, and notes.
     const q = searchQuery.trim().toLowerCase()
@@ -491,7 +522,7 @@ ${link}
       || (p.description || '').toLowerCase().includes(q),
     )
     return pool
-  }, [projects, statusFilter, viewMode, searchQuery])
+  }, [viewPool, statusFilter, searchQuery])
   const activeProject = activeId ? projects.find(p => p.id === activeId) ?? null : null
   const activeAgg = activeProject ? aggregateForProject(activeProject) : null
 
@@ -507,11 +538,11 @@ ${link}
     return (
       <div style={{ padding: 'clamp(16px, 4vw, 32px)' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', gap: '8px', flexWrap: 'wrap' }}>
-          <button onClick={() => setActiveId(null)} style={{ background: '#f1f5f9', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer' }}>← Back to {viewMode === 'completed' ? 'Completed Jobs' : viewMode === 'declined' ? 'Declined' : 'Projects'}</button>
+          <button onClick={() => selectProject(null)} style={{ background: '#f1f5f9', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer' }}>← Back to {viewMode === 'completed' ? 'Completed Jobs' : viewMode === 'declined' ? 'Declined' : 'Projects'}</button>
           <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
             {/* Restore button — only when viewing an already-archived project */}
             {activeProject.archived && (
-              <button onClick={async () => { await restoreProject(activeProject); setActiveId(null) }} style={{ background: '#f0fdf4', color: '#16a34a', border: '1px solid #16a34a', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
+              <button onClick={async () => { await restoreProject(activeProject); selectProject(null) }} style={{ background: '#f0fdf4', color: '#16a34a', border: '1px solid #16a34a', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
                 ↩️ Restore to Active
               </button>
             )}
@@ -528,8 +559,8 @@ ${link}
         </div>
 
         <div style={{ ...card, background: '#1a1f2e', color: 'white' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
-            <div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', gap: '12px' }}>
+            <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: '12px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '1px' }}>{activeProject.jobTypeName}</div>
               <h2 style={{ fontSize: '28px', fontWeight: 700, marginTop: '4px' }}>{activeProject.customerName}</h2>
               <p style={{ color: '#cbd5e1', marginTop: '4px' }}>{activeProject.description || '—'}</p>
@@ -537,38 +568,82 @@ ${link}
             </div>
             <div style={{ textAlign: 'right' }}>
               <span style={{ background: sc.bg, color: sc.text, padding: '6px 14px', borderRadius: '999px', fontSize: '12px', fontWeight: 700, textTransform: 'uppercase' }}>{PROJECT_STATUS_LABEL[activeProject.status]}</span>
-              {/* Status now advances automatically:
-                  lead → in_progress  on customer approval (no button)
-                  in_progress → completed  via the prominent banner below the header
-                  completed → closed  automatically when the invoice is paid */}
-              {(activeProject.status === 'lead' || activeProject.status === 'estimated' || activeProject.status === 'contracted') && (
+              {/* Stages also move by themselves: a customer signing moves the
+                  job to In Progress, and paying the final invoice closes it.
+                  The stage bar below lets the contractor move it any time. */}
+              {idx < PROJECT_STATUS_ORDER.indexOf('in_progress') && activeAgg.ests.some(e => e.status === 'pending' && !e.supersededBy) && (
                 <p style={{ marginTop: '10px', fontSize: '11px', color: '#94a3b8', maxWidth: '180px' }}>
-                  ⏳ Auto-advances to <strong>In Progress</strong> when the customer approves the estimate.
+                  ⏳ Moves to <strong>In Progress</strong> by itself when the customer signs the estimate.
                 </p>
               )}
               {activeProject.status === 'completed' && (
-                <>
-                  <p style={{ marginTop: '10px', fontSize: '11px', color: '#94a3b8', maxWidth: '190px' }}>
-                    💳 Auto-closes when the invoice is paid in full.
-                  </p>
-                  <button onClick={() => advance(activeProject, 'closed')} style={{ display: 'block', marginTop: '8px', background: 'transparent', color: '#cbd5e1', border: '1px solid #475569', padding: '6px 12px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '11px' }}>
-                    Close manually
-                  </button>
-                </>
+                <p style={{ marginTop: '10px', fontSize: '11px', color: '#94a3b8', maxWidth: '190px' }}>
+                  💳 Closes by itself when the final invoice is paid in full.
+                </p>
               )}
             </div>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '20px', overflowX: 'auto' }}>
-            {PROJECT_STATUS_ORDER.map((s, i) => (
-              <div key={s} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <div style={{ padding: '6px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: 600, background: i <= idx ? '#f97316' : '#334155', color: 'white' }}>
-                  {PROJECT_STATUS_LABEL[s]}
+          {(() => {
+            // Archived and declined jobs keep their stage until they are back in the active list.
+            const locked = activeProject.archived
+              ? 'This job is in Completed Jobs. Restore it to Active to change its stage.'
+              : activeProject.declined
+                ? 'The customer declined this estimate. Adjust and resend it from Estimates → Declined to bring the job back.'
+                : null
+            const saving = statusSaving === activeProject.id
+            const prev = previousStatus(activeProject.status)
+            const next = nextStatus(activeProject.status)
+            return (
+              <>
+                <div role="group" aria-label="Project stage" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px 6px', marginTop: '20px' }}>
+                  {PROJECT_STATUS_ORDER.map((s, i) => {
+                    const current = i === idx
+                    const done = i < idx
+                    return (
+                      <div key={s} style={{ display: 'flex', alignItems: 'center', gap: '6px', flex: '0 0 auto' }}>
+                        <button
+                          type="button"
+                          onClick={() => setStatus(activeProject, s)}
+                          disabled={current || !!locked || saving}
+                          aria-current={current ? 'step' : undefined}
+                          title={current ? 'Current stage' : locked ? undefined : `Move to ${PROJECT_STATUS_LABEL[s]}`}
+                          style={{
+                            minHeight: '36px', padding: '6px 12px', borderRadius: '8px', fontSize: '12px', fontWeight: 700, whiteSpace: 'nowrap',
+                            border: current ? '2px solid #ffffff' : '2px solid transparent',
+                            background: current ? '#f97316' : done ? '#c2410c' : '#334155',
+                            color: current ? '#1a1f2e' : done ? '#ffffff' : '#e2e8f0',
+                            cursor: current || locked || saving ? 'default' : 'pointer',
+                            opacity: locked && !current ? 0.6 : 1,
+                          }}
+                        >
+                          {done ? '✓ ' : ''}{PROJECT_STATUS_LABEL[s]}
+                        </button>
+                        {i < PROJECT_STATUS_ORDER.length - 1 && <span aria-hidden="true" style={{ color: done ? '#f97316' : '#475569' }}>→</span>}
+                      </div>
+                    )
+                  })}
                 </div>
-                {i < PROJECT_STATUS_ORDER.length - 1 && <span style={{ color: i < idx ? '#f97316' : '#475569' }}>→</span>}
-              </div>
-            ))}
-          </div>
+                {locked ? (
+                  <p style={{ margin: '12px 0 0', fontSize: '12px', color: '#94a3b8' }}>{locked}</p>
+                ) : (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '12px', flexWrap: 'wrap' }}>
+                    {prev && (
+                      <button type="button" onClick={() => setStatus(activeProject, prev)} disabled={saving} style={{ background: 'transparent', color: '#e2e8f0', border: '1px solid #64748b', padding: '8px 14px', borderRadius: '8px', cursor: saving ? 'default' : 'pointer', fontWeight: 600, fontSize: '13px', minHeight: '40px' }}>
+                        ← Move back to {PROJECT_STATUS_LABEL[prev]}
+                      </button>
+                    )}
+                    {next && (
+                      <button type="button" onClick={() => setStatus(activeProject, next)} disabled={saving} style={{ background: '#f97316', color: '#1a1f2e', border: 'none', padding: '8px 16px', borderRadius: '8px', cursor: saving ? 'default' : 'pointer', fontWeight: 800, fontSize: '13px', minHeight: '40px' }}>
+                        Move to {PROJECT_STATUS_LABEL[next]} →
+                      </button>
+                    )}
+                    <span aria-live="polite" style={{ fontSize: '12px', color: '#94a3b8' }}>{saving ? 'Saving…' : 'Or tap any stage above to jump to it.'}</span>
+                  </div>
+                )}
+              </>
+            )
+          })()}
         </div>
 
         {/* PROMINENT completion call-to-action — the one manual milestone. Shown
@@ -583,7 +658,7 @@ ${link}
                   Work finished? <strong>Mark it complete</strong> to unlock the customer <strong>Thank-You letter</strong> and the <strong>Final Invoice</strong> — the last steps of the job.
                 </p>
               </div>
-              <button onClick={() => markComplete(activeProject)} style={{ flex: '0 0 auto', background: 'white', color: '#15803d', border: 'none', padding: '16px 28px', borderRadius: '10px', cursor: 'pointer', fontWeight: 800, fontSize: '16px', boxShadow: '0 2px 8px rgba(0,0,0,0.18)', whiteSpace: 'nowrap' }}>
+              <button onClick={() => setStatus(activeProject, 'completed')} disabled={statusSaving === activeProject.id} style={{ flex: '0 0 auto', background: 'white', color: '#15803d', border: 'none', padding: '16px 28px', borderRadius: '10px', cursor: 'pointer', fontWeight: 800, fontSize: '16px', boxShadow: '0 2px 8px rgba(0,0,0,0.18)', whiteSpace: 'nowrap' }}>
                 ✓ Mark Job Complete
               </button>
             </div>
@@ -1043,7 +1118,7 @@ ${link}
               // Same rule as a card payment: once the FINAL invoice is paid, a
               // completed job closes. A deposit never closes a job.
               if (inv.isDeposit || activeProject.status !== 'completed') return
-              await advance(activeProject, 'closed')
+              await setStatus(activeProject, 'closed', { byHand: false })
             }}
           />
         )}
@@ -1084,7 +1159,7 @@ ${link}
               ? 'Archived finished jobs — kept for records. Restore to active or delete permanently.'
               : viewMode === 'declined'
                 ? 'Estimates the customer declined. Kept for your records — delete any you no longer need.'
-                : 'Lead → estimated → contracted → in progress → completed. Each project rolls up estimates, change orders, and photos.'}
+                : 'Lead → estimated → contracted → in progress → completed. Tap "Move to" on a job, or open it, to change its stage. Each project rolls up estimates, change orders, and photos.'}
           </p>
         </div>
         {viewMode === 'active' && (
@@ -1132,10 +1207,10 @@ ${link}
 
       <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' }}>
         <button onClick={() => setStatusFilter('all')} style={{ padding: '6px 14px', border: statusFilter === 'all' ? '2px solid #f97316' : '1px solid #e2e8f0', background: statusFilter === 'all' ? '#fff7ed' : 'white', borderRadius: '999px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}>
-          All ({projects.length})
+          All ({viewPool.length})
         </button>
         {PROJECT_STATUS_ORDER.map(s => {
-          const count = projects.filter(p => p.status === s).length
+          const count = viewPool.filter(p => p.status === s).length
           return (
             <button key={s} onClick={() => setStatusFilter(s)} style={{ padding: '6px 14px', border: statusFilter === s ? '2px solid #f97316' : '1px solid #e2e8f0', background: statusFilter === s ? '#fff7ed' : 'white', borderRadius: '999px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}>
               {PROJECT_STATUS_LABEL[s]} ({count})
@@ -1184,7 +1259,13 @@ ${link}
 
       {filtered.length === 0 && !showForm && (
         <p style={{ color: '#94a3b8', textAlign: 'center', marginTop: '48px' }}>
-          {projects.length === 0 ? 'No projects yet. Create your first one above — it pulls together every other page.' : 'No projects with this status.'}
+          {projects.length === 0
+            ? 'No projects yet. Create your first one above — it pulls together every other page.'
+            : searchQuery.trim()
+              ? `No projects match "${searchQuery.trim()}".`
+              : statusFilter !== 'all'
+                ? `No projects at the ${PROJECT_STATUS_LABEL[statusFilter]} stage here.`
+                : viewMode === 'completed' ? 'No completed jobs filed yet.' : viewMode === 'declined' ? 'No declined estimates.' : 'No active projects.'}
         </p>
       )}
 
@@ -1192,10 +1273,11 @@ ${link}
         {filtered.map(p => {
           const agg = aggregateForProject(p)
           const sc = STATUS_COLOR[p.status]
+          const next = viewMode === 'active' ? nextStatus(p.status) : null
           return (
-            <div key={p.id} onClick={() => setActiveId(p.id)} style={{ background: 'white', padding: '20px', borderRadius: '12px', boxShadow: '0 1px 2px rgba(15,23,42,0.04), 0 8px 24px rgba(15,23,42,0.06)', cursor: 'pointer', borderLeft: `4px solid ${sc.text}` }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
-                <div>
+            <div key={p.id} onClick={() => selectProject(p.id)} style={{ background: 'white', padding: '20px', borderRadius: '12px', boxShadow: '0 1px 2px rgba(15,23,42,0.04), 0 8px 24px rgba(15,23,42,0.06)', cursor: 'pointer', borderLeft: `4px solid ${sc.text}` }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', gap: '12px' }}>
+                <div style={{ minWidth: 0 }}>
                   <h3 style={{ fontWeight: 700, fontSize: '16px' }}>{p.customerName}</h3>
                   <p style={{ color: '#64748b', fontSize: '13px', marginTop: '2px' }}>{p.jobTypeName}{p.jobLocationZip && ` · ${p.jobLocationZip}`}</p>
                   <p style={{ color: '#94a3b8', fontSize: '12px', marginTop: '4px' }}>
@@ -1208,6 +1290,17 @@ ${link}
                     <div style={{ marginTop: '6px', fontSize: '13px' }}>
                       <span style={{ color: '#f97316', fontWeight: 700 }}>${agg.contractTotal.toFixed(0)}</span> contract
                     </div>
+                  )}
+                  {next && (
+                    <button
+                      type="button"
+                      onClick={e => { e.stopPropagation(); setStatus(p, next) }}
+                      disabled={statusSaving === p.id}
+                      aria-label={`Move to ${PROJECT_STATUS_LABEL[next]} — ${p.customerName}, ${p.jobTypeName}`}
+                      style={{ marginTop: '8px', background: 'white', color: '#1a1f2e', border: '1px solid #cbd5e1', padding: '6px 10px', borderRadius: '6px', cursor: statusSaving === p.id ? 'default' : 'pointer', fontWeight: 700, fontSize: '12px', whiteSpace: 'nowrap', minHeight: '32px' }}
+                    >
+                      {statusSaving === p.id ? 'Saving…' : `Move to ${PROJECT_STATUS_LABEL[next]} →`}
+                    </button>
                   )}
                 </div>
               </div>

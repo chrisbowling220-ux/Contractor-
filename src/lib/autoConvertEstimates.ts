@@ -17,7 +17,8 @@ import { fetchBusinessProfile } from './businessProfile'
 //      → advance that project's status to match the customer's response. A
 //      project with several estimates is decided by all of them together.
 //   3. Estimate's project was DELETED by the contractor → left alone. The
-//      project is not brought back and the estimate is not changed.
+//      project is not brought back, the estimate is not changed, and no
+//      deposit invoice is made for it.
 //
 // Status mapping from the customer's decision:
 //   approved  → "in_progress"  (skips straight past contracted, per the
@@ -107,17 +108,8 @@ export async function autoConvertApprovedEstimates(userId: string): Promise<{
   }
   for (const [projectId, ests] of byProject) {
     try {
-      // The database refuses to read a project that no longer exists (there is
-      // no owner on it to check), so a deleted project shows up as a refusal,
-      // not as a missing document. Either way there is no project to update.
-      let pSnap
-      try {
-        pSnap = await getDoc(doc(db, 'projects', projectId))
-      } catch (err) {
-        if ((err as { code?: string }).code === 'permission-denied') continue
-        throw err
-      }
-      if (!pSnap.exists()) {
+      const pSnap = await readLiveProject(projectId)
+      if (!pSnap) {
         // The contractor deleted this project ("Linked estimates and change
         // orders stay"). Leave it deleted and leave its estimates exactly as
         // they are: no new project, no write to the estimate. Bringing it back
@@ -170,6 +162,9 @@ export async function autoConvertApprovedEstimates(userId: string): Promise<{
       const eSnap = await getDoc(doc(db, 'estimates', e.id))
       const fresh = eSnap.exists() ? ({ id: e.id, ...eSnap.data() } as Estimate) : e
       if (!fresh.projectId || fresh.depositInvoiceCreated) continue
+      // Its project was deleted: no deposit invoice for a job that no longer
+      // exists, and nothing written to the estimate.
+      if (!(await readLiveProject(fresh.projectId))) continue
       const invSnap = await getDocs(query(collection(db, 'invoices'), where('createdBy', '==', userId)))
       const already = invSnap.docs.some(d => d.data().isDeposit === true && d.data().estimateId === e.id)
       if (!already) {
@@ -193,6 +188,19 @@ export async function autoConvertApprovedEstimates(userId: string): Promise<{
   const approvedCount = changed.filter(e => e.status === 'approved' && e.customerResponse?.action === 'approved').length
   const declinedCount = changed.filter(e => e.status === 'declined' && e.customerResponse?.action === 'declined').length
   return { created: changed.length, estimates: changed, approvedCount, declinedCount }
+}
+
+// The project, or null when it has been deleted. The database refuses to read
+// a project that no longer exists (there is no owner on it to check), so a
+// deleted project shows up as a refusal, not as a missing document.
+async function readLiveProject(projectId: string) {
+  try {
+    const snap = await getDoc(doc(db, 'projects', projectId))
+    return snap.exists() ? snap : null
+  } catch (err) {
+    if ((err as { code?: string }).code === 'permission-denied') return null
+    throw err
+  }
 }
 
 async function createProjectFor(e: Estimate, userId: string, status: ProjectStatus, declined: boolean): Promise<string> {

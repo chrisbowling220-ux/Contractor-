@@ -2453,6 +2453,18 @@ export const createDepositInvoiceForApproval = onRequest(
       const projectId = est.projectId as string | undefined
       if (!ownerId) { res.status(400).json({ error: 'Estimate missing owner.' }); return }
 
+      // The contractor deleted this estimate's project. Bill nothing: no new
+      // invoice tied to a job that no longer exists, and no re-pricing of one
+      // made before it was deleted. The signed estimate itself is kept; the
+      // customer's page says the contractor will send the deposit invoice.
+      if (projectId) {
+        const projSnap = await db.collection('projects').doc(projectId).get()
+        if (!projSnap.exists || projSnap.data()?.createdBy !== ownerId) {
+          res.status(409).json({ error: 'Your contractor will send your deposit invoice directly.' })
+          return
+        }
+      }
+
       // Idempotency: reuse the deposit/full invoice already made for this
       // estimate. Looked up by estimate first (an estimate may not have a
       // project yet when the customer approves, and a second tap would

@@ -94,3 +94,49 @@ test('deleting a project in the app sticks after a reload', async ({ page }) => 
   expect(consoleErrors).toEqual([])
   expect(errors).toEqual([])
 })
+
+test('a customer signing an estimate whose project was deleted is not billed a deposit; a live job still is', async ({ page, browser }) => {
+  const errors = trackErrors(page)
+  const consoleErrors = sweepErrors(page)
+  // A live job with a signed estimate that asked for a deposit: still billed.
+  await seed('projects/kept', { createdBy: UID, customerName: 'Lee Park', jobTypeName: 'Deck repair', jobLocationZip: '27573', description: '', notes: '', status: 'in_progress', createdAt: signedAt })
+  await seed('estimates/live', estimate({ ...signed, projectId: 'kept', customerName: 'Lee Park', depositRequested: true, depositAmount: 300 }))
+  // An unsigned estimate that asks for a deposit; its project was deleted.
+  await seed('estimates/o4', estimate({ status: 'pending', projectId: 'gone4', depositRequested: true, depositAmount: 300 }))
+
+  // The customer signs it on their own phone. The page then asks the server for
+  // the deposit invoice; that call is answered here the way the fixed server
+  // answers for a deleted project, so nothing leaves this machine.
+  const customer = await browser.newContext()
+  const customerPage = await customer.newPage()
+  const customerErrors = trackErrors(customerPage)
+  const depositCalls: unknown[] = []
+  await customerPage.route('**/createDepositInvoiceForApproval', route => {
+    depositCalls.push(route.request().postDataJSON())
+    return route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: 'Your contractor will send your deposit invoice directly.' }) })
+  })
+  await customerPage.goto('/q/o4')
+  await customerPage.getByPlaceholder('Type your full name here').fill('Pat Doe')
+  await customerPage.getByRole('button', { name: /Accept Proposal/ }).click()
+  await expect(customerPage.getByRole('heading', { name: 'Proposal Accepted' })).toBeVisible()
+  await expect(customerPage.getByText(/Your contractor will send a deposit invoice/)).toBeVisible()
+  await expect(customerPage.getByText(/Pay Deposit/)).toHaveCount(0)
+  expect(depositCalls).toEqual([{ estimateId: 'o4' }])
+  const signedO4 = await read('estimates/o4')
+  expect(signedO4).toMatchObject({ status: 'approved', projectId: 'gone4', customerResponse: { action: 'approved', signedName: 'Pat Doe' } })
+  expect(customerErrors).toEqual([])
+  await customer.close()
+
+  // The contractor opens the app: the sweep bills the live job's deposit only.
+  await signIn(page)
+  await expect.poll(async () => (await readAll('invoices')).length, { timeout: 20_000 }).toBe(1)
+  await page.waitForTimeout(3000)
+  const invoices = await readAll('invoices')
+  expect(invoices).toHaveLength(1)
+  expect(invoices[0]).toMatchObject({ isDeposit: true, estimateId: 'live', projectId: 'kept', subtotal: 300, amountDue: 300 })
+  expect(await read('estimates/live')).toMatchObject({ depositInvoiceCreated: true })
+  expect(await read('estimates/o4')).toEqual(signedO4)   // nothing written: no flag, signature intact
+  expect((await readAll('projects')).map(p => p.id)).toEqual(['kept'])
+  expect(consoleErrors).toEqual([])
+  expect(errors).toEqual([])
+})

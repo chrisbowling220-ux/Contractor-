@@ -173,7 +173,14 @@ describe('deposit invoice when a customer approves', () => {
     createdBy: OWNER, customerName: 'Pat Doe', jobTypeName: 'Deck repair', total: 4200,
     depositRequested: true, depositAmount: 1000, status: 'approved', scopeOfWork: 'Replace boards', ...extra,
   })
-  beforeEach(async () => { await seed(`users/${OWNER}`, { businessName: 'Owner Co', businessPhone: '555-0100' }) })
+  // The jobs these estimates belong to.
+  const seedJobs = async () => {
+    for (const id of ['p1', 'est_e1']) await seed(`projects/${id}`, { createdBy: OWNER, customerName: 'Pat Doe', status: 'in_progress' })
+  }
+  beforeEach(async () => {
+    await seed(`users/${OWNER}`, { businessName: 'Owner Co', businessPhone: '555-0100' })
+    await seedJobs()
+  })
 
   it('bills the deposit from the estimate on file, whatever the caller sends', async () => {
     await seed('estimates/e1', approved({ projectId: 'est_e1' }))
@@ -219,6 +226,7 @@ describe('deposit invoice when a customer approves', () => {
     expect(await read(`invoices/${first.json.invoiceId}`)).toMatchObject({ subtotal: 4200, amountDue: 4200 })
 
     await clearDb()
+    await seedJobs()
     await seed('estimates/e1', approved({ projectId: 'p1' }))
     await seed('invoices/part', { createdBy: OWNER, projectId: 'p1', estimateId: 'e1', isDeposit: true, subtotal: 1000, amountDue: 600, amountPaid: 400, status: 'sent', payments: [{ id: 'm1', amount: 400 }] })
     await deposit.post({ estimateId: 'e1', payFull: true })
@@ -242,6 +250,36 @@ describe('deposit invoice when a customer approves', () => {
     expect((await deposit.post({ estimateId: 'missing' })).status).toBe(404)
     expect((await deposit.post({})).status).toBe(400)
     expect(await deposit.get()).toBe(405)
+    expect(await all('invoices')).toHaveLength(0)
+  })
+
+  it('an estimate whose project was deleted gets no deposit invoice, and nothing is written', async () => {
+    await seed('estimates/e1', approved({ projectId: 'gone', customerId: 'c1', signedAtMs: 1, customerResponse: { action: 'approved', signedName: 'Pat Doe' } }))
+    const before = await read('estimates/e1')
+    const res = await deposit.post({ estimateId: 'e1' })
+    expect(res.status).toBe(409)
+    expect(res.json.error).toBe('Your contractor will send your deposit invoice directly.')
+    expect(await all('invoices')).toHaveLength(0)
+    expect(await read('estimates/e1')).toEqual(before)   // signature kept, no depositInvoiceCreated flag
+    expect(await read('projects/gone')).toBeUndefined()  // and the project is not brought back
+    // "Pay it all now" is refused the same way.
+    expect((await deposit.post({ estimateId: 'e1', payFull: true })).status).toBe(409)
+    expect(await all('invoices')).toHaveLength(0)
+  })
+
+  it('a deposit invoice made before the project was deleted is left exactly as it was', async () => {
+    await seed('estimates/e1', approved({ projectId: 'gone' }))
+    const old = { createdBy: OWNER, projectId: 'gone', estimateId: 'e1', isDeposit: true, subtotal: 1000, amountDue: 1000, amountPaid: 0, status: 'sent' }
+    await seed('invoices/old', old)
+    expect((await deposit.post({ estimateId: 'e1', payFull: true })).status).toBe(409)
+    expect(await read('invoices/old')).toEqual(old)   // not re-priced to the full job
+    expect(await all('invoices')).toHaveLength(1)
+  })
+
+  it('a project id that belongs to another contractor counts as missing', async () => {
+    await seed('projects/theirs', { createdBy: 'someone_else', status: 'in_progress' })
+    await seed('estimates/e1', approved({ projectId: 'theirs' }))
+    expect((await deposit.post({ estimateId: 'e1' })).status).toBe(409)
     expect(await all('invoices')).toHaveLength(0)
   })
 })

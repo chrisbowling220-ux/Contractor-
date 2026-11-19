@@ -856,6 +856,9 @@ function Dashboard() {
   const [projectsFilter, setProjectsFilter] = useState<ProjectStatus | 'all'>('all')
   // A project to open straight away on the Projects page (from the schedule or a reminder).
   const [projectToOpen, setProjectToOpen] = useState<string | null>(null)
+  // A project Quick Quote starts on (the Quick Quote button on a project), so
+  // the estimate is added to that job instead of starting a new project.
+  const [quoteForProject, setQuoteForProject] = useState<string | null>(null)
   // Bumped by the live listeners below so the count tiles + reminders feed
   // recompute whenever the underlying data changes (no page reload needed).
   const [countsRefresh, setCountsRefresh] = useState(0)
@@ -992,16 +995,21 @@ function Dashboard() {
     const unsub = onSnapshot(
       query(collection(db, 'invoices'), where('createdBy', '==', user.id)),
       snap => {
-        const events: { customerName: string; mode: 'card' | 'cash'; projectId?: string }[] = []
+        const events: { customerName: string; mode: 'card' | 'cash' | 'paid'; projectId?: string }[] = []
         snap.docs.forEach(d => {
-          const data = d.data() as { customerName?: string; status?: string; customerCashChoice?: boolean; projectId?: string }
+          const data = d.data() as { customerName?: string; status?: string; customerCashChoice?: boolean; projectId?: string; payments?: { source?: string }[] }
           // Two distinct events per invoice: paid (card) and cashChoice. Track
           // each separately so picking cash AND later paying still fires once
           // each (rare, but possible).
           if (data.status === 'paid') {
             const key = `${d.id}:paid`
             if (!notified.has(key)) {
-              if (primed) events.push({ customerName: data.customerName || 'a customer', mode: 'card', projectId: data.projectId })
+              // Paid by card when Stripe recorded the last payment (or, on an
+              // invoice paid before payments were itemised, nothing did). A
+              // balance the contractor recorded by hand (cash, check) is not.
+              const last = data.payments?.[data.payments.length - 1]
+              const mode = !last || last.source === 'stripe' ? 'card' : 'paid'
+              if (primed) events.push({ customerName: data.customerName || 'a customer', mode, projectId: data.projectId })
               notified.add(key)
             }
           }
@@ -1024,7 +1032,9 @@ function Dashboard() {
         if (events.length > 0) {
           const msg = events.map(e => e.mode === 'card'
             ? `💳 ${e.customerName} paid by card — tap to send a thank-you.`
-            : `💵 ${e.customerName} will pay in cash — tap to send a thank-you.`).join(' · ')
+            : e.mode === 'paid'
+              ? `✅ ${e.customerName} is paid in full — tap to send a thank-you.`
+              : `💵 ${e.customerName} will pay in cash — tap to send a thank-you.`).join(' · ')
           setConversionToast(msg)
           setTimeout(() => setConversionToast(null), 12000)
         }
@@ -1072,6 +1082,7 @@ function Dashboard() {
     // Reset the Projects filter when navigating via the sidebar/tiles so you
     // don't land on a stale deep-linked filter from a dashboard box.
     if (key === 'projects') { setProjectsFilter('all'); setProjectToOpen(null) }
+    if (key === 'scan-room') setQuoteForProject(null)
     setPage(key)
     setMenuOpen(false)
   }
@@ -1088,6 +1099,13 @@ function Dashboard() {
     setProjectsFilter('all')
     setProjectToOpen(projectId)
     setPage('projects')
+    setMenuOpen(false)
+  }
+
+  // Open Quick Quote for one project.
+  const quoteProject = (projectId: string) => {
+    setQuoteForProject(projectId)
+    setPage('scan-room')
     setMenuOpen(false)
   }
 
@@ -1250,11 +1268,11 @@ function Dashboard() {
           </>
         )}
         <Suspense fallback={<p role="status" style={{ padding: '32px', color: '#475569' }}>Loading…</p>}>
-        {page === 'projects' && <Projects key={`${projectsFilter}:${projectToOpen ?? ''}`} initialStatusFilter={projectsFilter} initialOpenProjectId={projectToOpen} />}
+        {page === 'projects' && <Projects key={`${projectsFilter}:${projectToOpen ?? ''}`} initialStatusFilter={projectsFilter} initialOpenProjectId={projectToOpen} onQuoteForProject={quoteProject} />}
         {page === 'estimates' && <Estimates />}
         {page === 'schedule' && <Schedule onOpenProject={openProject} />}
         {page === 'customers' && <Customers />}
-        {page === 'scan-room' && <ScanRoom onNavigate={go} />}
+        {page === 'scan-room' && <ScanRoom key={quoteForProject ?? 'new'} onNavigate={go} forProjectId={quoteForProject} onOpenProject={openProject} />}
         {page === 'property-advisor' && <PropertyAdvisor />}
         {page === 'settings' && <Settings />}
         </Suspense>

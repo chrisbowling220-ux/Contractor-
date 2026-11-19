@@ -203,6 +203,15 @@ describe('deposit invoice when a customer approves', () => {
     expect(await all('invoices')).toHaveLength(1)
   })
 
+  it('a second estimate on the same job gets its own deposit, not the first one\'s', async () => {
+    await seed('estimates/e1', approved({ projectId: 'p1' }))
+    await seed('invoices/first', { createdBy: OWNER, projectId: 'p1', estimateId: 'e0', isDeposit: true, subtotal: 500, amountDue: 0, amountPaid: 500, status: 'paid' })
+    const res = await deposit.post({ estimateId: 'e1' })
+    expect(res.json.invoiceId).not.toBe('first')
+    expect(await read(`invoices/${res.json.invoiceId}`)).toMatchObject({ estimateId: 'e1', projectId: 'p1', subtotal: 1000, amountDue: 1000 })
+    expect(await read('invoices/first')).toMatchObject({ subtotal: 500, status: 'paid' })
+  })
+
   it('"pay it all now" re-prices an untouched deposit invoice, but never one with money on it', async () => {
     await seed('estimates/e1', approved({ projectId: 'p1' }))
     const first = await deposit.post({ estimateId: 'e1' })

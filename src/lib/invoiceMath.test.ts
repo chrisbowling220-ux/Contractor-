@@ -124,7 +124,7 @@ describe('invoice line items', () => {
     expect(lines.filter(l => l.name.startsWith('Change Order')).length).toBe(2)
   })
   it('bills every live estimate on the job and skips declined ones', () => {
-    const a = estimate({ id: 'a' }), b = estimate({ id: 'b', aiQuote: undefined, total: 500, status: 'pending' })
+    const a = estimate({ id: 'a' }), b = estimate({ id: 'b', aiQuote: undefined, total: 500, status: 'approved' })
     const declined = estimate({ id: 'd', status: 'declined', total: 9999 })
     const lines = buildInvoiceLineItems([a, b, declined], [], 'Flooring')
     expect(sumLines(lines)).toBe(+(a.total + 500).toFixed(2))
@@ -159,6 +159,17 @@ describe('contract total and change orders', () => {
     expect(contractTotal([v1, v2('declined')], [])).toBe(4000)   // customer kept the original
     expect(contractTotal([v1, v2('approved')], [])).toBe(4600)   // revision signed, replaces v1
     expect(sumLines(buildInvoiceLineItems([v1, v2('approved')], [], 'Paint'))).toBe(4600)
+  })
+  it('a second quote on a signed job is not billed until the customer signs it too', () => {
+    const signed = estimate({ id: 'a', total: 4000, aiQuote: undefined, status: 'approved' })
+    const extra = (status: Estimate['status']) => estimate({ id: 'b', total: 900, aiQuote: undefined, status })
+    expect(contractTotal([signed, extra('pending')], [])).toBe(4000)
+    expect(sumLines(buildInvoiceLineItems([signed, extra('pending')], [], 'Deck'))).toBe(4000)
+    expect(contractTotal([signed, extra('declined')], [])).toBe(4000)
+    expect(contractTotal([signed, extra('approved')], [])).toBe(4900)
+  })
+  it('a job agreed without a signature still bills its open quote', () => {
+    expect(contractTotal([estimate({ total: 2500, aiQuote: undefined, status: 'pending' })], [co(300, 'approved')])).toBe(2800)
   })
 })
 

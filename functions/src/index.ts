@@ -2459,21 +2459,24 @@ export const createDepositInvoiceForApproval = onRequest(
       // otherwise bill the deposit twice), then by project for invoices made
       // before the estimate id was stored on them.
       {
-        let existing = await db.collection('invoices')
+        const existing = await db.collection('invoices')
           .where('createdBy', '==', ownerId)
           .where('estimateId', '==', estimateId)
           .limit(1).get()
-        if (existing.empty && projectId) {
-          existing = await db.collection('invoices')
+        let exDoc: FirebaseFirestore.QueryDocumentSnapshot | undefined = existing.docs[0]
+        if (!exDoc && projectId) {
+          // Only an older invoice that names no estimate can be this one's: a
+          // job can carry several estimates, each with its own deposit.
+          const byProject = await db.collection('invoices')
             .where('createdBy', '==', ownerId)
             .where('projectId', '==', projectId)
             .where('isDeposit', '==', true)
-            .limit(1).get()
+            .get()
+          exDoc = byProject.docs.find(d => !d.data().estimateId)
         }
-        if (!existing.empty) {
+        if (exDoc) {
           // If they previously made a deposit invoice but now want to pay full,
           // bump that same invoice to the full amount so we don't duplicate.
-          const exDoc = existing.docs[0]
           const exData = exDoc.data() as Record<string, unknown>
           const fullAmt = +Number(est.total || 0).toFixed(2)
           // Never re-price an invoice that already has money on it.

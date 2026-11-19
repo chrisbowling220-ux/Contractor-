@@ -27,7 +27,8 @@ import type { BusinessProfile } from './lib/businessProfile'
 import type { ThankYouPackage } from './data/types'
 import { useAuth } from '@clerk/clerk-react'
 import { isPhone } from './lib/shareEstimate'
-import { confirmMessage, nextStatus, previousStatus, statusUpdate } from './lib/projectStatus'
+import { canTakeEstimate, confirmMessage, nextStatus, previousStatus, statusUpdate } from './lib/projectStatus'
+import ManualEstimateBuilder from './ManualEstimateBuilder'
 
 interface Customer { id: string; name: string; phone: string; email: string; address: string }
 
@@ -41,8 +42,13 @@ const STATUS_COLOR: Record<ProjectStatus, { bg: string; text: string }> = {
 }
 
 // `initialOpenProjectId` opens one project straight away (from a schedule entry
-// or a dashboard reminder about that job).
-export default function Projects({ initialStatusFilter, initialOpenProjectId }: { initialStatusFilter?: ProjectStatus | 'all'; initialOpenProjectId?: string | null } = {}) {
+// or a dashboard reminder about that job). `onQuoteForProject` opens Quick
+// Quote on a project, so its estimate is added to that job.
+export default function Projects({ initialStatusFilter, initialOpenProjectId, onQuoteForProject }: {
+  initialStatusFilter?: ProjectStatus | 'all'
+  initialOpenProjectId?: string | null
+  onQuoteForProject?: (projectId: string) => void
+} = {}) {
   const { user } = useUser()
   const { getToken } = useAuth()
   const { tier } = useTier()  // 'pro' unlocks the thank-you letter feature
@@ -66,6 +72,8 @@ export default function Projects({ initialStatusFilter, initialOpenProjectId }: 
   const [thankYouAvailablePhotos, setThankYouAvailablePhotos] = useState<Array<{ id: string; photoUrl: string; caption: string; createdAt: string }>>([])
   const [thankYouSelectedIds, setThankYouSelectedIds] = useState<Set<string>>(new Set())
   const [estimatePreview, setEstimatePreview] = useState<Estimate | null>(null)
+  const [manualEstimateOpen, setManualEstimateOpen] = useState(false)   // hand-built estimate for the open project
+  const invoiceBuildingRef = useRef(false)   // one invoice per tap, even on a quick double tap
   const [profile, setProfile] = useState<BusinessProfile>({ businessName: '', businessPhone: '', businessEmail: '', licenseNumber: '', logoUrl: '' })
   const [invoicePanelOpen, setInvoicePanelOpen] = useState(false)
   const [invoiceLoading, setInvoiceLoading] = useState(false)
@@ -193,6 +201,7 @@ export default function Projects({ initialStatusFilter, initialOpenProjectId }: 
     setInvoicePanelOpen(false)
     setInvoiceAmountPaid('')
     setInvoiceDueDays('14')
+    setManualEstimateOpen(false)
   }
 
   // Move a project to another stage. A click by the contractor (byHand) asks
@@ -354,10 +363,15 @@ export default function Projects({ initialStatusFilter, initialOpenProjectId }: 
   // line items, asks Claude for cover copy, persists to invoices/{id}.
   const generateInvoiceForProject = async (project: Project, agg: { ests: Estimate[]; cos: ChangeOrder[] }) => {
     if (!user?.id) { alert('Not signed in.'); return }
+    if (invoiceBuildingRef.current) return
     if (agg.ests.length === 0) {
-      alert('No estimates linked to this project. Create an estimate first via Quick Quote, then come back here to invoice it.')
+      alert('This project has no estimate yet, so there is nothing to bill. Add one under Estimates on this project (⚡ Quick Quote or ✍️ Build by hand), then build the invoice.')
       return
     }
+    // A second final invoice bills the whole job again. Make sure that's meant.
+    const earlier = invoices.filter(inv => inv.projectId === project.id && !inv.isDeposit)
+    if (earlier.length > 0 && !confirm(`This job already has invoice ${earlier.map(inv => inv.invoiceNumber).join(', ')}. A new invoice bills the whole job again. Make another one anyway?`)) return
+    invoiceBuildingRef.current = true
     setInvoiceLoading(true)
     try {
       const clerkToken = await getToken()
@@ -403,6 +417,7 @@ export default function Projects({ initialStatusFilter, initialOpenProjectId }: 
       alert('Could not generate invoice: ' + (err instanceof Error ? err.message : String(err)))
     } finally {
       setInvoiceLoading(false)
+      invoiceBuildingRef.current = false
     }
   }
 
@@ -687,7 +702,9 @@ ${link}
           />
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '16px' }}>
+        {/* One card per row on a phone: two narrow columns cut off the
+            estimate amounts and squeezed the invoice buttons. */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 280px), 1fr))', gap: '16px' }}>
           <div style={card}>
             <h3 style={{ marginBottom: '12px' }}>Customer</h3>
             {customer ? (
@@ -703,11 +720,22 @@ ${link}
           <div style={card}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
               <h3 style={{ margin: 0 }}>📝 Estimates ({activeAgg.ests.length})</h3>
-              <span style={{ fontSize: '11px', color: '#94a3b8' }}>Need another? Use ⚡ Quick Quote in the sidebar.</span>
             </div>
+            {canTakeEstimate(activeProject) && (
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '12px' }}>
+                {onQuoteForProject && (
+                  <button type="button" onClick={() => onQuoteForProject(activeProject.id)} aria-label={`Quick Quote for this job — ${activeProject.customerName}`} style={{ background: '#f97316', color: 'white', border: 'none', padding: '8px 14px', borderRadius: '6px', cursor: 'pointer', fontWeight: 700, fontSize: '13px', minHeight: '36px' }}>
+                    ⚡ Quick Quote
+                  </button>
+                )}
+                <button type="button" onClick={() => setManualEstimateOpen(true)} aria-label={`Build an estimate by hand for this job — ${activeProject.customerName}`} style={{ background: 'white', color: '#1a1f2e', border: '1px solid #cbd5e1', padding: '8px 14px', borderRadius: '6px', cursor: 'pointer', fontWeight: 700, fontSize: '13px', minHeight: '36px' }}>
+                  ✍️ Build by hand
+                </button>
+              </div>
+            )}
             {activeAgg.ests.length === 0 ? (
-              <p style={{ color: '#94a3b8', fontSize: '13px' }}>
-                No estimates yet for this project. Tap <strong>⚡ Quick Quote</strong> in the sidebar to make one for <strong>{activeProject.customerName}</strong>.
+              <p style={{ color: '#64748b', fontSize: '13px' }}>
+                No estimate yet. Make one above for <strong>{activeProject.customerName}</strong>. It stays on this project, and the job moves on by itself when they sign.
               </p>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -975,7 +1003,7 @@ ${link}
                   onClick={() => setInvoicePanelOpen(true)}
                   style={{ background: '#16a34a', color: 'white', border: 'none', padding: '10px 18px', borderRadius: '6px', cursor: 'pointer', fontWeight: 700, fontSize: '14px', boxShadow: '0 2px 8px rgba(22,163,74,0.25)' }}
                 >
-                  🧾 Build Invoice
+                  {invoices.some(inv => inv.projectId === activeProject.id && !inv.isDeposit) ? '🧾 Build another invoice' : '🧾 Build Invoice'}
                 </button>
               ) : (
                 <>
@@ -1087,6 +1115,13 @@ ${link}
           />
         )}
 
+        {manualEstimateOpen && (
+          <ManualEstimateBuilder
+            project={activeProject}
+            onClose={() => setManualEstimateOpen(false)}
+            onSaved={est => { setManualEstimateOpen(false); setEstimatePreview(est) }}
+          />
+        )}
         {invoiceEdit && (
           <InvoiceEditModal
             invoice={invoiceEdit}

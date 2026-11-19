@@ -3,7 +3,7 @@ import { createProjectForEstimate } from './projectLink'
 import { db } from '../firebase'
 import type { Estimate, Project, ProjectStatus } from '../data/types'
 import { createDepositInvoice, nextInvoiceNumber } from './createInvoice'
-import { shouldAutoAdvance } from './projectStatus'
+import { projectDecision, shouldAutoAdvance, withNote } from './projectStatus'
 import { fetchBusinessProfile } from './businessProfile'
 
 // We've merged Estimates into Projects — every estimate should belong to a
@@ -12,8 +12,10 @@ import { fetchBusinessProfile } from './businessProfile'
 // "in progress". This sweep reconciles both sides:
 //
 //   1. Estimate has NO project yet  → create one at the right status.
-//   2. Estimate already HAS a project (created inline by Quick Quote at "lead")
-//      → advance that project's status to match the customer's response.
+//   2. Estimate already HAS a project (created inline by Quick Quote at "lead",
+//      or one the contractor started by hand and quoted from)
+//      → advance that project's status to match the customer's response. A
+//      project with several estimates is decided by all of them together.
 //
 // Status mapping from the customer's decision:
 //   approved  → "in_progress"  (skips straight past contracted, per the
@@ -77,82 +79,107 @@ export async function autoConvertApprovedEstimates(userId: string): Promise<{
   if (all.length === 0) return { created: 0, estimates: [], approvedCount: 0, declinedCount: 0 }
 
   const changed: Estimate[] = []
-  for (const e of all) {
-    if (e.supersededBy) continue
+  const live = all.filter(e => !e.supersededBy)
+
+  // ── 1. Estimates with no project yet: make one at the right stage. ──
+  for (const e of live) {
+    if (e.projectId || e.projectAutoCreated) continue
     try {
       const { status: target, declined } = desiredStatusFor(e)
-
-      if (e.projectId) {
-        // ── Project already exists — reconcile its status. ──
-        const pSnap = await getDoc(doc(db, 'projects', e.projectId))
-        if (!pSnap.exists()) {
-          // Project was deleted; treat as if none exists and recreate below.
-          await createProjectFor(e, userId, target, declined)
-          changed.push(e)
-          continue
-        }
-        const proj = pSnap.data() as Project
-        const updates: Record<string, unknown> = {}
-        let didAdvance = false
-
-        if (shouldAutoAdvance(proj, e, target)) {
-          updates.status = target
-          updates.notes = notesFor(e)
-          didAdvance = true
-        }
-        if (declined && !proj.declined) {
-          updates.declined = true
-          updates.declinedAt = e.customerResponse?.respondedAt || new Date().toISOString()
-          if (e.customerResponse?.reason) updates.declineReason = e.customerResponse.reason
-          updates.notes = notesFor(e)
-          didAdvance = true
-        }
-        // If the estimate is no longer declined (e.g. the contractor adjusted it
-        // and the customer then approved the new version), un-flag the project so
-        // it leaves the Declined view and rejoins the active pipeline.
-        if (!declined && proj.declined) {
-          updates.declined = false
-          didAdvance = true
-        }
-        if (Object.keys(updates).length > 0) {
-          await updateDoc(doc(db, 'projects', e.projectId), updates)
-        }
-        if (didAdvance) changed.push(e)
-      } else if (!e.projectAutoCreated) {
-        // ── No project yet — create one at the right status. ──
-        await createProjectFor(e, userId, target, declined)
-        changed.push(e)
-      }
-
-      // ── Deposit invoice: if this estimate was APPROVED and requested a
-      //    deposit, auto-create the deposit invoice once (idempotent via the
-      //    depositInvoiceCreated flag). Re-read the estimate's projectId since
-      //    createProjectFor may have just set it. ──
-      const approved = e.status === 'approved' && e.customerResponse?.action === 'approved'
-      if (approved && e.depositRequested && (e.depositAmount || 0) > 0 && !e.depositInvoiceCreated) {
-        try {
-          const eSnap = await getDoc(doc(db, 'estimates', e.id))
-          const fresh = eSnap.exists() ? ({ id: e.id, ...eSnap.data() } as Estimate) : e
-          if (fresh.projectId && !fresh.depositInvoiceCreated) {
-            const profile = await fetchBusinessProfile(userId)
-            // Invoice number: one past the highest this user has used this year.
-            const invSnap = await getDocs(query(collection(db, 'invoices'), where('createdBy', '==', userId)))
-            const usedNumbers = invSnap.docs.map(d => d.data().invoiceNumber as string | undefined)
-            await createDepositInvoice({
-              userId,
-              estimate: fresh,
-              project: { id: fresh.projectId },
-              profile,
-              invoiceNumber: nextInvoiceNumber(usedNumbers),
-            })
-            await updateDoc(doc(db, 'estimates', e.id), { depositInvoiceCreated: true })
-          }
-        } catch (depErr) {
-          console.error('Deposit invoice creation failed for estimate', e.id, depErr)
-        }
-      }
+      e.projectId = await createProjectFor(e, userId, target, declined)
+      changed.push(e)
     } catch (err) {
-      console.error('Auto-convert/reconcile failed for estimate', e.id, err)
+      console.error('Auto-convert failed for estimate', e.id, err)
+    }
+  }
+
+  // ── 2. Projects with estimates: set the stage from ALL of the project's
+  //    estimates together (lib/projectStatus.ts projectDecision). A job can
+  //    carry several, e.g. a quote added to a project started by hand. ──
+  const byProject = new Map<string, Estimate[]>()
+  for (const e of live) {
+    if (!e.projectId) continue
+    const list = byProject.get(e.projectId)
+    if (list) list.push(e)
+    else byProject.set(e.projectId, [e])
+  }
+  for (const [projectId, ests] of byProject) {
+    try {
+      const pSnap = await getDoc(doc(db, 'projects', projectId))
+      if (!pSnap.exists()) {
+        // Project was deleted; make a new one for the job and point all of
+        // its estimates at it, so they stay together.
+        const [first, ...rest] = [...ests].sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
+        const { status: target, declined } = desiredStatusFor(first)
+        const newId = await createProjectFor(first, userId, target, declined)
+        for (const e of rest) {
+          await updateDoc(doc(db, 'estimates', e.id), { projectId: newId, projectAutoCreated: true })
+          e.projectId = newId
+        }
+        changed.push(first)
+        continue
+      }
+      const proj = pSnap.data() as Project
+      const { target, declined, decider } = projectDecision(ests)
+      const updates: Record<string, unknown> = {}
+      let didAdvance = false
+
+      if (decider && shouldAutoAdvance(proj, decider, target)) {
+        updates.status = target
+        updates.notes = withNote(proj.notes, notesFor(decider))
+        didAdvance = true
+      }
+      if (declined && !proj.declined && decider) {
+        updates.declined = true
+        updates.declinedAt = decider.customerResponse?.respondedAt || new Date().toISOString()
+        if (decider.customerResponse?.reason) updates.declineReason = decider.customerResponse.reason
+        updates.notes = withNote(proj.notes, notesFor(decider))
+        didAdvance = true
+      }
+      // No longer declined (the contractor adjusted the quote and the customer
+      // approved the new version, or another quote on the job is still open):
+      // the project leaves the Declined view and rejoins the active pipeline.
+      if (!declined && proj.declined) {
+        updates.declined = false
+        didAdvance = true
+      }
+      if (Object.keys(updates).length > 0) {
+        await updateDoc(doc(db, 'projects', projectId), updates)
+      }
+      if (didAdvance) changed.push(decider ?? ests[ests.length - 1])
+    } catch (err) {
+      console.error('Auto-convert/reconcile failed for project', projectId, err)
+    }
+  }
+
+  // ── 3. Deposit invoice: if an estimate was APPROVED and requested a
+  //    deposit, create the deposit invoice once (idempotent via the
+  //    depositInvoiceCreated flag, and by looking for one already made for this
+  //    estimate, e.g. by the customer's pay button a moment ago). ──
+  for (const e of live) {
+    const approved = e.status === 'approved' && e.customerResponse?.action === 'approved'
+    if (!approved || !e.depositRequested || !((e.depositAmount || 0) > 0) || e.depositInvoiceCreated) continue
+    try {
+      const eSnap = await getDoc(doc(db, 'estimates', e.id))
+      const fresh = eSnap.exists() ? ({ id: e.id, ...eSnap.data() } as Estimate) : e
+      if (!fresh.projectId || fresh.depositInvoiceCreated) continue
+      const invSnap = await getDocs(query(collection(db, 'invoices'), where('createdBy', '==', userId)))
+      const already = invSnap.docs.some(d => d.data().isDeposit === true && d.data().estimateId === e.id)
+      if (!already) {
+        const profile = await fetchBusinessProfile(userId)
+        // Invoice number: one past the highest this user has used this year.
+        const usedNumbers = invSnap.docs.map(d => d.data().invoiceNumber as string | undefined)
+        await createDepositInvoice({
+          userId,
+          estimate: fresh,
+          project: { id: fresh.projectId },
+          profile,
+          invoiceNumber: nextInvoiceNumber(usedNumbers),
+        })
+      }
+      await updateDoc(doc(db, 'estimates', e.id), { depositInvoiceCreated: true })
+    } catch (depErr) {
+      console.error('Deposit invoice creation failed for estimate', e.id, depErr)
     }
   }
 
@@ -161,7 +188,7 @@ export async function autoConvertApprovedEstimates(userId: string): Promise<{
   return { created: changed.length, estimates: changed, approvedCount, declinedCount }
 }
 
-async function createProjectFor(e: Estimate, userId: string, status: ProjectStatus, declined: boolean): Promise<void> {
+async function createProjectFor(e: Estimate, userId: string, status: ProjectStatus, declined: boolean): Promise<string> {
   // Guard against a race with ScanRoom's inline project creation (and any other
   // duplicate sweep): if a project already exists for this estimate, link to it
   // instead of creating a second one.
@@ -176,7 +203,7 @@ async function createProjectFor(e: Estimate, userId: string, status: ProjectStat
       projectAutoCreated: true,
       projectId: existingId,
     })
-    return
+    return existingId
   }
 
   const project: Omit<Project, 'id'> = {
@@ -219,4 +246,5 @@ async function createProjectFor(e: Estimate, userId: string, status: ProjectStat
   } catch (err) {
     console.warn('Photo migration failed for estimate', e.id, err)
   }
+  return ref.id
 }

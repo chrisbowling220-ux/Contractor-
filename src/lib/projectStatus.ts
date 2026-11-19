@@ -88,3 +88,50 @@ export function confirmMessage(
   if (rank(to) - rank(p.status) > 1) return `Move the ${job} ahead to ${toLabel}?`
   return null
 }
+
+// ── One job, several estimates ──────────────────────────────────────────────
+//
+// A project can carry more than one estimate: a job started with + New Project
+// gets its quote afterwards, and a job can need a second quote for extra work.
+
+const isApproved = (e: Pick<Estimate, 'status' | 'customerResponse'>) =>
+  e.status === 'approved' && e.customerResponse?.action === 'approved'
+// A customer turning down a REVISION does not decline the job: the version they
+// signed earlier still stands (lib/estimateRevision.ts).
+const isDeclined = (e: Pick<Estimate, 'status' | 'customerResponse' | 'previousVersionId'>) =>
+  e.status === 'declined' && e.customerResponse?.action === 'declined' && !e.previousVersionId
+const answeredAt = (e: Pick<Estimate, 'customerResponse'>) => Date.parse(e.customerResponse?.respondedAt ?? '') || 0
+
+// What a project's live estimates (replaced versions left out), taken
+// together, say its stage should be. Any signed estimate makes it a go; it is
+// declined only when the customer turned down every one of them. `decider` is
+// the customer answer behind that (the latest one), or null when nobody has
+// answered. The sweep used to steer a project from each estimate in turn, so
+// an old declined quote and a newer pending one flipped it in and out of
+// Declined on every pass.
+export function projectDecision<E extends Pick<Estimate, 'status' | 'customerResponse' | 'previousVersionId'>>(
+  estimates: E[],
+): { target: ProjectStatus; declined: boolean; decider: E | null } {
+  const latest = (list: E[]) => list.reduce<E | null>((best, e) => (!best || answeredAt(e) > answeredAt(best) ? e : best), null)
+  const approved = estimates.filter(isApproved)
+  if (approved.length > 0) return { target: 'in_progress', declined: false, decider: latest(approved) }
+  if (estimates.length > 0 && estimates.every(isDeclined)) return { target: 'lead', declined: true, decider: latest(estimates) }
+  return { target: 'lead', declined: false, decider: null }
+}
+
+// A job still at Lead has been estimated once a quote is made for it.
+export const stageAfterNewEstimate = (s: ProjectStatus): ProjectStatus | null => (s === 'lead' ? 'estimated' : null)
+
+// Projects a new quote can be added to: on the active list and not finished.
+export const canTakeEstimate = (p: Pick<Project, 'status' | 'archived' | 'declined'>): boolean =>
+  !p.archived && !p.declined && p.status !== 'closed'
+
+// Adds an automatic line to the contractor's notes on a project instead of
+// replacing them: a job started by hand carries the contractor's own notes
+// ("dog in the yard"), which a customer signing used to wipe out.
+export function withNote(existing: string | undefined, line: string): string {
+  const notes = (existing || '').trim()
+  if (!notes) return line
+  if (notes.includes(line)) return notes
+  return `${notes}\n${line}`
+}

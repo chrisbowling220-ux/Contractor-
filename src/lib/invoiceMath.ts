@@ -64,8 +64,15 @@ export function estimateInvoiceLines(e: Estimate, jobTypeName: string): InvoiceL
 // has not declined, and of a revised estimate only the version that binds
 // (the newest one the customer signed), so a revision is never billed on top
 // of the version it replaces.
-export const billableEstimates = (estimates: Estimate[]): Estimate[] =>
-  bindingVersions(estimates).filter(e => e.status !== 'declined')
+//
+// Once the customer has signed anything on a job, only what they signed is
+// billed: a second quote added to the job and still waiting for an answer is
+// not part of the agreement yet. (A job nobody signed for, agreed by phone,
+// still bills its open quote.)
+export const billableEstimates = (estimates: Estimate[]): Estimate[] => {
+  const live = bindingVersions(estimates).filter(e => e.status !== 'declined')
+  return live.some(e => e.status === 'approved') ? live.filter(e => e.status === 'approved') : live
+}
 
 // The contract value of a job: its live estimates plus APPROVED change orders.
 // Pending and declined change orders never change what is owed.

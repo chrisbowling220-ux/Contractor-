@@ -1,7 +1,7 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useRef } from 'react'
 import { useUser } from '@clerk/clerk-react'
-import { addDoc, collection } from 'firebase/firestore'
-import { createProjectForEstimate } from './lib/projectLink'
+import { collection, doc, setDoc, writeBatch } from 'firebase/firestore'
+import { addNewEstimateToProject, createProjectForEstimate, linkToProjectFields } from './lib/projectLink'
 import { db } from './firebase'
 import { MATERIALS } from './data/materials'
 import type { Estimate, MaterialLine, Project } from './data/types'
@@ -10,6 +10,9 @@ interface Props {
   // Pre-fill customer if launched from a known context.
   defaultCustomerName?: string
   defaultCustomerId?: string
+  // The job this estimate is for, when quoting a project the contractor
+  // already has. The estimate is added to it instead of starting a new one.
+  project?: Pick<Project, 'id' | 'customerName' | 'customerId' | 'jobTypeName' | 'jobLocationZip'>
   onClose: () => void
   // Called with the saved estimate so the caller can open it / navigate.
   onSaved: (estimate: Estimate) => void
@@ -25,11 +28,14 @@ const newRow = (): Row => ({ key: `r${rowSeq++}`, materialId: '', name: '', unit
 // a standard Estimate (no aiQuote) that flows into projects, print, share, and
 // invoices exactly like an instant quote. Always available; the only way to
 // estimate once the free instant-quote tier is used up.
-export default function ManualEstimateBuilder({ defaultCustomerName, defaultCustomerId, onClose, onSaved }: Props) {
+export default function ManualEstimateBuilder({ defaultCustomerName, defaultCustomerId, project, onClose, onSaved }: Props) {
   const { user } = useUser()
-  const [customerName, setCustomerName] = useState(defaultCustomerName || '')
-  const [jobTypeName, setJobTypeName] = useState('')
-  const [zip, setZip] = useState('')
+  const [customerName, setCustomerName] = useState(project?.customerName || defaultCustomerName || '')
+  const [jobTypeName, setJobTypeName] = useState(project?.jobTypeName || '')
+  const [zip, setZip] = useState(project?.jobLocationZip || '')
+  const customerId = project ? project.customerId : defaultCustomerId
+  // One save per tap, even on a quick double tap before the button disables.
+  const savingRef = useRef(false)
   const [scope, setScope] = useState('')
   const [rateType, setRateType] = useState<'hourly' | 'flat'>('hourly')
   const [hourlyRate, setHourlyRate] = useState('65')
@@ -61,9 +67,11 @@ export default function ManualEstimateBuilder({ defaultCustomerName, defaultCust
   const removeRow = (key: string) => setRows(prev => prev.filter(r => r.key !== key))
 
   const save = async () => {
+    if (savingRef.current) return
     if (!user?.id) { setError('Not signed in.'); return }
     if (!customerName.trim()) { setError('Customer name is required.'); return }
     if (!jobTypeName.trim()) { setError('Job type / title is required.'); return }
+    savingRef.current = true
     setSaving(true)
     setError('')
     try {
@@ -116,15 +124,26 @@ export default function ManualEstimateBuilder({ defaultCustomerName, defaultCust
         createdAt: new Date().toISOString(),
         createdBy: user.id,
       }
-      if (defaultCustomerId) payload.customerId = defaultCustomerId
+      if (customerId) payload.customerId = customerId
 
-      const ref = await addDoc(collection(db, 'estimates'), payload)
+      const ref = doc(collection(db, 'estimates'))
+      if (project) {
+        // Quoting a job the contractor already has: the estimate joins it.
+        Object.assign(payload, linkToProjectFields(project.id))
+        const batch = writeBatch(db)
+        batch.set(ref, payload)
+        await addNewEstimateToProject(batch, project.id)
+        await batch.commit()
+        onSaved({ id: ref.id, ...payload } as Estimate)
+        return
+      }
+      await setDoc(ref, payload)
 
       // Mirror Quick Quote: create a project at "lead" so it lands in Projects.
       try {
         const projectPayload: Omit<Project, 'id'> = {
           customerName: customerName.trim(),
-          ...(defaultCustomerId ? { customerId: defaultCustomerId } : {}),
+          ...(customerId ? { customerId } : {}),
           jobTypeName: jobTypeName.trim(),
           jobLocationZip: zip.trim(),
           description: scope.trim().slice(0, 500),
@@ -144,6 +163,7 @@ export default function ManualEstimateBuilder({ defaultCustomerName, defaultCust
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Save failed')
       setSaving(false)
+      savingRef.current = false
     }
   }
 
@@ -156,14 +176,16 @@ export default function ManualEstimateBuilder({ defaultCustomerName, defaultCust
         <div style={{ background: '#1a1f2e', color: 'white', padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
           <div>
             <h2 style={{ margin: 0, color: '#f97316', fontSize: '18px' }}>✍️ Build Estimate Manually</h2>
-            <p style={{ margin: '2px 0 0', color: '#94a3b8', fontSize: '12px' }}>No limits — pick materials from the list or type your own.</p>
+            <p style={{ margin: '2px 0 0', color: '#94a3b8', fontSize: '12px' }}>
+              {project ? `For the ${project.jobTypeName} job for ${project.customerName}. It's added to that project.` : 'No limits — pick materials from the list or type your own.'}
+            </p>
           </div>
           <button onClick={onClose} style={{ background: 'transparent', color: 'white', border: '1px solid #475569', padding: '6px 14px', borderRadius: '6px', cursor: 'pointer' }}>← Back</button>
         </div>
 
         <div style={{ padding: '16px' }}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '12px', marginBottom: '16px' }}>
-            <div><label style={label}>Customer name *</label><input aria-label="Customer name" value={customerName} onChange={e => setCustomerName(e.target.value)} style={input} placeholder="e.g. Sarah Miller" /></div>
+            <div><label style={label}>Customer name *</label><input aria-label="Customer name" value={customerName} onChange={e => setCustomerName(e.target.value)} readOnly={!!project} title={project ? 'Comes from the project' : undefined} style={project ? { ...input, background: '#f1f5f9', color: '#475569' } : input} placeholder="e.g. Sarah Miller" /></div>
             <div><label style={label}>Job type / title *</label><input aria-label="Job type / title" value={jobTypeName} onChange={e => setJobTypeName(e.target.value)} style={input} placeholder="e.g. Bathroom remodel" /></div>
             <div><label style={label}>Job ZIP</label><input aria-label="Job ZIP" value={zip} onChange={e => setZip(e.target.value)} style={input} placeholder="27573" /></div>
           </div>

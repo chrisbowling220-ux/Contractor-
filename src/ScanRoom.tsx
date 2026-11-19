@@ -3,7 +3,8 @@ import { httpsCallable } from 'firebase/functions'
 import { collection, addDoc, doc, getDocs, query, where, writeBatch } from 'firebase/firestore'
 import { customerSafeEstimate } from './lib/estimatePrivacy'
 import { estimatePrivateData, estimatePrivateRef } from './lib/estimatePrivateStore'
-import { createProjectForEstimate } from './lib/projectLink'
+import { addNewEstimateToProject, createProjectForEstimate, linkToProjectFields } from './lib/projectLink'
+import { canTakeEstimate } from './lib/projectStatus'
 import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage'
 import { useAuth, useUser } from '@clerk/clerk-react'
 import { db, functions, storage } from './firebase'
@@ -15,7 +16,8 @@ import { openEstimatePrintWindow } from './lib/printEstimate'
 import { fetchBusinessProfile } from './lib/businessProfile'
 import type { BusinessProfile } from './lib/businessProfile'
 import { useTier } from './lib/useTier'
-import type { AIQuote, Estimate } from './data/types'
+import type { AIQuote, Estimate, Project } from './data/types'
+import { PROJECT_STATUS_LABEL } from './data/types'
 
 const callable = httpsCallable<
   {
@@ -210,7 +212,14 @@ async function extractKeyframes(videoBlob: Blob, count: number, knownDurationMs:
   }
 }
 
-export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) => void }) {
+// `forProjectId` starts the quote on a project the contractor already has (the
+// "Quick Quote" button on a project); the estimate is added to that job
+// instead of starting a new project. `onOpenProject` opens it afterwards.
+export default function ScanRoom({ onNavigate, forProjectId, onOpenProject }: {
+  onNavigate?: (page: string) => void
+  forProjectId?: string | null
+  onOpenProject?: (projectId: string) => void
+}) {
   const { user } = useUser()
   const { getToken } = useAuth()
   const { tier, quotesLeft } = useTier()  // for the "quotes left" countdown
@@ -219,6 +228,15 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
   const [customerId, setCustomerId] = useState('')
   const [customers, setCustomers] = useState<{ id: string; name: string }[]>([])
   const [zip, setZip] = useState(DEFAULT_ZIP)
+  // Which job this quote is for: '' starts a new project, otherwise the id of
+  // an open project the estimate is added to.
+  const [projectId, setProjectId] = useState(forProjectId || '')
+  const [openProjects, setOpenProjects] = useState<Project[]>([])
+  const attachedProject = projectId ? openProjects.find(p => p.id === projectId) ?? null : null
+  // The estimate saved from this quote, so "Reopen Editor" reopens it instead
+  // of saving the quote a second time (a second estimate AND a second project).
+  const [lastSaved, setLastSaved] = useState<Estimate | null>(null)
+  const savingRef = useRef(false)
   // Estimate that was just auto-saved — opens the editor modal so the user
   // can edit and send to the customer right away.
   const [savedEstimate, setSavedEstimate] = useState<Estimate | null>(null)
@@ -295,6 +313,33 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
     if (!user?.id) return
     fetchBusinessProfile(user.id).then(setProfile).catch(() => { /* ignore */ })
   }, [user?.id])
+
+  // Quoting an existing job: its customer and ZIP come from the project.
+  const pickProject = (p: Project | null) => {
+    setProjectId(p?.id || '')
+    if (!p) return
+    setCustomerName(p.customerName)
+    setCustomerId(p.customerId || '')
+    if (/^[0-9]{5}$/.test(p.jobLocationZip || '')) setZip(p.jobLocationZip)
+  }
+
+  // Open projects a quote can be added to (lib/projectStatus.ts canTakeEstimate).
+  useEffect(() => {
+    if (!user?.id) return
+    getDocs(query(collection(db, 'projects'), where('createdBy', '==', user.id)))
+      .then(snap => {
+        const list = snap.docs
+          .map(d => ({ id: d.id, ...d.data() } as Project))
+          .filter(canTakeEstimate)
+          .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+        setOpenProjects(list)
+        // Started from a project: the quote is for that job's customer.
+        const start = forProjectId ? list.find(p => p.id === forProjectId) : undefined
+        if (start) pickProject(start)
+        else if (forProjectId) setProjectId('')
+      })
+      .catch(err => console.error('Projects fetch failed:', err))
+  }, [user?.id, forProjectId])
 
   // Pull the user's customer list for the dropdown.
   useEffect(() => {
@@ -620,10 +665,12 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
   // (with id) so the caller can open the editor immediately.
   const saveAsEstimateAndReturn = async (ai: AIQuote): Promise<Estimate | null> => {
     if (!user?.id) { setError('Not signed in'); return null }
+    if (savingRef.current) return null
+    const project = attachedProject
     const payload: Record<string, unknown> = {
       customerName,
       jobTypeId: 'quick-quote',
-      jobTypeName: 'Quick Quote',
+      jobTypeName: project?.jobTypeName || 'Quick Quote',
       description: transcript.slice(0, 500),
       rateType: 'hourly',
       hourlyRate: ai.labor.hourly_rate,
@@ -652,6 +699,9 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
     // Apply the proposed start date, if set.
     if (proposedStartDate) payload.proposedStartDate = proposedStartDate
     if (customerId) payload.customerId = customerId
+    // Quoting a job the contractor already has: the estimate joins it.
+    if (project) Object.assign(payload, linkToProjectFields(project.id))
+    savingRef.current = true
     try {
       // The estimate is what the customer's link opens, so it holds only the
       // customer view; the markup, the private notes and the spoken
@@ -661,6 +711,7 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
       const batch = writeBatch(db)
       batch.set(docRef, safe)
       batch.set(estimatePrivateRef(docRef.id), estimatePrivateData(user.id, privateFields))
+      if (project) await addNewEstimateToProject(batch, project.id)
       await batch.commit()
       setSavedId(docRef.id)
       // Create the project FIRST (so we have its id), then upload photos
@@ -668,17 +719,21 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
       // photos always land in the right project (no race condition).
       ;(async () => {
         try {
-          const projectId = await autoCreateProjectFromEstimate(docRef.id, payload)
+          const projectId = project ? project.id : await autoCreateProjectFromEstimate(docRef.id, payload)
           await uploadScanPhotosToProject(docRef.id, projectId)
         } catch (err) {
           console.warn('Post-save project/photo flow failed:', err)
         }
       })()
       // The editor reads the private notes back from estimatePrivate.
-      return { id: docRef.id, ...safe } as Estimate
+      const saved = { id: docRef.id, ...safe } as Estimate
+      setLastSaved(saved)
+      return saved
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Save failed')
       return null
+    } finally {
+      savingRef.current = false
     }
   }
 
@@ -781,10 +836,33 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
       )}
 
       <div style={card}>
+        {openProjects.length > 0 && (
+          <div style={{ marginBottom: '16px' }}>
+            <label htmlFor="qq-project" style={label}>Which job is this for?</label>
+            <select
+              id="qq-project"
+              value={projectId}
+              onChange={e => pickProject(openProjects.find(p => p.id === e.target.value) ?? null)}
+              style={input}
+            >
+              <option value="">+ New job (makes a new project)</option>
+              {openProjects.map(p => (
+                <option key={p.id} value={p.id}>{p.customerName} · {p.jobTypeName} ({PROJECT_STATUS_LABEL[p.status]})</option>
+              ))}
+            </select>
+            <p style={{ fontSize: '12px', color: '#64748b', margin: '4px 0 0' }}>
+              {attachedProject
+                ? 'The estimate is added to this project, with its customer. No new project is made.'
+                : 'Quoting a job you already have? Pick it so the estimate lands on that project.'}
+            </p>
+          </div>
+        )}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px' }}>
           <div>
             <label style={label}>Customer *</label>
-            {customers.length > 0 ? (
+            {attachedProject ? (
+              <p style={{ margin: '4px 0 0', padding: '10px', background: '#f1f5f9', borderRadius: '6px', fontSize: '14px', fontWeight: 600, color: '#1a1f2e' }}>{attachedProject.customerName}</p>
+            ) : customers.length > 0 ? (
               <select
                 value={customerId || '__new__'}
                 onChange={e => {
@@ -802,7 +880,7 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
             ) : (
               <p style={{ fontSize: '12px', color: '#94a3b8', margin: '4px 0' }}>No saved customers — type a name below.</p>
             )}
-            {!customerId && (
+            {!customerId && !attachedProject && (
               <input value={customerName} onChange={e => setCustomerName(e.target.value)} style={{ ...input, marginTop: '6px' }} placeholder="e.g. Jane Smith" />
             )}
           </div>
@@ -1048,11 +1126,11 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-end' }}>
               {savedId ? (
                 <>
-                  <span style={{ background: '#f0fdf4', color: '#16a34a', padding: '6px 12px', borderRadius: '6px', fontWeight: 600, fontSize: '13px' }}>✓ Saved as Project</span>
+                  <span style={{ background: '#f0fdf4', color: '#16a34a', padding: '6px 12px', borderRadius: '6px', fontWeight: 600, fontSize: '13px' }}>{attachedProject ? '✓ Added to the project' : '✓ Saved as Project'}</span>
                   <p style={{ margin: 0, fontSize: '11px', color: '#64748b', textAlign: 'right' }}>
                     Find it in <strong>🗂️ Projects</strong> — edit, send, add change orders.
                   </p>
-                  <button onClick={saveAsEstimate} style={{ background: '#f97316', color: 'white', border: 'none', padding: '8px 14px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}>
+                  <button onClick={() => { if (lastSaved) setSavedEstimate(lastSaved) }} style={{ background: '#f97316', color: 'white', border: 'none', padding: '8px 14px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}>
                     ✏️ Reopen Editor
                   </button>
                 </>
@@ -1152,8 +1230,13 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
             setImages([])
             setResult(null)
             setSavedId(null)
+            setLastSaved(null)
             setVoiceSessionsUsed(0)
-            if (onNavigate) onNavigate('projects')
+            // Back to the job it belongs to: the project it was added to, or
+            // the project list where the new one is waiting.
+            const target = savedEstimate.projectId
+            if (target && onOpenProject) onOpenProject(target)
+            else if (onNavigate) onNavigate('projects')
           }}
           onSaved={updated => setSavedEstimate(updated)}
           onPrint={(est) => openEstimatePrintWindow(est, profile)}
@@ -1165,6 +1248,7 @@ export default function ScanRoom({ onNavigate }: { onNavigate?: (page: string) =
         <ManualEstimateBuilder
           defaultCustomerName={customerName}
           defaultCustomerId={customerId || undefined}
+          project={attachedProject ?? undefined}
           onClose={() => setManualOpen(false)}
           onSaved={(est) => {
             setManualOpen(false)

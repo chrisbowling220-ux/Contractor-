@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { confirmMessage, nextStatus, previousStatus, shouldAutoAdvance, statusUpdate } from './projectStatus'
+import { canTakeEstimate, confirmMessage, nextStatus, previousStatus, projectDecision, shouldAutoAdvance, stageAfterNewEstimate, statusUpdate, withNote } from './projectStatus'
 
 const NOW = '2026-11-18T15:00:00.000Z'
 const job = { customerName: 'Pat Doe', jobTypeName: 'Deck repair' }
@@ -81,5 +81,52 @@ describe('confirmMessage', () => {
     expect(back).toMatch(/back to Contracted/)
     expect(back).toMatch(/signature stays on file/)
     expect(back).toMatch(/invoice itself is kept/)
+  })
+})
+
+describe('a job with more than one estimate', () => {
+  const at = (day: number) => `2026-11-${String(day).padStart(2, '0')}T12:00:00.000Z`
+  const pending = { id: 'p', status: 'pending' as const }
+  const approved = (id: string, day: number) => ({ id, status: 'approved' as const, customerResponse: { action: 'approved' as const, signedName: 'Pat', respondedAt: at(day) } })
+  const declined = (id: string, day: number, extra = {}) => ({ id, status: 'declined' as const, customerResponse: { action: 'declined' as const, signedName: 'Pat', respondedAt: at(day) }, ...extra })
+
+  it('is a go once any estimate is signed, decided by the latest signature', () => {
+    const d = projectDecision([declined('a', 1), approved('b', 3), approved('c', 2), pending])
+    expect(d).toMatchObject({ target: 'in_progress', declined: false })
+    expect(d.decider?.id).toBe('b')
+  })
+  it('is declined only when every estimate was turned down', () => {
+    expect(projectDecision([declined('a', 1), pending])).toEqual({ target: 'lead', declined: false, decider: null })
+    const d = projectDecision([declined('a', 1), declined('b', 4)])
+    expect(d).toMatchObject({ target: 'lead', declined: true })
+    expect(d.decider?.id).toBe('b')
+  })
+  it('does not decline the job when only a revision was turned down', () => {
+    expect(projectDecision([declined('v2', 2, { previousVersionId: 'v1' })]).declined).toBe(false)
+  })
+  it('has nothing to decide with no answers yet', () => {
+    expect(projectDecision([pending])).toEqual({ target: 'lead', declined: false, decider: null })
+    expect(projectDecision([])).toEqual({ target: 'lead', declined: false, decider: null })
+  })
+  it('moves a Lead to Estimated when a quote is added, and nothing else', () => {
+    expect(stageAfterNewEstimate('lead')).toBe('estimated')
+    expect(stageAfterNewEstimate('contracted')).toBeNull()
+    expect(stageAfterNewEstimate('in_progress')).toBeNull()
+  })
+  it('only offers jobs on the active list that are not finished', () => {
+    expect(canTakeEstimate({ status: 'lead' })).toBe(true)
+    expect(canTakeEstimate({ status: 'completed' })).toBe(true)
+    expect(canTakeEstimate({ status: 'closed' })).toBe(false)
+    expect(canTakeEstimate({ status: 'lead', archived: true })).toBe(false)
+    expect(canTakeEstimate({ status: 'lead', declined: true })).toBe(false)
+  })
+})
+
+describe('withNote', () => {
+  it('keeps the contractor’s own notes and adds the line under them', () => {
+    expect(withNote('Dog in the yard', 'Customer signed.')).toBe('Dog in the yard\nCustomer signed.')
+    expect(withNote('', 'Customer signed.')).toBe('Customer signed.')
+    expect(withNote(undefined, 'Customer signed.')).toBe('Customer signed.')
+    expect(withNote('Dog in the yard\nCustomer signed.', 'Customer signed.')).toBe('Dog in the yard\nCustomer signed.')
   })
 })

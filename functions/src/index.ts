@@ -3318,21 +3318,72 @@ export const onChangeOrderResponded = onDocumentUpdated(
   },
 )
 
-// Invoice paid (card) or customer chose cash → email the contractor.
+// What the "invoice paid in full" email says. It names how the invoice was
+// actually settled, from the last entry in its payment history (the one that
+// paid it off). Only a card payment taken online through Stripe is "paid by
+// card" with money on its way to the bank. Cash, a check, or anything else the
+// contractor recorded in the app is described as exactly that, and an invoice
+// with no payment history only says it is marked paid.
+type PaidInvoice = {
+  customerName?: string
+  invoiceNumber?: string
+  subtotal?: number
+  payments?: Array<{ amount?: number; method?: string; source?: string; date?: string }>
+}
+const PAY_METHOD: Record<string, string> = {
+  cash: 'cash', check: 'check', card: 'card', zelle: 'Zelle', venmo: 'Venmo', bank_transfer: 'bank transfer', other: 'another method',
+}
+const dollars = (n: unknown) => `$${(Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+export function invoicePaidEmail(inv: PaidInvoice): { subject: string; bodyHtml: string } {
+  const who = inv.customerName || 'A customer'
+  const name = escapeHtml(inv.customerName || 'Your customer')
+  const no = (inv.invoiceNumber || '').trim()
+  const invoice = no ? `invoice ${escapeHtml(no)}` : 'the invoice'
+  const total = inv.subtotal ? ` (${dollars(inv.subtotal)})` : ''
+  const payments = Array.isArray(inv.payments) ? inv.payments.filter(p => Number(p?.amount) > 0) : []
+  const last = payments[payments.length - 1]
+  const how = (p: { method?: string; source?: string }) =>
+    p.source === 'stripe' ? 'card, paid online' : `${PAY_METHOD[p.method || ''] || 'another method'}, recorded in the app`
+  const history = payments.length > 1
+    ? `<p style="font-size:14px;color:#64748b">Payments: ${payments.map(p => `${dollars(p.amount)} by ${escapeHtml(how(p))}${p.date ? ` on ${escapeHtml(String(p.date))}` : ''}`).join('; ')}.</p>`
+    : ''
+  const subjectInvoice = no ? `invoice ${no}` : 'an invoice'
+  if (last?.source === 'stripe') {
+    return {
+      subject: `💳 ${who} paid ${subjectInvoice} by card`,
+      bodyHtml: `<p style="font-size:15px">You got paid! <strong>${name}</strong> paid ${dollars(last.amount)} by card online, and ${invoice}${total} is now paid in full.</p>
+         ${history}
+         <p style="font-size:14px;color:#64748b">The card payment is on its way to your bank through Stripe.</p>`,
+    }
+  }
+  const Invoice = no ? `Invoice ${no}` : 'An invoice'
+  if (last) {
+    return {
+      subject: `✅ ${Invoice} for ${who} is paid in full`,
+      bodyHtml: `<p style="font-size:15px">${no ? `Invoice ${escapeHtml(no)}` : 'The invoice'} for <strong>${name}</strong>${total} is paid in full. The last payment, ${dollars(last.amount)} by ${escapeHtml(PAY_METHOD[last.method || ''] || 'another method')}, was recorded in the app.</p>
+         ${history}`,
+    }
+  }
+  return {
+    subject: `✅ ${Invoice} for ${who} is marked paid`,
+    bodyHtml: `<p style="font-size:15px">${no ? `Invoice ${escapeHtml(no)}` : 'The invoice'} for <strong>${name}</strong>${total} is now marked paid in full.</p>`,
+  }
+}
+
+// Invoice paid in full, or customer chose cash → email the contractor.
 export const onInvoicePaidAlert = onDocumentUpdated(
   { document: 'invoices/{id}', secrets: [RESEND_API_KEY] },
   async (event) => {
     const before = event.data?.before.data() as { status?: string; customerCashChoice?: boolean } | undefined
-    const after = event.data?.after.data() as { status?: string; customerCashChoice?: boolean; createdBy?: string; customerName?: string; invoiceNumber?: string; subtotal?: number } | undefined
+    const after = event.data?.after.data() as (PaidInvoice & { status?: string; customerCashChoice?: boolean; createdBy?: string }) | undefined
     if (!after) return
     const invName = escapeHtml(after.customerName || 'Your customer')
     const invNo = escapeHtml(after.invoiceNumber || '')
-    // Paid by card: status flipped to 'paid'.
+    // Paid in full: status flipped to 'paid', by card online or by a payment
+    // the contractor recorded. The email says which (invoicePaidEmail).
     if (before?.status !== 'paid' && after.status === 'paid') {
-      await emailContractor(after.createdBy,
-        `💳 ${after.customerName || 'A customer'} paid invoice ${after.invoiceNumber || ''}`.trim(),
-        `<p style="font-size:15px">You got paid! <strong>${invName}</strong> paid invoice ${invNo}${after.subtotal ? ` ($${Number(after.subtotal).toLocaleString()})` : ''} by card.</p>
-         <p style="font-size:14px;color:#64748b">The funds are on their way to your bank.</p>`)
+      const { subject, bodyHtml } = invoicePaidEmail(after)
+      await emailContractor(after.createdBy, subject, bodyHtml)
       return
     }
     // Customer chose "Pay Cash / In Person".

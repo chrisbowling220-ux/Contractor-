@@ -6,7 +6,7 @@ import { ai, aiMessage } from './mocks'
 import { call, callRaw, clearDb, failsWith, outbound, outboundReply, read, seed } from './harness'
 import {
   sendEstimateEmail, sendInvoiceEmail, generateAIQuote, generateThankYouLetter,
-  generateInvoiceCopy, exchangeFirebaseToken,
+  generateInvoiceCopy, exchangeFirebaseToken, onInvoicePaidAlert,
 } from '../src/index'
 
 const USER = 'user_contractor'
@@ -213,5 +213,79 @@ describe('other AI features', () => {
     expect(await call(generateInvoiceCopy, USER, { customerName: 'Pat Doe', jobTypeName: 'Deck repair', total: 1200 }))
       .toEqual({ intro_note: 'Thanks!', payment_terms: 'Due in 14 days.' })
     expect((await read(`users/${USER}`))?.aiQuotesUsed).toBe(10)
+  })
+})
+
+describe('"invoice paid" email to the contractor', () => {
+  const OWNER = 'user_paid_owner'
+  const fire = (before: Record<string, unknown>, after: Record<string, unknown>) =>
+    (onInvoicePaidAlert as unknown as { run: (e: unknown) => Promise<unknown> }).run({
+      params: { id: 'inv1' },
+      data: { before: { data: () => before }, after: { data: () => after } },
+    })
+  const base = { createdBy: OWNER, customerName: 'Pat Doe', invoiceNumber: 'INV-2026-0007', subtotal: 1200, status: 'sent' }
+  const pay = (amount: number, method: string, source: 'manual' | 'stripe', date = '2026-11-19') => ({ id: `p${amount}`, amount, method, date, recordedAt: '', source })
+  const sent = () => {
+    expect(outbound).toHaveLength(1)
+    expect(outbound[0].url).toContain('api.resend.com')
+    const { subject, html, to } = outbound[0].body as { subject: string; html: string; to: string[] }
+    expect(to).toEqual(['owner@example.test'])
+    return { subject, html }
+  }
+  beforeEach(async () => { await seed(`users/${OWNER}`, { businessEmail: 'owner@example.test', businessName: 'Owner Co' }) })
+
+  it('cash recorded in the app is never called a card payment or a bank transfer', async () => {
+    await fire(base, { ...base, status: 'paid', payments: [pay(1200, 'cash', 'manual')] })
+    const { subject, html } = sent()
+    expect(subject).toBe('✅ Invoice INV-2026-0007 for Pat Doe is paid in full')
+    expect(html).toContain('$1,200.00 by cash, was recorded in the app')
+    expect(`${subject} ${html}`).not.toMatch(/card|bank|Stripe|on its way|on their way/i)
+  })
+
+  it('a check, after an earlier part payment, lists both and says paid in full', async () => {
+    await fire(base, { ...base, status: 'paid', payments: [pay(500, 'check', 'manual', '2026-11-12'), pay(700, 'check', 'manual')] })
+    const { subject, html } = sent()
+    expect(subject).toContain('is paid in full')
+    expect(html).toContain('The last payment, $700.00 by check')
+    expect(html).toContain('Payments: $500.00 by check, recorded in the app on 2026-11-12; $700.00 by check, recorded in the app on 2026-11-19.')
+    expect(`${subject} ${html}`).not.toMatch(/card|bank|Stripe|on its way/i)
+  })
+
+  it('a card payment taken online says card, and only then mentions the bank', async () => {
+    await fire(base, { ...base, status: 'paid', payments: [pay(400, 'check', 'manual', '2026-11-12'), pay(800, 'card', 'stripe')] })
+    const { subject, html } = sent()
+    expect(subject).toBe('💳 Pat Doe paid invoice INV-2026-0007 by card')
+    expect(html).toContain('paid $800.00 by card online')
+    expect(html).toContain('$400.00 by check, recorded in the app')
+    expect(html).toContain('The card payment is on its way to your bank through Stripe.')
+  })
+
+  it('an invoice with no payment history is only "marked paid", with no method claimed', async () => {
+    await fire(base, { ...base, status: 'paid' })
+    const { subject, html } = sent()
+    expect(subject).toBe('✅ Invoice INV-2026-0007 for Pat Doe is marked paid')
+    expect(`${subject} ${html}`).not.toMatch(/card|cash|check|bank|Stripe/i)
+  })
+
+  it('names other recorded methods as they are, and escapes what the customer typed', async () => {
+    await fire(base, { ...base, customerName: '<b>Pat</b>', status: 'paid', payments: [pay(1200, 'zelle', 'manual')] })
+    const { html } = sent()
+    expect(html).toContain('by Zelle, was recorded in the app')
+    expect(html).toContain('&lt;b&gt;Pat&lt;/b&gt;')
+    expect(html).not.toMatch(/bank|Stripe/)
+  })
+
+  it('sends nothing for a part payment, a re-save of a paid invoice, or an owner with no email', async () => {
+    await fire(base, { ...base, amountPaid: 500, payments: [pay(500, 'cash', 'manual')] })
+    await fire({ ...base, status: 'paid' }, { ...base, status: 'paid', payments: [pay(1200, 'cash', 'manual')] })
+    await fire(base, { ...base, createdBy: 'user_without_profile', status: 'paid', payments: [pay(1200, 'cash', 'manual')] })
+    expect(outbound).toHaveLength(0)
+  })
+
+  it('the "will pay cash" choice email is unchanged', async () => {
+    await fire(base, { ...base, customerCashChoice: true })
+    const { subject, html } = sent()
+    expect(subject).toBe('💵 Pat Doe will pay cash for invoice INV-2026-0007')
+    expect(html).toContain('chose to pay invoice INV-2026-0007 ($1,200) in cash/in person.')
   })
 })

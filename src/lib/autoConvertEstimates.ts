@@ -16,6 +16,8 @@ import { fetchBusinessProfile } from './businessProfile'
 //      or one the contractor started by hand and quoted from)
 //      → advance that project's status to match the customer's response. A
 //      project with several estimates is decided by all of them together.
+//   3. Estimate's project was DELETED by the contractor → left alone. The
+//      project is not brought back and the estimate is not changed.
 //
 // Status mapping from the customer's decision:
 //   approved  → "in_progress"  (skips straight past contracted, per the
@@ -105,18 +107,23 @@ export async function autoConvertApprovedEstimates(userId: string): Promise<{
   }
   for (const [projectId, ests] of byProject) {
     try {
-      const pSnap = await getDoc(doc(db, 'projects', projectId))
+      // The database refuses to read a project that no longer exists (there is
+      // no owner on it to check), so a deleted project shows up as a refusal,
+      // not as a missing document. Either way there is no project to update.
+      let pSnap
+      try {
+        pSnap = await getDoc(doc(db, 'projects', projectId))
+      } catch (err) {
+        if ((err as { code?: string }).code === 'permission-denied') continue
+        throw err
+      }
       if (!pSnap.exists()) {
-        // Project was deleted; make a new one for the job and point all of
-        // its estimates at it, so they stay together.
-        const [first, ...rest] = [...ests].sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
-        const { status: target, declined } = desiredStatusFor(first)
-        const newId = await createProjectFor(first, userId, target, declined)
-        for (const e of rest) {
-          await updateDoc(doc(db, 'estimates', e.id), { projectId: newId, projectAutoCreated: true })
-          e.projectId = newId
-        }
-        changed.push(first)
+        // The contractor deleted this project ("Linked estimates and change
+        // orders stay"). Leave it deleted and leave its estimates exactly as
+        // they are: no new project, no write to the estimate. Bringing it back
+        // used to undo the deletion on the next app load, and a NEW project
+        // split the job's records, because its invoices, change orders and
+        // photos still name the deleted project's id.
         continue
       }
       const proj = pSnap.data() as Project

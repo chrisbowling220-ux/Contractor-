@@ -3279,12 +3279,25 @@ async function emailContractor(ownerId: string | undefined, subject: string, bod
   }
 }
 
+// True when the estimate names a project that its owner no longer has (the
+// contractor deleted it). A failed lookup counts as "still there", so the
+// approval email falls back to its usual wording rather than not going out.
+async function projectWasDeleted(projectId: string, ownerId: string | undefined): Promise<boolean> {
+  try {
+    const snap = await getAdminDb().collection('projects').doc(projectId).get()
+    return !snap.exists || snap.data()?.createdBy !== ownerId
+  } catch (err) {
+    console.error('onEstimateResponded: project lookup failed', err)
+    return false
+  }
+}
+
 // Estimate approved/declined → email the contractor.
 export const onEstimateResponded = onDocumentUpdated(
   { document: 'estimates/{id}', secrets: [RESEND_API_KEY] },
   async (event) => {
     const before = event.data?.before.data() as { status?: string } | undefined
-    const after = event.data?.after.data() as { status?: string; createdBy?: string; customerName?: string; jobTypeName?: string; total?: number; customerResponse?: { signedName?: string; reason?: string } } | undefined
+    const after = event.data?.after.data() as { status?: string; createdBy?: string; customerName?: string; jobTypeName?: string; total?: number; projectId?: string; depositRequested?: boolean; depositAmount?: number; customerResponse?: { signedName?: string; reason?: string } } | undefined
     if (!after) return
     // Only fire on the FIRST transition into approved/declined (not later edits).
     const wasPending = before?.status === 'pending' || !before?.status
@@ -3293,10 +3306,21 @@ export const onEstimateResponded = onDocumentUpdated(
     const name = escapeHtml(after.customerName || 'your customer')
     const job = escapeHtml(after.jobTypeName || 'job')
     if (after.status === 'approved') {
+      const signedBy = `Signed by ${escapeHtml(after.customerResponse?.signedName || after.customerName || 'the customer')}.`
+      // If the contractor deleted this estimate's project, it is not in their
+      // Projects (the app leaves deleted projects deleted) and no deposit
+      // invoice was made for it, so the email says so instead.
+      const projectGone = after.projectId ? await projectWasDeleted(after.projectId, after.createdBy) : false
+      const whereItIs = projectGone
+        ? `<p style="font-size:14px;color:#64748b">${signedBy} This estimate's project was deleted, so it is not in your Projects. The signed estimate is under Estimates → Approved.</p>` +
+          (after.depositRequested && Number(after.depositAmount) > 0
+            ? `<p style="font-size:14px;color:#64748b">No deposit invoice was made for it, so the customer has nothing to pay yet. Their page tells them you'll send the deposit invoice.</p>`
+            : '')
+        : `<p style="font-size:14px;color:#64748b">${signedBy} It's now in your Projects, ready to go.</p>`
       await emailContractor(after.createdBy,
         `✅ ${after.customerName || 'A customer'} approved your estimate`,
         `<p style="font-size:15px">Good news — <strong>${name}</strong> just <strong>approved</strong> the ${job} estimate${after.total ? ` ($${Number(after.total).toLocaleString()})` : ''}.</p>
-         <p style="font-size:14px;color:#64748b">Signed by ${escapeHtml(after.customerResponse?.signedName || after.customerName || 'the customer')}. It's now in your Projects, ready to go.</p>`)
+         ${whereItIs}`)
     } else if (after.status === 'declined') {
       await emailContractor(after.createdBy,
         `${after.customerName || 'A customer'} declined your estimate`,

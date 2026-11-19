@@ -6,7 +6,7 @@ import { ai, aiMessage } from './mocks'
 import { call, callRaw, clearDb, failsWith, outbound, outboundReply, read, seed } from './harness'
 import {
   sendEstimateEmail, sendInvoiceEmail, generateAIQuote, generateThankYouLetter,
-  generateInvoiceCopy, exchangeFirebaseToken, onInvoicePaidAlert,
+  generateInvoiceCopy, exchangeFirebaseToken, onInvoicePaidAlert, onEstimateResponded,
 } from '../src/index'
 
 const USER = 'user_contractor'
@@ -287,5 +287,79 @@ describe('"invoice paid" email to the contractor', () => {
     const { subject, html } = sent()
     expect(subject).toBe('💵 Pat Doe will pay cash for invoice INV-2026-0007')
     expect(html).toContain('chose to pay invoice INV-2026-0007 ($1,200) in cash/in person.')
+  })
+})
+
+describe('"estimate approved" email to the contractor', () => {
+  const OWNER = 'user_est_owner'
+  const fire = (before: Record<string, unknown>, after: Record<string, unknown>) =>
+    (onEstimateResponded as unknown as { run: (e: unknown) => Promise<unknown> }).run({
+      params: { id: 'e1' },
+      data: { before: { data: () => before }, after: { data: () => after } },
+    })
+  const pending = { createdBy: OWNER, customerName: 'Pat Doe', jobTypeName: 'Deck repair', total: 1200, status: 'pending' }
+  const approve = (extra: Record<string, unknown> = {}) =>
+    fire({ ...pending, ...extra }, { ...pending, ...extra, status: 'approved', customerResponse: { action: 'approved', signedName: 'Pat Doe' } })
+  const sent = () => {
+    expect(outbound).toHaveLength(1)
+    const { subject, html, to } = outbound[0].body as { subject: string; html: string; to: string[] }
+    expect(to).toEqual(['owner@example.test'])
+    expect(subject).toBe('✅ Pat Doe approved your estimate')
+    expect(html).toContain('just <strong>approved</strong> the Deck repair estimate ($1,200).')
+    expect(html).toContain('Signed by Pat Doe.')
+    return html
+  }
+  beforeEach(async () => { await seed(`users/${OWNER}`, { businessEmail: 'owner@example.test', businessName: 'Owner Co' }) })
+
+  it('a job that is in Projects says so, as before', async () => {
+    await seed('projects/p1', { createdBy: OWNER, status: 'estimated' })
+    await approve({ projectId: 'p1' })
+    const html = sent()
+    expect(html).toContain("It's now in your Projects, ready to go.")
+    expect(html).not.toContain('deleted')
+  })
+
+  it('a deleted project is not called "in your Projects"; it says where the signed estimate is', async () => {
+    await approve({ projectId: 'gone' })
+    const html = sent()
+    expect(html).not.toContain('now in your Projects')
+    expect(html).toContain("This estimate's project was deleted, so it is not in your Projects. The signed estimate is under Estimates → Approved.")
+    expect(html).not.toContain('deposit')            // none was asked for
+    expect(await read('projects/gone')).toBeUndefined()   // and nothing is brought back
+  })
+
+  it('with a deposit asked, it says no deposit invoice was made and what the customer was told', async () => {
+    await approve({ projectId: 'gone', depositRequested: true, depositAmount: 300 })
+    const html = sent()
+    expect(html).toContain('No deposit invoice was made for it, so the customer has nothing to pay yet.')
+    expect(html).toContain("Their page tells them you'll send the deposit invoice.")
+  })
+
+  it('a project id that belongs to another contractor counts as deleted', async () => {
+    await seed('projects/theirs', { createdBy: 'someone_else', status: 'in_progress' })
+    await approve({ projectId: 'theirs' })
+    expect(sent()).toContain("This estimate's project was deleted")
+  })
+
+  it('an estimate with no project yet keeps the usual wording (the app makes its project)', async () => {
+    await approve()
+    expect(sent()).toContain("It's now in your Projects, ready to go.")
+  })
+
+  it('escapes what the customer typed', async () => {
+    await fire({ ...pending, projectId: 'gone' }, { ...pending, projectId: 'gone', status: 'approved', customerResponse: { action: 'approved', signedName: '<i>Pat</i>' } })
+    expect(String((outbound[0].body as { html: string }).html)).toContain('Signed by &lt;i&gt;Pat&lt;/i&gt;.')
+  })
+
+  it('the decline email is unchanged, and later edits send nothing', async () => {
+    await fire(pending, { ...pending, projectId: 'gone', status: 'declined', customerResponse: { action: 'declined', signedName: 'Pat Doe', reason: 'Too much' } })
+    expect(outbound).toHaveLength(1)
+    const { subject, html } = outbound[0].body as { subject: string; html: string }
+    expect(subject).toBe('Pat Doe declined your estimate')
+    expect(html).toContain('Reason: Too much')
+    expect(html).toContain('You can adjust it and re-send anytime.')
+    outbound.length = 0
+    await fire({ ...pending, status: 'approved' }, { ...pending, status: 'approved', total: 1300 })
+    expect(outbound).toHaveLength(0)
   })
 })
